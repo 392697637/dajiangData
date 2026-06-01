@@ -46,6 +46,7 @@ DECLARE
   v_orig_fence_type text;     -- 原始传入的围栏类型(数字)
   v_geojson_str text;         -- 传入的坐标GeoJSON字符串
   v_new_geom geometry;        -- 标准化处理后的几何对象
+  v_geojson_json jsonb;        -- lngLatAlt解析后的JSON对象，兼容Feature和直接Geometry
   v_new_geom_json text;       -- 新几何的GeoJSON格式字符串
   v_sql text;                 -- 动态执行SQL语句
   v_has_conflict boolean;     -- 是否存在冲突标记
@@ -90,8 +91,16 @@ BEGIN
   END IF;
 
   -- ===================== 3. 几何标准化处理 =====================
-  -- 将GeoJSON转为PostGIS几何对象，提取geometry节点
-  v_new_geom := ST_GeomFromGeoJSON((v_geojson_str::jsonb ->> 'geometry'));
+  -- 将GeoJSON字符串转为JSON对象。
+  -- lngLatAlt可能传Feature，也可能直接传Polygon/MultiPolygon等Geometry；这里统一兼容两种格式。
+  v_geojson_json := v_geojson_str::jsonb;
+  IF v_geojson_json ->> 'type' = 'Feature' THEN
+    -- Feature格式：几何数据位于geometry节点。
+    v_new_geom := ST_GeomFromGeoJSON(v_geojson_json ->> 'geometry');
+  ELSE
+    -- Geometry格式：整个JSON就是几何对象。
+    v_new_geom := ST_GeomFromGeoJSON(v_geojson_json::text);
+  END IF;
   -- 强制转为2D几何（剔除高度值） + 自动修复非法几何（自相交、不闭合等）
   v_new_geom := ST_MakeValid(ST_Force2D(v_new_geom));
   -- 设置坐标系为EPSG:4326（WGS84经纬度坐标系）
@@ -118,21 +127,24 @@ BEGIN
   IF v_fence_type = '3' THEN
     -- 拼接动态SQL：优先查询项目专属围栏表
     IF project_id IS NOT NULL AND project_id <> '' THEN
-      -- 使用format拼接表名，防止SQL注入，查询与当前几何相交的禁飞区/管控区
+      -- 使用format的%L返回表名文本，%I安全引用动态项目表名。
+      -- 项目专属表字段名为 fence_type，用于判断冲突围栏类型。
       v_sql := format(
-        'SELECT ''gis_electric_fence_%s'', fencetype, ST_AsGeoJSON(geom),
+        'SELECT %L, fence_type, ST_AsGeoJSON(geom),
          ST_Contains(ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326), $1) as is_contains
-         FROM gis_electric_fence_%s
-         WHERE fencetype IN (''1'',''2'')
+         FROM %I
+         WHERE fence_type IN (''1'',''2'')
          AND ST_Intersects($1, ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326))',
-        project_id, project_id
+        'gis_electric_fence_' || project_id,
+        'gis_electric_fence_' || project_id
       );
     ELSE
       -- 无项目ID时，查询公共电子围栏表
-      v_sql := 'SELECT ''gis_electric_fence'', fencetype, ST_AsGeoJSON(geom),
+      -- 公共项目围栏表同样使用 fence_type 字段。
+      v_sql := 'SELECT ''gis_electric_fence'', fence_type, ST_AsGeoJSON(geom),
                 ST_Contains(ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326), $1) as is_contains
                 FROM gis_electric_fence
-                WHERE fencetype IN (''1'',''2'')
+                WHERE fence_type IN (''1'',''2'')
                 AND ST_Intersects($1, ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326))';
     END IF;
 
@@ -195,20 +207,22 @@ BEGIN
   ELSIF v_fence_type = '2' THEN
     -- 拼接动态SQL：优先查询项目专属围栏表
     IF project_id IS NOT NULL AND project_id <> '' THEN
+      -- 项目专属表名动态生成，必须使用%I作为标识符引用；表内围栏类型字段为 fence_type。
       v_sql := format(
-        'SELECT ''gis_electric_fence_%s'', fencetype, ST_AsGeoJSON(geom),
+        'SELECT %L, fence_type, ST_AsGeoJSON(geom),
          ST_Contains(ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326), $1) as is_contains
-         FROM gis_electric_fence_%s
-         WHERE fencetype = ''1''
+         FROM %I
+         WHERE fence_type = ''1''
          AND ST_Intersects($1, ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326))',
-        project_id, project_id
+        'gis_electric_fence_' || project_id,
+        'gis_electric_fence_' || project_id
       );
     ELSE
       -- 无项目ID时查询公共围栏表
-      v_sql := 'SELECT ''gis_electric_fence'', fencetype, ST_AsGeoJSON(geom),
+      v_sql := 'SELECT ''gis_electric_fence'', fence_type, ST_AsGeoJSON(geom),
                 ST_Contains(ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326), $1) as is_contains
                 FROM gis_electric_fence
-                WHERE fencetype = ''1''
+                WHERE fence_type = ''1''
                 AND ST_Intersects($1, ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326))';
     END IF;
 
@@ -311,6 +325,10 @@ $$;
 --   msg                text        详细提示信息（区分相交/包含 + 中文名称）
 --   new_geom           text        标准化后的新围栏几何JSON
 --   conflict_geom      text        冲突围栏的几何JSON
+-- 调用说明：
+--   1. fenceType：1=禁飞区，2=管控区，3=试飞区
+--   2. lngLatAlt：支持GeoJSON Feature，也支持直接传Polygon/MultiPolygon等Geometry字符串
+--   3. project_id：用于校验项目专属围栏表 gis_electric_fence_{project_id} 及业务表 bo_electric_fence
 -- =============================================
 SELECT * FROM gis_check_electric_fence (
 '{"projectId":"2c95908e958f3b75019593551f520126",
@@ -328,7 +346,7 @@ SELECT * FROM gis_check_electric_fence (
 '2c95908e958f3b75019593551f520126'
 );
 
--- 示例：新增试飞区(3)，几何为北京全域矩形
+-- 示例：新增试飞区(3)，直接传Geometry格式的北京全域矩形
 SELECT * FROM gis_check_electric_fence(
   '{
     "fenceType":"3",

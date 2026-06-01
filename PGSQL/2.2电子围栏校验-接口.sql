@@ -14,6 +14,10 @@
 --   msg                text        详细提示信息（区分相交/包含 + 中文名称）
 --   new_geom           text        标准化后的新围栏几何JSON
 --   conflict_geom      text        冲突围栏的几何JSON
+-- 调用说明：
+--   1. fenceType：1=禁飞区，2=管控区，3=试飞区
+--   2. lngLatAlt：支持GeoJSON Feature，也支持直接传Polygon/MultiPolygon等Geometry字符串
+--   3. project_id：用于校验项目专属围栏表 gis_electric_fence_{project_id} 及业务表 bo_electric_fence
 -- =============================================
 SELECT * FROM gis_check_electric_fence (
 '{"projectId":"2c95908e958f3b75019593551f520126",
@@ -31,7 +35,7 @@ SELECT * FROM gis_check_electric_fence (
 '2c95908e958f3b75019593551f520126'
 );
 
--- 示例：新增试飞区(3)，几何为北京全域矩形
+-- 示例：新增试飞区(3)，直接传Geometry格式的北京全域矩形
 SELECT * FROM gis_check_electric_fence(
   '{
     "fenceType":"3",
