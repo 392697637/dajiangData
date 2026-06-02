@@ -382,18 +382,19 @@ SELECT * FROM public.gis_electric_fence_check_line('{
 -- ====================================================================
 -- 函数名称： gis_electric_fence_check_point
 -- 函数功能： 无人机定位点 3D 电子围栏碰撞检测（无缓冲，纯原始围栏判断）
--- 函数描述： 1. 传入 经纬度+高度（支持2D/3D点）
+-- 函数描述： 1. 传入 项目ID + 点的GeoJSON（支持Feature和Point格式）
 --            2. 高度=0（默认）：仅执行2D平面包含判断
 --            3. 高度>0：执行3D立体包含判断（Z从0到围栏height）
---            4. 只查询禁飞区、启用状态、未删除的有效围栏
---            5. 返回标准格式结果集，与航线检测函数完全通用，前端可直接渲染
+--            4. 项目ID不为空时查询 gis_electric_fence_{project_id} 表（注意表不存在的情况）
+--            5. 项目ID为空时查询 bo_electric_fence 表
+--            6. 只查询禁飞区、启用状态、未删除的有效围栏
+--            7. 返回标准格式结果集，与航线检测函数完全通用，前端可直接渲染
 -- 函数说明： 依赖PostGIS空间扩展，坐标系默认使用WGS84(4326)
 -- 参数说明：
---   p_lon       double precision  输入参数：经度（WGS84，必填）
---   p_lat       double precision  输入参数：纬度（WGS84，必填）
---   p_z         double precision  输入参数：高度/海拔（选填，默认0）
+--   p_project_id    text            输入参数：项目ID（可选），为空则查询公共表
+--   p_point_geojson text            输入参数：点的GeoJSON字符串（必填，支持Feature和Point格式）
 -- 返回值： 标准TABLE结构，与航线检测函数完全一致
---   code      integer    状态码：200=执行成功 400=参数错误 500=执行异常
+--   code      integer    状态码：200=执行成功 201=不在禁飞区 400=参数错误 500=执行异常
 --   msg       varchar    状态描述信息
 --   id        varchar(32) 围栏ID
 --   geom_geojson json    原始围栏几何的GeoJSON
@@ -405,13 +406,12 @@ SELECT * FROM public.gis_electric_fence_check_line('{
 -- ====================================================================================
 
 -- 删除函数
-DROP FUNCTION IF EXISTS public.gis_electric_fence_check_point(double precision, double precision, double precision);
+DROP FUNCTION IF EXISTS public.gis_electric_fence_check_point(text, text);
 
 -- 创建函数
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_point(
-    p_lon double precision,
-    p_lat double precision,
-    p_z double precision DEFAULT 0
+    p_project_id text,
+    p_point_geojson text
 )
 RETURNS TABLE (
     code integer,
@@ -423,63 +423,196 @@ LANGUAGE plpgsql
 STABLE
 AS $$
 DECLARE
-    v_point geometry; -- 存储生成的空间点几何对象
+    v_point geometry;          -- 存储生成的空间点几何对象
+    v_geojson_json jsonb;      -- 解析后的GeoJSON对象
+    v_z double precision;      -- 高度值
+    v_table_name text;         -- 动态表名
+    v_sql text;                -- 动态SQL语句
+    v_table_exists boolean;    -- 表是否存在
+    v_found boolean;           -- 是否找到匹配的围栏
 BEGIN
     -- =============================================
-    -- 【400 参数错误】第一步：校验经纬度是否为空
+    -- 【400 参数错误】第一步：校验点GeoJSON是否为空
     -- =============================================
-    IF p_lon IS NULL OR p_lat IS NULL THEN
+    IF p_point_geojson IS NULL OR p_point_geojson = '' THEN
         RETURN QUERY SELECT
-            400, '经纬度不能为空'::varchar,
+            400, '点的GeoJSON不能为空'::varchar,
             NULL::varchar, NULL::json;
         RETURN;
     END IF;
 
     -- =============================================
-    -- 【400 参数错误】第二步：校验经纬度是否在合法范围内
+    -- 解析GeoJSON字符串
     -- =============================================
-    IF p_lon < -180 OR p_lon > 180 OR p_lat < -90 OR p_lat > 90 THEN
+    BEGIN
+        v_geojson_json := p_point_geojson::jsonb;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN QUERY SELECT
+                400, '点的GeoJSON格式错误'::varchar,
+                NULL::varchar, NULL::json;
+            RETURN;
+    END;
+
+    -- =============================================
+    -- 从GeoJSON中提取点几何和高度
+    -- =============================================
+    BEGIN
+        IF v_geojson_json ->> 'type' = 'Feature' THEN
+            -- Feature格式
+            v_point := ST_GeomFromGeoJSON(v_geojson_json ->> 'geometry');
+            -- 尝试从Feature的properties或几何的Z坐标获取高度
+            v_z := COALESCE(
+                (v_geojson_json -> 'properties' ->> 'z')::double precision,
+                (v_geojson_json -> 'properties' ->> 'height')::double precision,
+                ST_Z(v_point),
+                0
+            );
+        ELSE
+            -- 直接Geometry格式
+            v_point := ST_GeomFromGeoJSON(v_geojson_json::text);
+            v_z := COALESCE(ST_Z(v_point), 0);
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN QUERY SELECT
+                400, '点的GeoJSON解析失败'::varchar,
+                NULL::varchar, NULL::json;
+            RETURN;
+    END;
+
+    -- =============================================
+    -- 校验点类型
+    -- =============================================
+    IF ST_GeometryType(v_point) NOT IN ('ST_Point') THEN
         RETURN QUERY SELECT
-            400, '经纬度超出合法范围'::varchar,
+            400, 'GeoJSON必须是Point类型'::varchar,
             NULL::varchar, NULL::json;
         RETURN;
     END IF;
 
     -- =============================================
-    -- 构建2D空间点（带WGS84坐标系）
+    -- 标准化几何（设置坐标系）
     -- =============================================
-    v_point := ST_SetSRID(ST_MakePoint(p_lon, p_lat), 4326);
+    v_point := ST_SetSRID(ST_Force2D(v_point), 4326);
 
     -- =============================================
-    -- 核心查询：检测点是否在有效禁飞区内
-    -- 规则：
-    -- 1. 必须在围栏平面内
-    -- 2. 高度=0：不校验高度
-    -- 3. 高度>0：必须 ≤ 围栏高度
+    -- 构建动态表名和SQL
     -- =============================================
-    RETURN QUERY
-    SELECT
-        200 AS code,
-        '当前位置在禁飞区内'::varchar AS msg,
-        f.id,
-        ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
-    FROM bo_electric_fence f
-    WHERE
-        f.fence_type = '1'        -- 围栏类型：禁飞区
-        AND f.status = '1'        -- 状态：启用
-        AND f.del_flag = false    -- 未删除
-        AND f.height >= 0         -- 围栏高度合法
-        AND ST_Contains(ST_SetSRID(f.geom, 4326), v_point) -- 平面包含判断
-        AND (
-            p_z = 0
-            OR
-            (p_z > 0 AND p_z <= COALESCE(f.height, 0))
-        );
+    v_found := false;
+
+    -- 构建最终的查询SQL
+    v_sql := '';
+
+    IF p_project_id IS NOT NULL AND p_project_id <> '' THEN
+        -- 有项目ID，先检查项目表是否存在
+        v_table_name := 'gis_electric_fence_' || p_project_id;
+
+        -- 检查表是否存在
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'public'
+            AND table_name = v_table_name
+        ) INTO v_table_exists;
+
+        IF v_table_exists THEN
+            -- 项目表存在，使用UNION ALL连接项目表和公共表
+            v_sql := format('
+                SELECT
+                    200 AS code,
+                    ''当前位置在禁飞区内''::varchar AS msg,
+                    f.id::varchar(32),
+                    ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
+                FROM %I f
+                WHERE
+                    f.fence_type = ''1''
+                    AND f.height >= 0
+                    AND ST_Contains(ST_SetSRID(f.geom, 4326), $1)
+                    AND (
+                        $2 = 0
+                        OR
+                        ($2 > 0 AND $2 <= COALESCE(f.height, 0))
+                    )
+                UNION ALL
+                SELECT
+                    200 AS code,
+                    ''当前位置在禁飞区内''::varchar AS msg,
+                    f.id::varchar(32),
+                    ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
+                FROM bo_electric_fence f
+                WHERE
+                    f.fence_type = ''1''
+                    AND f.status = ''1''
+                    AND f.del_flag = false
+                    AND f.height >= 0
+                    AND ST_Contains(ST_SetSRID(f.geom, 4326), $1)
+                    AND (
+                        $2 = 0
+                        OR
+                        ($2 > 0 AND $2 <= COALESCE(f.height, 0))
+                    )',
+                v_table_name
+            );
+        ELSE
+            -- 项目表不存在，只查询公共表
+            v_sql := '
+                SELECT
+                    200 AS code,
+                    ''当前位置在禁飞区内''::varchar AS msg,
+                    f.id::varchar(32),
+                    ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
+                FROM bo_electric_fence f
+                WHERE
+                    f.fence_type = ''1''
+                    AND f.status = ''1''
+                    AND f.del_flag = false
+                    AND f.height >= 0
+                    AND ST_Contains(ST_SetSRID(f.geom, 4326), $1)
+                    AND (
+                        $2 = 0
+                        OR
+                        ($2 > 0 AND $2 <= COALESCE(f.height, 0))
+                    )';
+        END IF;
+
+        -- 执行统一的查询
+        RETURN QUERY EXECUTE v_sql USING v_point, v_z;
+
+        -- 检查是否找到结果
+        IF FOUND THEN
+            v_found := true;
+        END IF;
+    ELSE
+        -- 没有项目ID，只查询公共表
+        RETURN QUERY
+        SELECT
+            200 AS code,
+            '当前位置在禁飞区内'::varchar AS msg,
+            f.id::varchar(32),
+            ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
+        FROM bo_electric_fence f
+        WHERE
+            f.fence_type = '1'        -- 围栏类型：禁飞区
+            AND f.status = '1'        -- 状态：启用
+            AND f.del_flag = false    -- 未删除
+            AND f.height >= 0         -- 围栏高度合法
+            AND ST_Contains(ST_SetSRID(f.geom, 4326), v_point) -- 平面包含判断
+            AND (
+                v_z = 0
+                OR
+                (v_z > 0 AND v_z <= COALESCE(f.height, 0))
+            );
+
+        -- 检查是否找到结果
+        IF FOUND THEN
+            v_found := true;
+        END IF;
+    END IF;
 
     -- =============================================
     -- 【201 成功】未检测到闯入任何禁飞区
     -- =============================================
-    IF NOT FOUND THEN
+    IF NOT v_found THEN
         RETURN QUERY SELECT
             201, '当前位置不在禁飞区内'::varchar,
             NULL::varchar, NULL::json;
@@ -499,8 +632,28 @@ $$;
 
  
 -- 函数调用示例=============================================
-SELECT * FROM gis_electric_fence_check_point(113.405861, 34.769437,10000);
+-- 示例1：有项目ID，查询项目表，使用Point格式
+SELECT * FROM gis_electric_fence_check_point(
+    '2c95908e958f3b75019593551f520126',
+    '{"type":"Point","coordinates":[113.405861,34.769437,10000]}'
+);
 
-SELECT * FROM gis_electric_fence_check_point(113.405861, 34.769437);
+-- 示例2：有项目ID，查询项目表，使用Feature格式
+SELECT * FROM gis_electric_fence_check_point(
+    '2c95908e958f3b75019593551f520126',
+    '{"type":"Feature","geometry":{"type":"Point","coordinates":[113.405861,34.769437]},"properties":{"z":10000}}'
+);
+
+-- 示例3：无项目ID，查询公共表
+SELECT * FROM gis_electric_fence_check_point(
+    '',
+    '{"type":"Point","coordinates":[113.405861,34.769437,10000]}'
+);
+
+-- 示例4：无项目ID（NULL），查询公共表
+SELECT * FROM gis_electric_fence_check_point(
+    NULL,
+    '{"type":"Point","coordinates":[113.405861,34.769437]}'
+);
  
  
