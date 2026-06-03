@@ -32,7 +32,8 @@ DROP FUNCTION IF EXISTS gis_astar_3d_flight_plan(
  * 所属模块：GIS 空间三维路径规划 / 无人机自动驾驶航线生成
  * 依赖环境：PostgreSQL + PostGIS（支持PointZ/LineStringZ/3D距离计算）
  * 依赖表：
- *   1. gis_grid_nodes   三维空间网格节点表（包含 zone_type 字段，'禁飞区' 表示不可通行）
+ *   1. gis_grid_nodes / gis_grid_nodes_{项目ID}
+ *      三维空间网格节点表（包含 zone_type 字段，'禁飞区' 表示不可通行）
  *   2. gis_flight_paths 飞行航线结果表（存储规划好的航线数据）
  *   3. bo_electric_fence 禁飞区表（用于边相交性动态检查）
  *
@@ -154,6 +155,8 @@ DECLARE
     -- ====================== 算法控制标志 ======================
     -- 是否启用A*算法进行路径规划（true=启用，false=直接直线）
     v_use_astar     BOOLEAN := false;
+    -- 实际参与本次规划的网格表名；优先使用项目网格表 gis_grid_nodes_{项目ID}
+    v_grid_table     TEXT;
     
     -- ====================== 边检查辅助变量 ======================
     v_edge_line     geometry(LineStringZ,4326);   -- 节点间的线段几何
@@ -185,18 +188,42 @@ BEGIN
     END IF;
 
     -- ====================== 3. 判断是否满足A*算法执行条件 ======================
-    -- 查找起点最近的 可通行网格（非禁飞区、非管控区）
-    SELECT id INTO v_start_id 
-    FROM gis_grid_nodes 
-    WHERE zone_type IS NULL OR zone_type = '适飞区'
-    ORDER BY geom <-> v_start_pt 
-    LIMIT 1;
-    -- 查找终点最近的 可通行网格（非禁飞区、非管控区）
-    SELECT id INTO v_goal_id  
-    FROM gis_grid_nodes 
-     WHERE zone_type IS NULL OR zone_type = '适飞区'
-    ORDER BY geom <-> v_end_pt 
-LIMIT 1;
+    -- 网格表选择规则：
+    -- 1. project_id不为空且项目网格表 gis_grid_nodes_{项目ID} 存在 → 使用项目网格表
+    -- 2. 项目网格表不存在但公共表 gis_grid_nodes 存在 → 使用公共表
+    -- 3. 两者都不存在 → 不启用A*，直接走直线兜底
+    IF p_project_id IS NOT NULL
+       AND trim(p_project_id) <> ''
+       AND to_regclass(format('%I.%I', 'public', 'gis_grid_nodes_' || trim(p_project_id))) IS NOT NULL THEN
+        v_grid_table := 'gis_grid_nodes_' || trim(p_project_id);
+    ELSIF to_regclass('public.gis_grid_nodes') IS NOT NULL THEN
+        v_grid_table := 'gis_grid_nodes';
+    ELSE
+        v_grid_table := NULL;
+        RAISE NOTICE '【调试】未找到可用网格表，直接返回直线兜底航线';
+    END IF;
+
+    IF v_grid_table IS NOT NULL THEN
+        -- 查找起点最近的 可通行网格（非禁飞区、非管控区）
+        EXECUTE format('
+            SELECT id
+            FROM %I
+            WHERE zone_type IS NULL OR zone_type = ''适飞区''
+            ORDER BY geom <-> $1
+            LIMIT 1', v_grid_table)
+        INTO v_start_id
+        USING v_start_pt;
+
+        -- 查找终点最近的 可通行网格（非禁飞区、非管控区）
+        EXECUTE format('
+            SELECT id
+            FROM %I
+            WHERE zone_type IS NULL OR zone_type = ''适飞区''
+            ORDER BY geom <-> $1
+            LIMIT 1', v_grid_table)
+        INTO v_goal_id
+        USING v_end_pt;
+    END IF;
 
     -- A*启用条件：
     --   (1) 起止点都找到有效网格节点
@@ -204,11 +231,16 @@ LIMIT 1;
     --   (3) 网格表有可通行网格（确保存在数据）
     IF v_start_id IS NOT NULL
        AND v_goal_id IS NOT NULL
-       AND EXISTS(SELECT 1 FROM gis_grid_nodes WHERE id = v_start_id AND (zone_type IS NULL OR zone_type = '适飞区'))
-       AND EXISTS(SELECT 1 FROM gis_grid_nodes WHERE id = v_goal_id AND (zone_type IS NULL OR zone_type = '适飞区'))
-       AND (SELECT COUNT(*) FROM gis_grid_nodes WHERE zone_type IS NULL OR zone_type = '适飞区') > 0 THEN
+       AND v_grid_table IS NOT NULL THEN
         -- 所有条件满足，启用A*寻路
-        v_use_astar := true;
+        EXECUTE format('
+            SELECT
+                EXISTS(SELECT 1 FROM %I WHERE id = $1 AND (zone_type IS NULL OR zone_type = ''适飞区''))
+                AND EXISTS(SELECT 1 FROM %I WHERE id = $2 AND (zone_type IS NULL OR zone_type = ''适飞区''))
+                AND EXISTS(SELECT 1 FROM %I WHERE zone_type IS NULL OR zone_type = ''适飞区'')',
+            v_grid_table, v_grid_table, v_grid_table)
+        INTO v_use_astar
+        USING v_start_id, v_goal_id;
     ELSE
         v_use_astar := false;
     END IF;
@@ -267,20 +299,20 @@ LIMIT 1;
     ) ON COMMIT DELETE ROWS;
 
     -- 获取起止点所在网格的X/Y索引坐标，用于限定搜索范围（缩小计算量）
-    SELECT x INTO v_min_x FROM gis_grid_nodes WHERE id = v_start_id;
-    SELECT x INTO v_max_x FROM gis_grid_nodes WHERE id = v_goal_id;
-    SELECT y INTO v_min_y FROM gis_grid_nodes WHERE id = v_start_id;
-    SELECT y INTO v_max_y FROM gis_grid_nodes WHERE id = v_goal_id;
+    EXECUTE format('SELECT x FROM %I WHERE id = $1', v_grid_table) INTO v_min_x USING v_start_id;
+    EXECUTE format('SELECT x FROM %I WHERE id = $1', v_grid_table) INTO v_max_x USING v_goal_id;
+    EXECUTE format('SELECT y FROM %I WHERE id = $1', v_grid_table) INTO v_min_y USING v_start_id;
+    EXECUTE format('SELECT y FROM %I WHERE id = $1', v_grid_table) INTO v_max_y USING v_goal_id;
 
     -- 扩大搜索范围（向外扩展10个网格），避免路径贴边导致无法通行
     -- 先确定原始范围（确保min <= max），再向外扩展
-    v_min_x := least(v_min_x, v_max_x);
-    v_max_x := greatest(v_min_x, v_max_x);
+    SELECT least(v_min_x, v_max_x), greatest(v_min_x, v_max_x)
+    INTO v_min_x, v_max_x;
     v_min_x := v_min_x - 10;
     v_max_x := v_max_x + 10;
     
-    v_min_y := least(v_min_y, v_max_y);
-    v_max_y := greatest(v_min_y, v_max_y);
+    SELECT least(v_min_y, v_max_y), greatest(v_min_y, v_max_y)
+    INTO v_min_y, v_max_y;
     v_min_y := v_min_y - 10;
     v_max_y := v_max_y + 10;
 
@@ -291,10 +323,10 @@ LIMIT 1;
         SELECT id, x, y, z, geom,
                true,
                0,0,0,NULL
-        FROM gis_grid_nodes
+        FROM %I
         WHERE x BETWEEN %s AND %s AND y BETWEEN %s AND %s
           AND (zone_type IS NULL OR zone_type = ''适飞区'')
-    ', v_min_x, v_max_x, v_min_y, v_max_y);
+    ', v_grid_table, v_min_x, v_max_x, v_min_y, v_max_y);
 
     -- 在临时表中重新匹配最近的起点/终点网格（确保在搜索范围内）
     SELECT id INTO v_start_id FROM tmp_grid ORDER BY geom <-> v_start_pt LIMIT 1;
@@ -419,20 +451,24 @@ LIMIT 1;
             v_node_alt DOUBLE PRECISION;
         BEGIN
             RAISE NOTICE '【A*路径坐标】';
-            FOR v_node_idx IN 1..array_length(v_path_ids, 1) LOOP
-                SELECT ST_X(geom), ST_Y(geom), ST_Z(geom) 
-                INTO v_node_lon, v_node_lat, v_node_alt
-                FROM tmp_grid WHERE id = v_path_ids[v_node_idx];
-                RAISE NOTICE '节点%: (经度=%, 纬度=%, 高度=%)', 
-                    v_node_idx, v_node_lon, v_node_lat, v_node_alt;
-            END LOOP;
+            IF COALESCE(array_length(v_path_ids, 1), 0) > 0 THEN
+                FOR v_node_idx IN 1..array_length(v_path_ids, 1) LOOP
+                    SELECT ST_X(geom), ST_Y(geom), ST_Z(geom)
+                    INTO v_node_lon, v_node_lat, v_node_alt
+                    FROM tmp_grid WHERE id = v_path_ids[v_node_idx];
+                    RAISE NOTICE '节点%: (经度=%, 纬度=%, 高度=%)',
+                        v_node_idx, v_node_lon, v_node_lat, v_node_alt;
+                END LOOP;
+            ELSE
+                RAISE NOTICE '【A*路径坐标】未生成有效路径节点';
+            END IF;
         END;
     END;
 
     -- ====================== A* 寻路失败（路径点数量 < 2）→ 降级为直线航线 ======================
     -- 路径点少于2说明没有有效路径（可能起点终点不连通，或搜索失败），此时使用直线航线
-    IF array_length(v_path_ids, 1) < 1 THEN
-        DROP TABLE tmp_grid;-- 清理临时表
+    IF COALESCE(array_length(v_path_ids, 1), 0) < 1 THEN
+        DROP TABLE IF EXISTS tmp_grid;-- 清理临时表
         -- 生成两点直线航线（与分支1逻辑相同）
         v_path_line := ST_MakeLine(v_start_pt, v_end_pt);
         v_final_path := v_path_line;
@@ -606,7 +642,7 @@ LIMIT 1;
         p_height_mode
     ) RETURNING id INTO v_path_id;
      -- 删除临时表，释放资源
-    DROP TABLE tmp_grid;
+    DROP TABLE IF EXISTS tmp_grid;
 
     -- 返回最终生成的航线记录
     RETURN QUERY SELECT * FROM gis_flight_paths WHERE id = v_path_id;
@@ -614,7 +650,7 @@ LIMIT 1;
 -- ====================== 全局异常捕获：任何错误都返回直线航线（保证服务不崩溃） ======================
 EXCEPTION WHEN OTHERS THEN
       -- 确保临时表被删除（如果存在）
-    RAISE NOTICE '【调试】自动返回直线兜底航线'; -- 异常兜底：生成两点直线航线（与分支1完全相同）
+    RAISE NOTICE '【调试】自动返回直线兜底航线，触发原因：%（SQLSTATE=%）', SQLERRM, SQLSTATE;
     DROP TABLE IF EXISTS tmp_grid;
 
     -- 异常兜底：生成两点直线航线（与分支1完全相同）
