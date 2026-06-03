@@ -1,10 +1,11 @@
 -- 删除旧函数（如果存在），避免函数定义冲突
 DROP FUNCTION IF EXISTS gis_check_electric_fence(jsonb, varchar);
+DROP FUNCTION IF EXISTS gis_check_electric_fence(varchar, text, text);
 
 -- =============================================
 -- 函数名称： gis_check_electric_fence
 -- 函数功能： 电子围栏空间冲突校验（禁飞区/管控区/试飞区互斥规则校验）
--- 函数描述： 1. 接收JSON格式围栏类型+坐标信息
+-- 函数描述： 1. 接收项目ID、围栏类型、坐标GeoJSON三个独立参数
 --            2. 自动标准化几何数据（2D、修复、设置坐标系）
 --            3. 按类型执行空间冲突校验：
 --               - 禁飞区(1)：无需校验，直接通过
@@ -14,8 +15,9 @@ DROP FUNCTION IF EXISTS gis_check_electric_fence(jsonb, varchar);
 --            5. 返回冲突详情：类型、表名、几何、提示文案
 -- 函数说明： 依赖PostGIS空间扩展，坐标系使用WGS84(4326)
 -- 参数说明：
---   param_json     jsonb       入参JSON：包含围栏类型、坐标信息
---   project_id     varchar     项目ID（可选），用于区分项目专属围栏表
+--   p_project_id    varchar     项目ID（可选），用于区分项目专属围栏表
+--   p_fence_type    text        围栏类型：1=禁飞区，2=管控区，3=试飞区
+--   p_lng_lat_alt   text        坐标GeoJSON字符串，支持Feature或直接Geometry
 -- 返回值： 标准TABLE结构
 --   code               integer     返回码：200成功，400参数错误，500空间冲突
 --   table_name         text        冲突对应的表名
@@ -27,8 +29,9 @@ DROP FUNCTION IF EXISTS gis_check_electric_fence(jsonb, varchar);
 -- 适用场景： 新增/编辑电子围栏前的空间合规性校验，防止区域重叠冲突
 -- =============================================
 CREATE OR REPLACE FUNCTION gis_check_electric_fence(
-  IN param_json jsonb,          -- 入参JSON：包含围栏类型、坐标信息
-  IN project_id varchar DEFAULT NULL  -- 项目ID（可选），用于区分项目专属围栏表
+  IN p_project_id varchar,      -- 入参1：项目ID（可选），用于区分项目专属围栏表
+  IN p_fence_type text,         -- 入参2：围栏类型，1=禁飞区，2=管控区，3=试飞区
+  IN p_lng_lat_alt text         -- 入参3：坐标GeoJSON字符串，支持Feature或直接Geometry
 )
 RETURNS TABLE (
   code integer,           -- 返回码：200成功，400参数错误，500空间冲突
@@ -57,11 +60,11 @@ BEGIN
   v_has_conflict := false;
 
   -- ===================== 1. 解析入参 =====================
-  -- 从JSON中提取围栏类型并去除前后空格
-  v_orig_fence_type := trim((param_json ->> 'fenceType')::text);
+  -- 围栏类型从第二个参数直接传入，去除前后空格后参与规则判断。
+  v_orig_fence_type := trim(p_fence_type);
   v_fence_type := v_orig_fence_type;
-  -- 从JSON中提取坐标GeoJSON字符串并去除前后空格
-  v_geojson_str := trim((param_json ->> 'lngLatAlt')::text);
+  -- 坐标GeoJSON从第三个参数直接传入，兼容Feature和直接Geometry。
+  v_geojson_str := trim(p_lng_lat_alt);
 
   -- ===================== 2. 基础参数非空校验 =====================
   -- 校验围栏类型是否为空
@@ -126,7 +129,7 @@ BEGIN
   -- 业务规则：试飞区禁止与禁飞区(1)、管控区(2)发生相交/包含关系
   IF v_fence_type = '3' THEN
     -- 拼接动态SQL：优先查询项目专属围栏表
-    IF project_id IS NOT NULL AND project_id <> '' THEN
+    IF p_project_id IS NOT NULL AND trim(p_project_id) <> '' THEN
       -- 使用format的%L返回表名文本，%I安全引用动态项目表名。
       -- 项目专属表字段名为 fence_type，用于判断冲突围栏类型。
       v_sql := format(
@@ -135,8 +138,8 @@ BEGIN
          FROM %I
          WHERE fence_type IN (''1'',''2'')
          AND ST_Intersects($1, ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326))',
-        'gis_electric_fence_' || project_id,
-        'gis_electric_fence_' || project_id
+        'gis_electric_fence_' || trim(p_project_id),
+        'gis_electric_fence_' || trim(p_project_id)
       );
     ELSE
       -- 无项目ID时，查询公共电子围栏表
@@ -179,7 +182,7 @@ BEGIN
               FROM bo_electric_fence
               WHERE fence_type IN (''1'',''2'') AND project_id = $2
               AND ST_Intersects($1, ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326))';
-    FOR table_name, conflict_fence_type, conflict_geom, v_is_contains IN EXECUTE v_sql USING v_new_geom, project_id
+    FOR table_name, conflict_fence_type, conflict_geom, v_is_contains IN EXECUTE v_sql USING v_new_geom, p_project_id
     LOOP
       v_has_conflict := true;
       code := 500;
@@ -206,7 +209,7 @@ BEGIN
   -- 业务规则：管控区禁止与禁飞区(1)发生相交/包含关系
   ELSIF v_fence_type = '2' THEN
     -- 拼接动态SQL：优先查询项目专属围栏表
-    IF project_id IS NOT NULL AND project_id <> '' THEN
+    IF p_project_id IS NOT NULL AND trim(p_project_id) <> '' THEN
       -- 项目专属表名动态生成，必须使用%I作为标识符引用；表内围栏类型字段为 fence_type。
       v_sql := format(
         'SELECT %L, fence_type, ST_AsGeoJSON(geom),
@@ -214,8 +217,8 @@ BEGIN
          FROM %I
          WHERE fence_type = ''1''
          AND ST_Intersects($1, ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326))',
-        'gis_electric_fence_' || project_id,
-        'gis_electric_fence_' || project_id
+        'gis_electric_fence_' || trim(p_project_id),
+        'gis_electric_fence_' || trim(p_project_id)
       );
     ELSE
       -- 无项目ID时查询公共围栏表
@@ -250,7 +253,7 @@ BEGIN
               FROM bo_electric_fence
               WHERE fence_type = ''1'' AND project_id = $2
               AND ST_Intersects($1, ST_SetSRID(ST_MakeValid(ST_Force2D(geom)), 4326))';
-    FOR table_name, conflict_fence_type, conflict_geom, v_is_contains IN EXECUTE v_sql USING v_new_geom, project_id
+    FOR table_name, conflict_fence_type, conflict_geom, v_is_contains IN EXECUTE v_sql USING v_new_geom, p_project_id
     LOOP
       v_has_conflict := true;
       code := 500;
@@ -314,8 +317,9 @@ $$;
 -- 函数名称： gis_check_electric_fence
 -- 函数功能： 电子围栏空间冲突校验（禁飞区/管控区/试飞区互斥规则校验）
 -- 参数说明：
---   param_json     jsonb       入参JSON：包含围栏类型、坐标信息
---   project_id     varchar     项目ID（可选），用于区分项目专属围栏表
+--   p_project_id    varchar     项目ID（可选），用于区分项目专属围栏表
+--   p_fence_type    text        围栏类型：1=禁飞区，2=管控区，3=试飞区
+--   p_lng_lat_alt   text        坐标GeoJSON字符串，支持Feature或直接Geometry
 -- 返回值： 标准TABLE结构
 --   code               integer     返回码：200成功，400参数错误，500空间冲突
 --   table_name         text        冲突对应的表名
@@ -325,75 +329,20 @@ $$;
 --   new_geom           text        标准化后的新围栏几何JSON
 --   conflict_geom      text        冲突围栏的几何JSON
 -- 调用说明：
---   1. fenceType：1=禁飞区，2=管控区，3=试飞区
---   2. lngLatAlt：支持GeoJSON Feature，也支持直接传Polygon/MultiPolygon等Geometry字符串
---   3. project_id：用于校验项目专属围栏表 gis_electric_fence_{project_id} 及业务表 bo_electric_fence
+--   1. 第一个参数：project_id，用于校验项目专属围栏表 gis_electric_fence_{project_id} 及业务表 bo_electric_fence
+--   2. 第二个参数：fenceType，1=禁飞区，2=管控区，3=试飞区
+--   3. 第三个参数：lngLatAlt，支持GeoJSON Feature，也支持直接传Polygon/MultiPolygon等Geometry字符串
 -- =============================================
-SELECT * FROM gis_check_electric_fence (
-'{"projectId":"2c95908e958f3b75019593551f520126",
-"name":"123",
-"fenceType":"3",
-"type":"1",
-"frequency":"1",
-"week":"",
-"day":"",
-"timePlans":[{"startTime":"00:00","endTime":"24:00","width":350,"left":0}],
-"lngLatAlt":"{\"type\":\"Feature\",\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[[[113.289609,34.951427,0],[113.290607,34.615358,0],[113.979944,34.596458,0],[114.013926,34.930172,0]]]},\"properties\":{}}",
-"height":120,"remark":"","area":"2412838531.27",
-"areaName":"河南省郑州市金水区南阳路街道河南省万里建设发展有限公司",
-"startTime":"2026-05-20","endTime":"2026-06-27"}'::jsonb,
-'2c95908e958f3b75019593551f520126'
-);
-
--- 示例：新增试飞区(3)，直接传Geometry格式的北京全域矩形
+-- 示例1：新增试飞区(3)，传Feature格式的项目范围。
 SELECT * FROM gis_check_electric_fence(
-  '{
-    "fenceType":"3",
-    "lngLatAlt":"{\"type\":\"Polygon\",\"coordinates\":[[[115.72,39.41],[117.51,39.41],[117.51,41.05],[115.72,41.05],[115.72,39.41]]]}"
-  }'::jsonb,'2c95908e958f3b75019593551f520126'
-);
- 
-
--- ========================================================================================校验电子围栏==========================================================================================
--- =============================================
--- 函数名称： gis_check_electric_fence
--- 函数功能： 电子围栏空间冲突校验（禁飞区/管控区/试飞区互斥规则校验）
--- 参数说明：
---   param_json     jsonb       入参JSON：包含围栏类型、坐标信息
---   project_id     varchar     项目ID（可选），用于区分项目专属围栏表
--- 返回值： 标准TABLE结构
---   code               integer     返回码：200成功，400参数错误，500空间冲突
---   table_name         text        冲突对应的表名
---   orig_fence_type    text        传入的原始围栏类型
---   conflict_fence_type text       冲突的围栏类型(数字)
---   msg                text        详细提示信息（区分相交/包含 + 中文名称）
---   new_geom           text        标准化后的新围栏几何JSON
---   conflict_geom      text        冲突围栏的几何JSON
--- 调用说明：
---   1. fenceType：1=禁飞区，2=管控区，3=试飞区
---   2. lngLatAlt：支持GeoJSON Feature，也支持直接传Polygon/MultiPolygon等Geometry字符串
---   3. project_id：用于校验项目专属围栏表 gis_electric_fence_{project_id} 及业务表 bo_electric_fence
--- =============================================
-SELECT * FROM gis_check_electric_fence (
-'{"projectId":"2c95908e958f3b75019593551f520126",
-"name":"123",
-"fenceType":"3",
-"type":"1",
-"frequency":"1",
-"week":"",
-"day":"",
-"timePlans":[{"startTime":"00:00","endTime":"24:00","width":350,"left":0}],
-"lngLatAlt":"{\"type\":\"Feature\",\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[[[113.289609,34.951427,0],[113.290607,34.615358,0],[113.979944,34.596458,0],[114.013926,34.930172,0]]]},\"properties\":{}}",
-"height":120,"remark":"","area":"2412838531.27",
-"areaName":"河南省郑州市金水区南阳路街道河南省万里建设发展有限公司",
-"startTime":"2026-05-20","endTime":"2026-06-27"}'::jsonb,
-'2c95908e958f3b75019593551f520126'
+  '2c95908e958f3b75019593551f520126',
+  '3',
+  '{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[113.289609,34.951427,0],[113.290607,34.615358,0],[113.979944,34.596458,0],[114.013926,34.930172,0]]]},"properties":{}}'
 );
 
--- 示例：新增试飞区(3)，直接传Geometry格式的北京全域矩形
+-- 示例2：新增试飞区(3)，直接传Geometry格式的北京全域矩形。
 SELECT * FROM gis_check_electric_fence(
-  '{
-    "fenceType":"3",
-    "lngLatAlt":"{\"type\":\"Polygon\",\"coordinates\":[[[115.72,39.41],[117.51,39.41],[117.51,41.05],[115.72,41.05],[115.72,39.41]]]}"
-  }'::jsonb,'2c95908e958f3b75019593551f520126'
+  '2c95908e958f3b75019593551f520126',
+  '3',
+  '{"type":"Polygon","coordinates":[[[115.72,39.41],[117.51,39.41],[117.51,41.05],[115.72,41.05],[115.72,39.41]]]}'
 );
