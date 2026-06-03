@@ -69,8 +69,9 @@ SELECT* FROM gis_electric_fence_project(
 -- 函数名称： gis_check_electric_fence
 -- 函数功能： 电子围栏空间冲突校验（禁飞区/管控区/试飞区互斥规则校验）
 -- 参数说明：
---   param_json     jsonb       入参JSON：包含围栏类型、坐标信息
---   project_id     varchar     项目ID（可选），用于区分项目专属围栏表
+--   p_project_id    varchar     项目ID（可选），用于区分项目专属围栏表
+--   p_fence_type    text        围栏类型：1=禁飞区，2=管控区，3=试飞区
+--   p_lng_lat_alt   text        坐标GeoJSON字符串，支持Feature或直接Geometry
 -- 返回值： 标准TABLE结构
 --   code               integer     返回码：200成功，400参数错误，500空间冲突
 --   table_name         text        冲突对应的表名
@@ -79,13 +80,16 @@ SELECT* FROM gis_electric_fence_project(
 --   msg                text        详细提示信息（区分相交/包含 + 中文名称）
 --   new_geom           text        标准化后的新围栏几何JSON
 --   conflict_geom      text        冲突围栏的几何JSON
+-- 调用说明：
+--   1. 第一个参数：project_id，用于校验项目专属围栏表 gis_electric_fence_{project_id} 及业务表 bo_electric_fence
+--   2. 第二个参数：fenceType，1=禁飞区，2=管控区，3=试飞区
+--   3. 第三个参数：lngLatAlt，支持GeoJSON Feature，也支持直接传Polygon/MultiPolygon等Geometry字符串
 -- =============================================
- 
+-- 示例1：新增试飞区(3)，传Feature格式的项目范围。
 SELECT * FROM gis_check_electric_fence(
-  '{
-    "fenceType":"3",
-    "lngLatAlt":"{\"type\":\"Polygon\",\"coordinates\":[[[115.72,39.41],[117.51,39.41],[117.51,41.05],[115.72,41.05],[115.72,39.41]]]}"
-  }'::jsonb,'2c95908e958f3b75019593551f520126'
+  '2c95908e958f3b75019593551f520126',
+  '3',
+  '{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[113.289609,34.951427,0],[113.290607,34.615358,0],[113.979944,34.596458,0],[114.013926,34.930172,0]]]},"properties":{}}'
 );
 -- ============================================================================刷新三维网格的电子围栏标记=================================================================================
 -- ==============================================

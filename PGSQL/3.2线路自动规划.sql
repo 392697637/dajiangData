@@ -528,6 +528,47 @@ BEGIN
     -- 5. 添加真实终点
     v_path_line := ST_AddPoint(v_path_line, v_end_pt);
 
+    -- ====================== 原始路径可视连线简化 ======================
+    -- 规则：
+    -- 1. 从第二个点开始，判断“当前点 -> 下下个点”的直连线是否穿越禁飞区/管控区。
+    -- 2. 若不穿越，则删除中间点，相当于把“第二点-第三点-第四点”简化为“第二点-第四点”。
+    -- 3. 删除后继续用当前点向新的下下个点校验，直到倒数第二个点为止。
+    -- 4. 若直连线穿越禁飞区/管控区，则保留中间点，并移动到下一个点继续判断。
+    DECLARE
+        v_simplify_idx INT := 2;                 -- 从第二个点开始校验
+        v_direct_line geometry(LineStringZ,4326);-- 当前点到下下个点的直连线
+        v_blocked BOOLEAN;                       -- 直连线是否穿越禁飞区/管控区
+    BEGIN
+        WHILE ST_NumPoints(v_path_line) >= 4
+              AND v_simplify_idx <= ST_NumPoints(v_path_line) - 2 LOOP
+
+            v_direct_line := ST_MakeLine(
+                ST_PointN(v_path_line, v_simplify_idx),
+                ST_PointN(v_path_line, v_simplify_idx + 2)
+            );
+
+            -- 仅判断禁飞区/管控区；不穿越则允许删除中间点。
+            SELECT EXISTS(
+                SELECT 1
+                FROM public.bo_electric_fence f
+                WHERE f.fence_type IN ('1', '2')
+                  AND f.status = '1'
+                  AND f.del_flag = false
+                  AND ST_Intersects(
+                      ST_SetSRID(ST_MakeValid(ST_Force2D(f.geom)), 4326),
+                      ST_Force2D(v_direct_line)
+                  )
+            ) INTO v_blocked;
+
+            IF NOT v_blocked THEN
+                -- PostGIS点序号是1-based，ST_RemovePoint索引是0-based；删除中间点 idx+1。
+                v_path_line := ST_RemovePoint(v_path_line, v_simplify_idx);
+            ELSE
+                v_simplify_idx := v_simplify_idx + 1;
+            END IF;
+        END LOOP;
+    END;
+
  -- ====================== 路径平滑插值（生成实际可飞行的平滑轨迹） ======================
     v_final_path := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
     DECLARE
