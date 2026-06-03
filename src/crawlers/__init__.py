@@ -17,10 +17,12 @@
 from .base import BaseCrawler
 from .dji import DJIFlySafeCrawler
 from .amap import AmapPOICrawler
+from .tianditu import TiandituPOICrawler
 
 # 定义公开导出的类列表
 __all__ = [
     'BaseCrawler',
     'DJIFlySafeCrawler',
-    'AmapPOICrawler'
+    'AmapPOICrawler',
+    'TiandituPOICrawler',
 ]

@@ -19,8 +19,10 @@ from .settings import (
     DEFAULT_LNG,
     DEFAULT_RADIUS,
     TIMEOUT,
+    REGION_CONFIG,
     DJI_CONFIG,
-    AMAP_CONFIG
+    AMAP_CONFIG,
+    TIANDITU_CONFIG,
 )
 
 # 定义公开导出的配置项列表
@@ -29,6 +31,8 @@ __all__ = [
     'DEFAULT_LNG',
     'DEFAULT_RADIUS',
     'TIMEOUT',
+    'REGION_CONFIG',
     'DJI_CONFIG',
-    'AMAP_CONFIG'
+    'AMAP_CONFIG',
+    'TIANDITU_CONFIG',
 ]

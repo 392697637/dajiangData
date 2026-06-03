@@ -95,9 +95,19 @@ class BaseCrawler:
             resp.raise_for_status()
             
             return resp
-        
+
+        except requests.exceptions.HTTPError as e:
+            detail = ""
+            if e.response is not None:
+                try:
+                    detail = e.response.text[:300]
+                except Exception:
+                    pass
+            if detail:
+                raise Exception("请求失败: {} | 响应: {}".format(str(e), detail))
+            raise Exception("请求失败: {}".format(str(e)))
         except requests.exceptions.RequestException as e:
-            raise Exception(f"请求失败: {str(e)}")
+            raise Exception("请求失败: {}".format(str(e)))
     
     def _save_json(self, data, filename):
         """

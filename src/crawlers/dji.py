@@ -32,11 +32,10 @@ API端点说明:
 import warnings
 import json
 import os
-import math
 
 # 导入基类和工具函数
 from .base import BaseCrawler
-from src.utils.geo import latlng_to_rectangle, parse_dji_response
+from src.utils.geo import latlng_to_rectangle, parse_dji_response, generate_grid_points
 
 # 忽略SSL验证警告
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
@@ -166,54 +165,6 @@ class DJIFlySafeCrawler(BaseCrawler):
         self.drone_model = drone_slug
         print("已设置无人机型号: {}".format(drone_slug))
     
-    def _generate_grid_points(self, lat_min, lat_max, lng_min, lng_max, grid_size_km):
-        """
-        生成网格中心点坐标
-        
-        将指定区域按指定网格大小分块，生成每个网格的中心点坐标。
-        
-        Args:
-            lat_min (float): 最小纬度（最南端）
-            lat_max (float): 最大纬度（最北端）
-            lng_min (float): 最小经度（最西端）
-            lng_max (float): 最大经度（最东端）
-            grid_size_km (float): 网格大小（公里）
-        
-        Returns:
-            list: 网格中心点坐标列表，每个元素为 (lat, lng, index)
-        """
-        # 使用平均纬度计算经度方向的距离
-        avg_lat = (lat_min + lat_max) / 2
-        lat_grid_count = int((lat_max - lat_min) * 111 / grid_size_km) + 1
-        lng_grid_count = int((lng_max - lng_min) * 111 * abs(math.cos(math.pi * avg_lat / 180.0)) / grid_size_km) + 1
-        
-        # 确保至少有1个网格
-        lat_grid_count = max(lat_grid_count, 1)
-        lng_grid_count = max(lng_grid_count, 1)
-        
-        print("生成网格: {} × {} = {} 个中心点".format(lng_grid_count, lat_grid_count, lng_grid_count * lat_grid_count))
-        
-        # 计算每个网格的间距
-        lat_step = (lat_max - lat_min) / lat_grid_count if lat_grid_count > 1 else 0
-        lng_step = (lng_max - lng_min) / lng_grid_count if lng_grid_count > 1 else 0
-        
-        # 生成网格中心点
-        points = []
-        index = 1
-        for lat_idx in range(lat_grid_count):
-            for lng_idx in range(lng_grid_count):
-                lat = lat_max - lat_idx * lat_step - lat_step / 2
-                lng = lng_min + lng_idx * lng_step + lng_step / 2
-                
-                # 确保坐标在边界内
-                lat = max(lat_min, min(lat_max, lat))
-                lng = max(lng_min, min(lng_max, lng))
-                
-                points.append((lat, lng, index))
-                index += 1
-        
-        return points
-    
     def crawl(self, lat=None, lng=None, radius=None, output_file=None):
         """
         爬取单个区域的DJI禁飞区数据
@@ -232,7 +183,6 @@ class DJIFlySafeCrawler(BaseCrawler):
         Raises:
             Exception: 请求失败、解析失败或数据异常时抛出异常
         """
-        import math
         from config import DEFAULT_LAT, DEFAULT_LNG, DEFAULT_RADIUS
         
         # 使用传入参数或默认值
@@ -310,8 +260,6 @@ class DJIFlySafeCrawler(BaseCrawler):
         Raises:
             Exception: 区域配置不存在或爬取失败时抛出异常
         """
-        import math
-        
         # 获取区域配置
         region_info = self.region_config.get(region_name)
         if not region_info:
@@ -331,7 +279,7 @@ class DJIFlySafeCrawler(BaseCrawler):
         print("=" * 70)
         
         # 生成网格中心点
-        grid_points = self._generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_km)
+        grid_points = generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_km)
         
         # 存储所有爬取的features
         all_features = []

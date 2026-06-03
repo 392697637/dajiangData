@@ -1,154 +1,99 @@
-# DJI禁飞区与高德POI爬虫
+# DJI禁飞区与POI爬虫
 
-一个用于爬取DJI禁飞区数据和高德POI数据的Python项目，采用模块化架构设计，支持多种数据源扩展。
+一个用于爬取 DJI 禁飞区数据、高德 POI 和天地图 POI 的 Python 项目，采用模块化架构，支持单点、矩形范围和区域分块三种爬取模式。
 
 ## 项目简介
 
-本项目提供了两个核心爬虫功能：
-- **DJI禁飞区爬虫**：爬取大疆无人机禁飞区/限飞区数据，输出标准GeoJSON格式
-- **高德POI爬虫**：爬取高德地图兴趣点(POI)数据，支持多种类型和关键词搜索
+本项目提供三个核心爬虫：
+
+| 爬虫 | 数据源 | 输出格式 | 是否需要 Key |
+|------|--------|----------|--------------|
+| **DJI禁飞区** | 大疆 FlySafe API | GeoJSON | 否 |
+| **高德POI** | 高德 Web 服务 API | JSON | 是 |
+| **天地图POI** | 天地图搜索 V2.0 API | JSON | 是 |
 
 ## 项目架构
 
 ```
 dajiangData/
-├── main.py                    # 命令行入口文件
-├── requirements.txt           # Python依赖列表
-├── README.md                  # 项目文档
-├── config/                    # 配置模块
-│   ├── __init__.py            # 配置导出
-│   └── settings.py            # 配置参数
-├── src/                       # 源代码
-│   ├── __init__.py            # 模块初始化
-│   ├── crawlers/              # 爬虫模块
-│   │   ├── __init__.py        # 爬虫导出
+├── main.py                    # 命令行入口
+├── requirements.txt           # Python 依赖
+├── README.md
+├── config/
+│   ├── __init__.py
+│   └── settings.py            # 全局配置（含区域边界、API Key）
+├── src/
+│   ├── crawlers/
 │   │   ├── base.py            # 爬虫基类
-│   │   ├── dji.py             # DJI禁飞区爬虫
-│   │   └── amap.py            # 高德POI爬虫
-│   └── utils/                 # 工具函数
-│       ├── __init__.py        # 工具导出
-│       └── geo.py             # 地理工具函数
-└── output/                    # 输出目录（自动创建）
-    ├── dji/                   # DJI禁飞区数据
-    └── amap/                  # 高德POI数据
+│   │   ├── dji.py             # DJI 禁飞区爬虫
+│   │   ├── amap.py            # 高德 POI 爬虫
+│   │   └── tianditu.py        # 天地图 POI 爬虫
+│   └── utils/
+│       └── geo.py             # 坐标转换、网格分块、范围格式化
+└── output/
+    ├── dji/                   # 禁飞区 GeoJSON
+    ├── amap/                  # 高德 POI JSON
+    └── tianditu/              # 天地图 POI JSON
 ```
-
-## 架构说明
-
-| 模块 | 说明 | 职责 |
-|------|------|------|
-| **main.py** | 入口文件 | 解析命令行参数，调用对应爬虫 |
-| **config/** | 配置模块 | 集中管理所有配置参数 |
-| **src/crawlers/** | 爬虫模块 | 实现具体的爬取逻辑 |
-| **src/utils/** | 工具模块 | 提供通用工具函数 |
-| **output/** | 输出目录 | 存储爬取结果文件 |
 
 ## 功能特性
 
-### DJI禁飞区爬虫
-- ✅ 无需认证，使用公开API
-- ✅ 支持动态获取无人机型号列表（72+型号）
-- ✅ 支持自定义坐标和搜索半径
-- ✅ 自动将圆形区域转换为多边形
-- ✅ 输出标准GeoJSON格式
-- ✅ 支持多种禁飞区级别筛选
-- ✅ 支持按省份/区域分块爬取（支持全国34个省份/直辖市/自治区/特别行政区）
+### DJI 禁飞区爬虫
+- 无需认证，使用公开 API
+- 支持 72+ 无人机型号
+- 支持单点爬取和省份/全国分块爬取
+- 输出标准 GeoJSON，自动处理圆形/多边形/子区域
 
-### 高德POI爬虫
-- ✅ 支持周边POI搜索
-- ✅ 支持多种POI类型
-- ✅ 支持分页获取数据
-- ✅ 支持关键词搜索
-- ✅ 输出JSON格式
+### 高德 POI 爬虫
+- **单点周边搜索**：v3 `place/around`（中心点 + 半径）
+- **矩形范围搜索**：v5 `place/polygon`（指定边界）
+- **区域分块搜索**：网格化爬取 + 按 POI `id` 去重
+- 支持多种 POI 类型和关键词过滤
+- 支持分页与请求限速
 
-## 安装依赖
+### 天地图 POI 爬虫
+- **单点周边搜索**：queryType=3
+- **矩形范围搜索**：queryType=10（多边形）/ queryType=2（视野内，自动回退）
+- **区域分块搜索**：网格化爬取 + 按 `hotPointID` 去重
+- 支持关键词和数据分类过滤
+
+## 安装
 
 ```bash
-# 安装基础依赖
+# 创建虚拟环境（推荐）
+python -m venv .venv
+
+# Windows 激活
+.venv\Scripts\activate
+
+# 安装依赖
 pip install -r requirements.txt
 ```
 
+## 配置 API Key
+
+在 `config/settings.py` 中直接填写，或通过环境变量注入（推荐，避免密钥入库）：
+
+```bash
+# Windows PowerShell
+$env:AMAP_API_KEY="你的高德Web服务Key"
+$env:TIANDITU_API_KEY="你的天地图搜索服务Key"
+
+# Linux / macOS
+export AMAP_API_KEY="你的高德Web服务Key"
+export TIANDITU_API_KEY="你的天地图搜索服务Key"
+```
+
+### Key 申请说明
+
+| 平台 | 申请地址 | 所需权限 |
+|------|----------|----------|
+| 高德 | [lbs.amap.com](https://lbs.amap.com/) | **Web 服务** Key，开通「搜索」服务 |
+| 天地图 | [lbs.tianditu.gov.cn](https://lbs.tianditu.gov.cn/) | **搜索服务 V2.0** Key（瓦片 Key 不能用于 POI 搜索） |
+
+> 若天地图返回 `301012 权限类型错误`，说明当前 Key 仅开通了地图瓦片，需重新申请搜索服务 Key。
+
 ## 使用方法
-
-### 爬取DJI禁飞区数据 - 单点模式
-
-```bash
-# 使用默认配置（郑州50公里范围）
-python main.py --type dji
-
-# 指定区域（北京100公里范围）
-python main.py --type dji --lat 39.90 --lng 116.40 --radius 100
-
-# 指定无人机型号
-python main.py --type dji --drone dji-mini-4-pro
-```
-
-### 爬取DJI禁飞区数据 - 省份/区域模式
-
-```bash
-# 爬取北京市（100km分块）
-python main.py --type dji --region beijing --grid-size 100
-
-# 爬取河南省（200km分块）
-python main.py --type dji --region henan --grid-size 200
-
-# 爬取整个中国（1000km分块）
-python main.py --type dji --region china --grid-size 1000
-
-# 爬取其他省份
-python main.py --type dji --region guangdong --grid-size 200
-python main.py --type dji --region sichuan --grid-size 200
-```
-
-### 支持的省份/区域列表
-
-| 地区 | 代码 | 说明 | 推荐网格大小 |
-|------|------|------|--------------|
-| **全国** | china | 中国全境 | 1000km |
-| **华北** | beijing | 北京市 | 100km |
-| | tianjin | 天津市 | 100km |
-| | hebei | 河北省 | 200km |
-| | shanxi | 山西省 | 200km |
-| | neimenggu | 内蒙古自治区 | 300km |
-| **东北** | liaoning | 辽宁省 | 200km |
-| | jilin | 吉林省 | 200km |
-| | heilongjiang | 黑龙江省 | 300km |
-| **华东** | shanghai | 上海市 | 100km |
-| | jiangsu | 江苏省 | 200km |
-| | zhejiang | 浙江省 | 200km |
-| | anhui | 安徽省 | 200km |
-| | fujian | 福建省 | 200km |
-| | jiangxi | 江西省 | 200km |
-| | shandong | 山东省 | 200km |
-| **华中** | henan | 河南省 | 200km |
-| | hubei | 湖北省 | 200km |
-| | hunan | 湖南省 | 200km |
-| **华南** | guangdong | 广东省 | 200km |
-| | guangxi | 广西壮族自治区 | 200km |
-| | hainan | 海南省 | 200km |
-| **西南** | chongqing | 重庆市 | 150km |
-| | sichuan | 四川省 | 200km |
-| | guizhou | 贵州省 | 200km |
-| | yunnan | 云南省 | 200km |
-| | xizang | 西藏自治区 | 300km |
-| **西北** | shaanxi | 陕西省 | 200km |
-| | gansu | 甘肃省 | 250km |
-| | qinghai | 青海省 | 300km |
-| | ningxia | 宁夏回族自治区 | 150km |
-| | xinjiang | 新疆维吾尔自治区 | 400km |
-| **港澳台** | hongkong | 香港特别行政区 | 50km |
-| | macau | 澳门特别行政区 | 50km |
-| | taiwan | 台湾省 | 200km |
-
-### 爬取高德POI数据
-
-```bash
-# 爬取POI数据（需先配置API Key）
-python main.py --type amap
-
-# 指定关键词搜索
-python main.py --type amap --keywords "机场"
-```
 
 ### 查看帮助
 
@@ -156,124 +101,229 @@ python main.py --type amap --keywords "机场"
 python main.py --help
 ```
 
+---
+
+### DJI 禁飞区
+
+```bash
+# 单点模式（默认郑州 50km）
+python main.py --type dji
+
+# 指定坐标和半径
+python main.py --type dji --lat 39.90 --lng 116.40 --radius 100
+
+# 区域分块（河南省 200km 网格）
+python main.py --type dji --region henan --grid-size 200
+```
+
+---
+
+### POI 爬取（高德 / 天地图通用）
+
+POI 爬虫支持三种模式，通过参数组合自动选择：
+
+| 模式 | 触发条件 | 适用场景 |
+|------|----------|----------|
+| 单点周边 | `--lat --lng [--radius]` | 小范围、快速验证 |
+| 矩形范围 | `--lat-min --lat-max --lng-min --lng-max` | 城市/自定义边界 |
+| 区域分块 | `--region [--grid-size]` | 大范围、全省/全国 |
+
+#### 郑州市 POI 示例（推荐）
+
+郑州市已在 `REGION_CONFIG` 中预置边界：
+
+- 纬度：34.53 ~ 34.95
+- 经度：113.45 ~ 114.05
+- 推荐网格：20 km
+
+**1. 矩形范围 — 郑州市区（金水/二七附近）**
+
+```bash
+# 高德
+python main.py --type amap \
+  --lat-min 34.65 --lat-max 34.80 \
+  --lng-min 113.55 --lng-max 113.75 \
+  --keywords "医院"
+
+# 天地图
+python main.py --type tianditu \
+  --lat-min 34.65 --lat-max 34.80 \
+  --lng-min 113.55 --lng-max 113.75 \
+  --keywords "医院"
+```
+
+**2. 区域分块 — 整个郑州市**
+
+```bash
+# 高德（20km 网格）
+python main.py --type amap --region zhengzhou --grid-size 20 --keywords "学校"
+
+# 天地图
+python main.py --type tianditu --region zhengzhou --grid-size 20 --keywords "公园"
+```
+
+**3. 单点周边 — 郑州中心（默认坐标 34.72, 113.62）**
+
+```bash
+# 高德（半径 5 公里）
+python main.py --type amap --lat 34.72 --lng 113.62 --radius 5 --keywords "机场"
+
+# 天地图
+python main.py --type tianditu --lat 34.72 --lng 113.62 --radius 5 --keywords "地铁"
+```
+
+**4. 河南省范围（更大区域）**
+
+```bash
+python main.py --type amap --region henan --grid-size 50 --keywords "加油站"
+```
+
+---
+
+### 支持的省份/区域
+
+| 地区 | 代码 | 推荐网格 |
+|------|------|----------|
+| **郑州市** | zhengzhou | 20km |
+| **河南省** | henan | 200km |
+| **全国** | china | 1000km |
+| 北京市 | beijing | 100km |
+| 上海市 | shanghai | 100km |
+| 广东省 | guangdong | 200km |
+| … | … | … |
+
+完整列表见 `config/settings.py` 中的 `REGION_CONFIG`（含全国 34 个省级行政区 + 郑州市）。
+
 ## 配置说明
 
-配置文件位于 `config/settings.py`：
+配置文件：`config/settings.py`
 
 ### 通用配置
+
 ```python
 DEFAULT_LAT = 34.72    # 默认纬度（郑州）
 DEFAULT_LNG = 113.62   # 默认经度（郑州）
 DEFAULT_RADIUS = 50    # 默认搜索半径（公里）
-TIMEOUT = 30           # 请求超时时间（秒）
+TIMEOUT = 30           # 请求超时（秒）
 ```
 
-### DJI禁飞区配置
-```python
-DJI_CONFIG = {
-    "api_url": "https://flysafe-api.dji.com/api/qep/geo/feedback/areas/in_rectangle",
-    "drones_api_url": "https://flysafe-api.dji.com/dji/drones",
-    "output_dir": "output/dji",
-    "params": {
-        "default_drone": "dji-mavic-3",
-        "zones_mode": "flysafe_website",
-        "levels": "0,1,2,3,7,8,10"
-    },
-    "region_config": {  # 包含全国34个省份/区域配置
-        "beijing": {...},
-        "henan": {...},
-        "china": {...}
-    }
-}
-```
+### 高德 POI 配置
 
-### 高德POI配置
 ```python
 AMAP_CONFIG = {
-    "api_url": "https://restapi.amap.com/v3/place/around",
-    "output_dir": "output/amap",
-    "api_key": "your_amap_api_key",  # 需要配置
-    "poi_types": [...],
-    "radius": 5000
+    "around_api_url": "https://restapi.amap.com/v3/place/around",
+    "polygon_api_url": "https://restapi.amap.com/v5/place/polygon",
+    "api_key": os.environ.get("AMAP_API_KEY", "your_amap_api_key"),
+    "poi_types": ["110000", "120000", ...],
+    "radius": 5000,              # 周边搜索半径（米）
+    "polygon_page_size": 25,
+    "request_delay": 0.2,
+    "region_config": REGION_CONFIG,
 }
 ```
 
-## DJI禁飞区级别说明
+### 天地图 POI 配置
 
-| 级别 | 说明 |
-|------|------|
-| 0 | 机场禁飞区 |
-| 1 | 机场限飞区 |
-| 2 | 国家级机场禁飞区 |
-| 3 | 临时限飞区 |
-| 7 | 干扰源区域 |
-| 8 | 军事管理区 |
-| 10 | 特殊管控区 |
-
-## 支持的无人机型号
-
-项目支持72+种DJI无人机型号，包括：
-- DJI Mavic 3 / Mavic 3 Pro / Mavic 3 Classic
-- DJI Mini 3 Pro / Mini 4 Pro / Mini 5 Pro
-- DJI Air 2S / Air 3 / Air 3S
-- DJI Avata / Avata 2
-- DJI Inspire 2 / Inspire 3
-- DJI Matrice 300 / 350 / 400 系列
-- 以及更多农业无人机型号
+```python
+TIANDITU_CONFIG = {
+    "api_url": "https://api.tianditu.gov.cn/v2/search",
+    "api_key": os.environ.get("TIANDITU_API_KEY", "your_tianditu_api_key"),
+    "default_keyword": "POI",
+    "page_size": 100,
+    "level": 12,
+    "request_delay": 0.2,
+    "region_config": REGION_CONFIG,
+}
+```
 
 ## 输出文件
 
-### DJI禁飞区
-```
-# 单点模式
-output/dji/flyzones_{lat}_{lng}_{radius}.geojson
+### DJI 禁飞区
 
-# 区域模式
-output/dji/flyzones_{region_name}_{grid_size}km.geojson
+```
+output/dji/flyzones_{lat}_{lng}_{radius}.geojson      # 单点
+output/dji/flyzones_{region}_{grid_size}km.geojson    # 区域
 ```
 
-### 高德POI
+### POI（高德 / 天地图）
+
 ```
-output/amap/poi_{lat}_{lng}_{radius}.json
+output/amap/poi_{lat}_{lng}_{radius}.json                          # 单点
+output/amap/poi_bounds_{lat_min}_{lat_max}_{lng_min}_{lng_max}.json  # 范围
+output/amap/poi_{region}_{grid_size}km.json                        # 区域
+
+output/tianditu/   # 同上命名规则
+```
+
+输出 JSON 结构：
+
+```json
+{
+  "status": "success",
+  "count": 128,
+  "metadata": {
+    "mode": "bounds",
+    "bounds": { "lat_min": 34.65, "lat_max": 34.80, "lng_min": 113.55, "lng_max": 113.75 },
+    "keywords": "医院"
+  },
+  "data": [ ... ]
+}
 ```
 
 ## 核心类与方法
 
-### BaseCrawler（爬虫基类）
-| 方法 | 说明 |
-|------|------|
-| `_make_request()` | 发送HTTP请求 |
-| `_save_json()` | 保存JSON数据到文件 |
+| 类 | 方法 | 说明 |
+|----|------|------|
+| `DJIFlySafeCrawler` | `crawl()` | 单点禁飞区 |
+| | `crawl_region()` | 区域分块 |
+| `AmapPOICrawler` | `crawl()` | 单点周边 POI |
+| | `crawl_bounds()` | 矩形范围 POI |
+| | `crawl_region()` | 区域分块 POI |
+| `TiandituPOICrawler` | `crawl()` | 单点周边 POI |
+| | `crawl_bounds()` | 矩形范围 POI |
+| | `crawl_region()` | 区域分块 POI |
 
-### DJIFlySafeCrawler
-| 方法 | 说明 |
-|------|------|
-| `get_drones_list()` | 获取无人机型号列表 |
-| `set_drone_model()` | 设置无人机型号 |
-| `crawl()` | 爬取单点禁飞区数据 |
-| `crawl_region()` | 按区域分块爬取禁飞区数据 |
+## 测试验证（郑州市）
 
-### AmapPOICrawler
-| 方法 | 说明 |
-|------|------|
-| `crawl()` | 爬取POI数据 |
+本地已验证 CLI 和范围参数解析正常。POI 实际爬取需配置具备**搜索权限**的 API Key：
 
-## 扩展指南
+```bash
+# 1. 设置 Key
+$env:AMAP_API_KEY="你的高德Key"
+$env:TIANDITU_API_KEY="你的天地图搜索Key"
 
-如需添加新的数据源爬虫，只需：
+# 2. 郑州市区小范围测试（推荐先用此命令验证）
+python main.py --type amap \
+  --lat-min 34.65 --lat-max 34.80 \
+  --lng-min 113.55 --lng-max 113.75 \
+  --keywords "医院"
 
-1. 在 `config/settings.py` 中添加新配置
-2. 在 `src/crawlers/` 中创建新爬虫类（继承BaseCrawler）
-3. 在 `src/crawlers/__init__.py` 中导出新类
-4. 在 `main.py` 中添加命令行参数支持
+python main.py --type tianditu \
+  --lat-min 34.65 --lat-max 34.80 \
+  --lng-min 113.55 --lng-max 113.75 \
+  --keywords "医院"
+
+# 3. 成功后检查输出
+# output/amap/poi_bounds_34.65_34.8_113.55_113.75.json
+# output/tianditu/poi_bounds_34.65_34.8_113.55_113.75.json
+```
 
 ## 注意事项
 
-1. **DJI API无需认证**，可直接访问
-2. **高德POI需要配置API Key**（在高德地图开放平台申请）
-3. 建议合理控制请求频率，避免被限流
-4. 网络环境需要能访问DJI和高德服务器
-5. 区域分块爬取时，建议根据区域大小设置合适的网格大小（小省份用50-100km，大省份用200-300km）
+1. **DJI API 无需认证**，可直接使用
+2. **POI 需配置搜索类 API Key**，瓦片/JS API Key 不能用于 POI 爬取
+3. 大范围分块爬取请合理设置 `--grid-size`，避免请求过多触发限流
+4. 可通过 `request_delay` 调整请求间隔（默认 0.2 秒）
+5. 区域分块结果会自动去重（高德按 `id`，天地图按 `hotPointID`）
+
+## 扩展指南
+
+添加新数据源：
+
+1. 在 `config/settings.py` 添加配置
+2. 在 `src/crawlers/` 创建爬虫类（继承 `BaseCrawler`）
+3. 在 `src/crawlers/__init__.py` 导出
+4. 在 `main.py` 添加 `--type` 选项
 
 ## License
 

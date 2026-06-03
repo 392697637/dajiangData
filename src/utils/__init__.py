@@ -11,12 +11,25 @@
 """
 
 # 从geo模块导入工具函数
-from .geo import latlng_to_rectangle, circle_to_polygon, deg2rad, create_geometry
+from .geo import (
+    latlng_to_rectangle,
+    circle_to_polygon,
+    deg2rad,
+    create_geometry,
+    generate_grid_points,
+    bounds_to_map_bound,
+    bounds_to_amap_polygon,
+    bounds_to_tianditu_polygon,
+)
 
 # 定义公开导出的函数列表
 __all__ = [
     'latlng_to_rectangle',
     'circle_to_polygon',
     'deg2rad',
-    'create_geometry'
+    'create_geometry',
+    'generate_grid_points',
+    'bounds_to_map_bound',
+    'bounds_to_amap_polygon',
+    'bounds_to_tianditu_polygon',
 ]

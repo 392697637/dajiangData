@@ -34,6 +34,87 @@ def deg2rad(deg):
     return deg * (math.pi / 180.0)
 
 
+def generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_km):
+    """
+    生成网格中心点坐标
+
+    将指定矩形区域按网格大小分块，返回每个网格的中心点。
+
+    Args:
+        lat_min (float): 最小纬度
+        lat_max (float): 最大纬度
+        lng_min (float): 最小经度
+        lng_max (float): 最大经度
+        grid_size_km (float): 网格边长（公里）
+
+    Returns:
+        list: [(lat, lng, index), ...]
+    """
+    avg_lat = (lat_min + lat_max) / 2
+    lat_grid_count = int((lat_max - lat_min) * 111 / grid_size_km) + 1
+    lng_grid_count = int((lng_max - lng_min) * 111 * abs(math.cos(deg2rad(avg_lat))) / grid_size_km) + 1
+
+    lat_grid_count = max(lat_grid_count, 1)
+    lng_grid_count = max(lng_grid_count, 1)
+
+    print("生成网格: {} × {} = {} 个中心点".format(
+        lng_grid_count, lat_grid_count, lng_grid_count * lat_grid_count
+    ))
+
+    lat_step = (lat_max - lat_min) / lat_grid_count if lat_grid_count > 1 else 0
+    lng_step = (lng_max - lng_min) / lng_grid_count if lng_grid_count > 1 else 0
+
+    points = []
+    index = 1
+    for lat_idx in range(lat_grid_count):
+        for lng_idx in range(lng_grid_count):
+            lat = lat_max - lat_idx * lat_step - lat_step / 2
+            lng = lng_min + lng_idx * lng_step + lng_step / 2
+            lat = max(lat_min, min(lat_max, lat))
+            lng = max(lng_min, min(lng_max, lng))
+            points.append((lat, lng, index))
+            index += 1
+
+    return points
+
+
+def bounds_to_map_bound(lng_min, lat_min, lng_max, lat_max):
+    """
+    将矩形边界转换为天地图 mapBound 格式
+
+    Returns:
+        str: "minx,miny,maxx,maxy"
+    """
+    return "{},{},{},{}".format(lng_min, lat_min, lng_max, lat_max)
+
+
+def bounds_to_amap_polygon(lng_min, lat_min, lng_max, lat_max):
+    """
+    将矩形边界转换为高德多边形搜索参数（左上|右下）
+
+    Returns:
+        str: "ltlng,ltlat|rblng,rblat"
+    """
+    return "{},{}|{},{}".format(lng_min, lat_max, lng_max, lat_min)
+
+
+def bounds_to_tianditu_polygon(lng_min, lat_min, lng_max, lat_max):
+    """
+    将矩形边界转换为天地图多边形搜索参数（闭合坐标串）
+
+    Returns:
+        str: "x1,y1,x2,y2,...,x1,y1"
+    """
+    coords = [
+        (lng_min, lat_max),
+        (lng_max, lat_max),
+        (lng_max, lat_min),
+        (lng_min, lat_min),
+        (lng_min, lat_max),
+    ]
+    return ",".join("{},{}".format(lng, lat) for lng, lat in coords)
+
+
 def latlng_to_rectangle(lat, lng, radius_km):
     """
     将中心点和半径转换为矩形区域

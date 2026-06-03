@@ -2,198 +2,278 @@
 """
 高德POI爬虫
 
-此模块实现高德地图POI（兴趣点）数据的爬取功能。
-
-API端点说明:
-- POI搜索API: https://restapi.amap.com/v3/place/around
-
-功能特性:
-1. 支持周边POI搜索
-2. 支持多种POI类型
-3. 支持分页获取数据
-4. 支持关键词搜索
-
-使用方式:
-    from src.crawlers import AmapPOICrawler
-    from config import AMAP_CONFIG
-    
-    crawler = AmapPOICrawler(AMAP_CONFIG)
-    result = crawler.crawl(lat=34.72, lng=113.62, keywords="机场")
-
-注意:
-    需要在高德地图开放平台申请API Key，并配置到config/settings.py中。
+支持三种搜索模式:
+1. 周边搜索 (v3/place/around) - 中心点 + 半径
+2. 多边形/矩形范围搜索 (v5/place/polygon) - 指定边界
+3. 区域分块搜索 - 按省份/自定义区域网格化爬取
 """
 
+import time
 import warnings
 
-# 导入基类
 from .base import BaseCrawler
+from src.utils.geo import (
+    generate_grid_points,
+    bounds_to_amap_polygon,
+    latlng_to_rectangle,
+)
 
-# 忽略SSL验证警告
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
 
 class AmapPOICrawler(BaseCrawler):
-    """
-    高德POI爬虫，继承自BaseCrawler
-    
-    Attributes:
-        api_url (str): POI搜索API端点
-        api_key (str): 高德API Key
-        poi_types (list): POI类型编码列表
-        radius (int): 搜索半径（米）
-        page_size (int): 每页返回数量
-        extensions (str): 返回信息类型（base/all）
-    """
-    
+    """高德POI爬虫"""
+
     def __init__(self, config):
-        """
-        初始化高德POI爬虫
-        
-        Args:
-            config (dict): 高德配置字典，应包含以下关键字:
-                - api_url: POI搜索API端点
-                - api_key: 高德API Key
-                - poi_types: POI类型编码列表
-                - output_dir: 输出目录
-                - radius: 搜索半径（米）
-                - page_size: 每页返回数量
-                - extensions: 返回信息类型
-        """
-        # 调用父类初始化
         super().__init__(config)
-        
-        # 保存API端点
-        self.api_url = config['api_url']
-        
-        # 保存API Key（需要在高德地图开放平台申请）
+
+        self.around_api_url = config.get('around_api_url') or config.get('api_url')
+        self.polygon_api_url = config.get('polygon_api_url', 'https://restapi.amap.com/v5/place/polygon')
         self.api_key = config.get('api_key', '')
-        
-        # 保存POI类型列表
         self.poi_types = config.get('poi_types', [])
-        
-        # 设置搜索半径（米）
         self.radius = config.get('radius', 5000)
-        
-        # 设置每页返回数量
         self.page_size = config.get('page_size', 20)
-        
-        # 设置返回信息类型（base: 基础信息, all: 详细信息）
+        self.polygon_page_size = config.get('polygon_page_size', 25)
         self.extensions = config.get('extensions', 'all')
-    
-    def crawl(self, lat=None, lng=None, keywords=None, output_file=None):
-        """
-        爬取高德POI数据
-        
-        核心方法，负责发送API请求、分页获取数据并保存结果。
-        
-        Args:
-            lat (float): 中心纬度（可选，默认为配置中的默认值）
-            lng (float): 中心经度（可选，默认为配置中的默认值）
-            keywords (str): 搜索关键词（可选）
-            output_file (str): 输出文件路径（可选，自动生成）
-        
-        Returns:
-            dict: POI数据结果，包含状态、数量和数据列表
-        
-        Raises:
-            Exception: 请求失败、API Key未配置或数据异常时抛出异常
-        
-        Example:
-            >>> crawler.crawl(lat=34.72, lng=113.62, keywords="机场")
-            {"status": "success", "count": 10, "location": {...}, "data": [...]}
-        """
-        # 导入默认配置
-        from config import DEFAULT_LAT, DEFAULT_LNG
-        
-        # 使用传入参数或默认值
-        lat = lat if lat is not None else DEFAULT_LAT
-        lng = lng if lng is not None else DEFAULT_LNG
-        
-        # 检查API Key是否已配置
+        self.request_delay = config.get('request_delay', 0.2)
+        self.region_config = config.get('region_config', {})
+
+    def _check_api_key(self):
         if not self.api_key or self.api_key == 'your_amap_api_key':
             raise Exception("请先在config/settings.py中配置高德API Key")
-        
-        # 生成输出文件名（如果未指定）
-        if output_file is None:
-            output_file = "poi_{}_{}_{}.json".format(lat, lng, self.radius)
-        
-        # 存储所有POI数据
+
+    def _sleep(self):
+        if self.request_delay > 0:
+            time.sleep(self.request_delay)
+
+    def _dedupe_pois(self, pois):
+        seen = set()
+        unique = []
+        for poi in pois:
+            poi_id = poi.get('id')
+            if poi_id and poi_id in seen:
+                continue
+            if poi_id:
+                seen.add(poi_id)
+            unique.append(poi)
+        return unique
+
+    def _fetch_pois_around(self, lat, lng, keywords=None, radius=None):
+        """周边搜索 (v3)"""
+        radius = radius if radius is not None else self.radius
         all_results = []
-        
-        # 遍历所有POI类型
+
         for poi_type in self.poi_types:
-            # 初始化页码
             page = 1
-            
-            # 分页获取数据
             while True:
-                # 构建API请求参数
                 params = {
-                    "key": self.api_key,                  # API Key（必需）
-                    "location": "{},{}".format(lng, lat),  # 中心点坐标（格式：经度,纬度）
-                    "radius": self.radius,                 # 搜索半径（米）
-                    "types": poi_type,                     # POI类型编码
-                    "page": page,                          # 页码
-                    "offset": self.page_size,              # 每页数量
-                    "extensions": self.extensions,         # 返回信息类型
-                    "output": "json"                       # 输出格式
+                    "key": self.api_key,
+                    "location": "{},{}".format(lng, lat),
+                    "radius": radius,
+                    "types": poi_type,
+                    "page": page,
+                    "offset": self.page_size,
+                    "extensions": self.extensions,
+                    "output": "json",
                 }
-                
-                # 如果指定了关键词，添加到请求参数
                 if keywords:
                     params["keywords"] = keywords
-                
-                # 打印请求信息
-                print("请求POI类型: {}, 页码: {}".format(poi_type, page))
-                
-                # 发送API请求
-                resp = self._make_request(self.api_url, params=params)
-                
-                # 解析JSON响应
+
+                print("周边搜索 类型: {}, 页码: {}".format(poi_type, page))
+                resp = self._make_request(self.around_api_url, params=params)
                 data = resp.json()
-                
-                # 检查API返回状态
-                status = data.get('status')
-                if status != '1':
-                    # 获取错误信息
-                    error_info = data.get('info', 'Unknown error')
-                    print("API返回错误: {}".format(error_info))
+
+                if data.get('status') != '1':
+                    print("API返回错误: {}".format(data.get('info', 'Unknown error')))
                     break
-                
-                # 提取POI数据
+
                 pois = data.get('pois', [])
-                
-                # 如果当前页没有数据，跳出循环
                 if not pois:
                     break
-                
-                # 将当前页数据添加到总结果
+
                 all_results.extend(pois)
-                
-                # 增加页码
                 page += 1
-                
-                # 检查是否还有更多数据
+
                 total = int(data.get('count', 0))
                 if (page - 1) * self.page_size >= total:
                     break
-        
-        # 构建结果字典
+
+                self._sleep()
+
+        return all_results
+
+    def _fetch_pois_polygon(self, polygon, keywords=None):
+        """多边形/矩形范围搜索 (v5)"""
+        all_results = []
+        types_param = "|".join(self.poi_types) if self.poi_types else None
+
+        page_num = 1
+        while True:
+            params = {
+                "key": self.api_key,
+                "polygon": polygon,
+                "page_num": page_num,
+                "page_size": self.polygon_page_size,
+                "output": "json",
+            }
+            if keywords:
+                params["keywords"] = keywords
+            if types_param:
+                params["types"] = types_param
+
+            print("范围搜索 页码: {}".format(page_num))
+            resp = self._make_request(self.polygon_api_url, params=params)
+            data = resp.json()
+
+            if data.get('status') != '1':
+                print("API返回错误: {}".format(data.get('info', 'Unknown error')))
+                break
+
+            pois = data.get('pois', [])
+            if not pois:
+                break
+
+            all_results.extend(pois)
+            page_num += 1
+
+            total = int(data.get('count', 0))
+            if (page_num - 1) * self.polygon_page_size >= total:
+                break
+
+            self._sleep()
+
+        return all_results
+
+    def _build_result(self, pois, output_file, metadata=None):
         result = {
             "status": "success",
-            "count": len(all_results),
-            "location": {"lat": lat, "lng": lng},
-            "radius": self.radius,
-            "keywords": keywords,
-            "data": all_results
+            "count": len(pois),
+            "data": pois,
         }
-        
-        # 保存结果到文件
+        if metadata:
+            result["metadata"] = metadata
+
         filepath = self._save_json(result, output_file)
-        
-        # 打印成功信息
-        print("\n成功！共获取 {} 个POI".format(len(all_results)))
+        print("\n成功！共获取 {} 个POI".format(len(pois)))
         print("输出文件: {}".format(filepath))
-        
         return result
+
+    def crawl(self, lat=None, lng=None, radius=None, keywords=None, output_file=None):
+        """
+        单点周边搜索
+
+        Args:
+            lat, lng: 中心坐标
+            radius: 搜索半径（米），未指定时使用配置默认值
+        """
+        from config import DEFAULT_LAT, DEFAULT_LNG
+
+        lat = lat if lat is not None else DEFAULT_LAT
+        lng = lng if lng is not None else DEFAULT_LNG
+        self._check_api_key()
+
+        if output_file is None:
+            output_file = "poi_{}_{}_{}.json".format(lat, lng, radius or self.radius)
+
+        pois = self._fetch_pois_around(lat, lng, keywords=keywords, radius=radius)
+        return self._build_result(pois, output_file, {
+            "mode": "around",
+            "location": {"lat": lat, "lng": lng},
+            "radius": radius or self.radius,
+            "keywords": keywords,
+        })
+
+    def crawl_bounds(self, lat_min, lat_max, lng_min, lng_max, keywords=None, output_file=None):
+        """
+        按矩形范围搜索POI
+
+        Args:
+            lat_min, lat_max, lng_min, lng_max: 矩形边界
+        """
+        self._check_api_key()
+
+        if output_file is None:
+            output_file = "poi_bounds_{}_{}_{}_{}.json".format(
+                lat_min, lat_max, lng_min, lng_max
+            )
+
+        polygon = bounds_to_amap_polygon(lng_min, lat_min, lng_max, lat_max)
+        print("矩形范围: 纬度 {:.4f}~{:.4f}, 经度 {:.4f}~{:.4f}".format(
+            lat_min, lat_max, lng_min, lng_max
+        ))
+
+        pois = self._fetch_pois_polygon(polygon, keywords=keywords)
+        pois = self._dedupe_pois(pois)
+
+        return self._build_result(pois, output_file, {
+            "mode": "bounds",
+            "bounds": {
+                "lat_min": lat_min, "lat_max": lat_max,
+                "lng_min": lng_min, "lng_max": lng_max,
+            },
+            "keywords": keywords,
+        })
+
+    def crawl_region(self, region_name="henan", grid_size_km=None, keywords=None, output_file=None):
+        """
+        按区域分块搜索POI
+
+        将区域划分为网格，对每个网格进行矩形范围搜索并合并去重。
+        """
+        self._check_api_key()
+
+        region_info = self.region_config.get(region_name)
+        if not region_info:
+            raise Exception("区域配置不存在: {}".format(region_name))
+
+        region_name_cn = region_info.get("name", region_name)
+        lat_min = region_info.get("lat_min")
+        lat_max = region_info.get("lat_max")
+        lng_min = region_info.get("lng_min")
+        lng_max = region_info.get("lng_max")
+        grid_size_km = grid_size_km or region_info.get("grid_size_km", 200)
+
+        print("=" * 70)
+        print("开始按区域分块爬取高德POI")
+        print("区域: {}".format(region_name_cn))
+        print("边界: 纬度 {:.2f}~{:.2f}, 经度 {:.2f}~{:.2f}".format(
+            lat_min, lat_max, lng_min, lng_max
+        ))
+        print("网格大小: {} km".format(grid_size_km))
+        print("=" * 70)
+
+        grid_points = generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_km)
+        all_pois = []
+        success_count = 0
+        fail_count = 0
+
+        for lat, lng, index in grid_points:
+            print("\n[{}/{}] 爬取网格: ({:.4f}, {:.4f})".format(
+                index, len(grid_points), lat, lng
+            ))
+            try:
+                ltlat, ltlng, rblat, rblng = latlng_to_rectangle(lat, lng, grid_size_km / 2)
+                polygon = bounds_to_amap_polygon(ltlng, rblat, rblng, ltlat)
+                pois = self._fetch_pois_polygon(polygon, keywords=keywords)
+                all_pois.extend(pois)
+                success_count += 1
+                print("  成功获取 {} 个POI".format(len(pois)))
+            except Exception as e:
+                fail_count += 1
+                print("  爬取失败: {}".format(str(e)))
+
+        unique_pois = self._dedupe_pois(all_pois)
+
+        if output_file is None:
+            output_file = "poi_{}_{}km.json".format(region_name, grid_size_km)
+
+        return self._build_result(unique_pois, output_file, {
+            "mode": "region",
+            "region": region_name_cn,
+            "grid_size_km": grid_size_km,
+            "total_grids": len(grid_points),
+            "success_grids": success_count,
+            "fail_grids": fail_count,
+            "total_before_dedup": len(all_pois),
+            "keywords": keywords,
+        })
