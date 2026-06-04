@@ -153,16 +153,11 @@ class AmapPOICrawler(BaseCrawler):
         if metadata:
             result["metadata"] = metadata
 
-        if self.save_to_db:
-            saved_count = self._save_pois_to_db(pois, "amap", metadata=metadata)
-            result["db_table"] = self.db_table
-            result["db_count"] = saved_count
-            print("\n成功！共获取 {} 个高德POI，已入库 {} 条".format(len(pois), saved_count))
-            print("入库表: {}".format(self.db_table))
-        else:
-            filepath = self._save_json(result, output_file)
-            print("\n成功！共获取 {} 个POI".format(len(pois)))
-            print("输出文件: {}".format(filepath))
+        saved_count = self._save_pois_to_db(pois, "amap", metadata=metadata)
+        result["db_table"] = self.db_table
+        result["db_count"] = saved_count
+        print("\n成功！共获取 {} 个高德POI，已入库 {} 条".format(len(pois), saved_count))
+        print("入库表: {}".format(self.db_table))
         return result
 
     def crawl(self, lat=None, lng=None, radius=None, keywords=None, output_file=None):

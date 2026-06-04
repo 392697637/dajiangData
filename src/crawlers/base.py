@@ -159,9 +159,11 @@ class BaseCrawler:
         )
 
     def _ensure_poi_table(self, conn, table_name):
-        """创建POI入库表；高德/天地图分别使用各自表名。"""
-        sql = f'''
-        CREATE TABLE IF NOT EXISTS "{table_name}" (
+        """创建POI入库表；如果表存在则删除重建。"""
+        # 先删除已存在的表
+        drop_sql = f'DROP TABLE IF EXISTS "{table_name}" CASCADE;'
+        create_sql = f'''
+        CREATE TABLE "{table_name}" (
             id BIGSERIAL PRIMARY KEY,
             source_platform VARCHAR(32) NOT NULL,
             poi_id VARCHAR(128),
@@ -181,13 +183,15 @@ class BaseCrawler:
             updated_at TIMESTAMPTZ DEFAULT now(),
             UNIQUE (source_platform, poi_id)
         );
-        CREATE INDEX IF NOT EXISTS "idx_{table_name}_geom" ON "{table_name}" USING GIST (geom);
-        CREATE INDEX IF NOT EXISTS "idx_{table_name}_type_code" ON "{table_name}" (type_code);
-        CREATE INDEX IF NOT EXISTS "idx_{table_name}_name" ON "{table_name}" (name);
+        CREATE INDEX "idx_{table_name}_geom" ON "{table_name}" USING GIST (geom);
+        CREATE INDEX "idx_{table_name}_type_code" ON "{table_name}" (type_code);
+        CREATE INDEX "idx_{table_name}_name" ON "{table_name}" (name);
         '''
         with conn.cursor() as cur:
-            cur.execute(sql)
+            cur.execute(drop_sql)
+            cur.execute(create_sql)
         conn.commit()
+        print(f"表 {table_name} 已创建")
 
     def _parse_lng_lat(self, poi, platform):
         """从不同平台POI结构中解析经纬度。"""
