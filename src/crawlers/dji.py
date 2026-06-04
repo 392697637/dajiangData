@@ -93,6 +93,109 @@ class DJIFlySafeCrawler(BaseCrawler):
         # 保存区域分块配置
         self.region_config = config.get('region_config', {})
     
+    def _get_region_bounds_from_db(self, region_name):
+        """
+        从数据库获取区域边界和城市名称
+        
+        仅支持中文名称查询，自动区分省和市：
+        - 先查询省级表 jc_sheng（匹配 shengname）
+        - 如果未找到，查询市级表 jc_shi（匹配 shiname）
+        
+        Args:
+            region_name: 区域中文名称（如"河南省"、"郑州市"）
+        
+        Returns:
+            dict: 包含区域信息的字典，格式如下：
+                {
+                    'name': '河南省',           # 区域中文名称
+                    'name_en': 'henan',         # 区域英文名称
+                    'lat_min': 31.4,            # 最小纬度（从geom计算）
+                    'lat_max': 36.4,            # 最大纬度（从geom计算）
+                    'lng_min': 110.4,           # 最小经度（从geom计算）
+                    'lng_max': 116.7,           # 最大经度（从geom计算）
+                    'grid_size_km': 200,        # 默认网格大小（公里）
+                    'level': 'province'|'city'  # 区域级别
+                }
+                如果数据库查询失败，返回 None
+        """
+        try:
+            import psycopg2
+        except ImportError:
+            print("⚠️ 缺少psycopg2依赖，无法从数据库查询区域边界")
+            return None
+        
+        conn = None
+        try:
+            conn = psycopg2.connect(**self.db_config)
+            cur = conn.cursor()
+            
+            # 第一步：查询省级表 jc_sheng
+            print(f"🔍 尝试从 jc_sheng 表查询区域: {region_name}")
+            cur.execute("""
+                SELECT shengname, shengcode,
+                       ST_YMin(geom) as min_lat, ST_YMax(geom) as max_lat,
+                       ST_XMin(geom) as min_lng, ST_XMax(geom) as max_lng
+                FROM jc_sheng 
+                WHERE shengname = %s OR shengname LIKE %s OR shengname LIKE %s
+                ORDER BY 
+                    CASE WHEN shengname = %s THEN 1 
+                         WHEN shengname LIKE %s THEN 2 
+                         ELSE 3 END
+                LIMIT 1
+            """, (region_name, f"%{region_name}%", f"{region_name}省", region_name, f"%{region_name}%"))
+            row = cur.fetchone()
+            if row:
+                print(f"✅ 从 jc_sheng 表找到区域: {row[0]}")
+                return {
+                    'name': row[0],
+                    'name_en': row[1].lower() if row[1] else region_name,
+                    'lat_min': float(row[2]) if row[2] else None,
+                    'lat_max': float(row[3]) if row[3] else None,
+                    'lng_min': float(row[4]) if row[4] else None,
+                    'lng_max': float(row[5]) if row[5] else None,
+                    'grid_size_km': 200,
+                    'level': 'province'
+                }
+            
+            # 第二步：查询市级表 jc_shi
+            print(f"🔍 尝试从 jc_shi 表查询区域: {region_name}")
+            cur.execute("""
+                SELECT shiname, shicode, shengname,
+                       ST_YMin(geom) as min_lat, ST_YMax(geom) as max_lat,
+                       ST_XMin(geom) as min_lng, ST_XMax(geom) as max_lng
+                FROM jc_shi 
+                WHERE shiname = %s OR shiname LIKE %s OR shiname LIKE %s
+                ORDER BY 
+                    CASE WHEN shiname = %s THEN 1 
+                         WHEN shiname LIKE %s THEN 2 
+                         ELSE 3 END
+                LIMIT 1
+            """, (region_name, f"%{region_name}%", f"{region_name}市", region_name, f"%{region_name}%"))
+            row = cur.fetchone()
+            if row:
+                print(f"✅ 从 jc_shi 表找到区域: {row[0]}（属于{row[2]}）")
+                return {
+                    'name': row[0],
+                    'name_en': row[1].lower() if row[1] else region_name,
+                    'lat_min': float(row[3]) if row[3] else None,
+                    'lat_max': float(row[4]) if row[4] else None,
+                    'lng_min': float(row[5]) if row[5] else None,
+                    'lng_max': float(row[6]) if row[6] else None,
+                    'grid_size_km': 100,
+                    'level': 'city',
+                    'province_name': row[2]
+                }
+            
+            print(f"⚠️ 数据库中未找到区域边界信息: {region_name}")
+            return None
+            
+        except Exception as e:
+            print(f"⚠️ 查询区域边界失败: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+    
     def get_drones_list(self, force_refresh=False):
         """
         获取支持的无人机型号列表
@@ -174,7 +277,7 @@ class DJIFlySafeCrawler(BaseCrawler):
         Args:
             lat (float): 中心纬度（可选，默认为配置中的默认值）
             lng (float): 中心经度（可选，默认为配置中的默认值）
-            radius (float): 搜索半径（公里，可选，默认为配置中的默认值）
+            radius (float): 搜索半径（米，可选，默认为配置中的默认值）
             output_file (str): 输出文件路径（可选，自动生成）
         
         Returns:
@@ -244,32 +347,76 @@ class DJIFlySafeCrawler(BaseCrawler):
         
         return geojson
     
-    def crawl_region(self, region_name="china", grid_size_km=1000):
+    def crawl_region(self, region_name="中国", grid_size_km=1000):
         """
-        按区域分块爬取DJI禁飞区数据
+        按区域分块爬取DJI禁飞区数据（核心方法）
         
-        将指定区域按网格分块，依次爬取每个网格的禁飞区数据，最后合并结果。
+        将指定区域按网格分块，依次爬取每个网格的禁飞区数据，最后合并去重。
+        
+        工作流程：
+        1. 优先从数据库获取区域边界（支持省/市两级）
+        2. 根据网格大小将区域划分为多个网格点
+        3. 对每个网格点进行矩形范围搜索
+        4. 合并所有结果并去重（根据area_id）
         
         Args:
-            region_name (str): 区域名称（默认为"china"，需在配置中定义）
-            grid_size_km (float): 网格大小（公里，默认1000）
+            region_name (str): 区域中文名称（如"河南省"、"郑州市"、"中国"），默认"中国"
+            grid_size_km (float): 网格大小（**千米**，默认1000）。注意：与POI爬虫不同，DJI使用千米为单位
         
         Returns:
-            dict: 合并后的GeoJSON格式禁飞区数据
+            dict: 合并后的GeoJSON格式禁飞区数据，结构如下：
+                {
+                    "type": "FeatureCollection",
+                    "features": [...],
+                    "crs": {...},
+                    "metadata": {
+                        "region": "区域名称",
+                        "grid_size_km": 网格大小,
+                        "total_grids": 总网格数,
+                        "success_grids": 成功数,
+                        "fail_grids": 失败数,
+                        "total_features_before_dedup": 去重前数量,
+                        "total_features_after_dedup": 去重后数量
+                    }
+                }
+        
+        Notes:
+            - 区域边界优先从数据库 jc_sheng/jc_shi 表获取
+            - 数据库查询失败时回退到配置文件中的 REGION_CONFIG
+            - 网格大小单位为**千米**，与POI爬虫的米单位不同
         
         Raises:
             Exception: 区域配置不存在或爬取失败时抛出异常
         """
         # 获取区域配置
-        region_info = self.region_config.get(region_name)
-        if not region_info:
-            raise Exception("区域配置不存在: {}".format(region_name))
+        region_info = None
         
-        region_name_cn = region_info.get("name", region_name)
+        # 优先从数据库获取区域边界信息
+        db_region_info = self._get_region_bounds_from_db(region_name)
+        if db_region_info:
+            print(f"✅ 从数据库获取区域边界信息: {db_region_info['name']}")
+            region_info = db_region_info
+            region_name_cn = db_region_info["name"]
+            region_name = db_region_info["name_en"]
+        else:
+            # 数据库查询失败，回退到配置文件
+            print(f"⚠️ 数据库查询失败，使用配置文件中的区域配置")
+            region_info = self.region_config.get(region_name)
+            if not region_info:
+                raise Exception("区域配置不存在: {}".format(region_name))
+            region_name_cn = region_info.get("name", region_name)
+        
         lat_min = region_info.get("lat_min", 18.0)
         lat_max = region_info.get("lat_max", 54.0)
         lng_min = region_info.get("lng_min", 73.0)
         lng_max = region_info.get("lng_max", 135.0)
+        
+        # 使用传入的网格大小，或数据库/配置中的默认值（DJI使用千米为单位）
+        if grid_size_km is None:
+            grid_size_km = region_info.get("grid_size_km", 1000)
+        
+        # 将千米转换为米（generate_grid_points函数使用米为单位）
+        grid_size_m = grid_size_km * 1000
         
         print("=" * 70)
         print("开始按区域分块爬取禁飞区数据")
@@ -278,8 +425,8 @@ class DJIFlySafeCrawler(BaseCrawler):
         print("网格大小: {} km".format(grid_size_km))
         print("=" * 70)
         
-        # 生成网格中心点
-        grid_points = generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_km)
+        # 生成网格中心点（传入米为单位）
+        grid_points = generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_m)
         
         # 存储所有爬取的features
         all_features = []
@@ -291,8 +438,8 @@ class DJIFlySafeCrawler(BaseCrawler):
             print("\n[{}/{}] 爬取网格点: ({:.4f}, {:.4f})".format(index, len(grid_points), lat, lng))
             
             try:
-                # 爬取当前网格点的禁飞区数据
-                result = self.crawl(lat=lat, lng=lng, radius=grid_size_km / 2)
+                # 爬取当前网格点的禁飞区数据（radius使用米为单位）
+                result = self.crawl(lat=lat, lng=lng, radius=grid_size_m / 2)
                 
                 # 添加到总结果
                 features = result.get("features", [])

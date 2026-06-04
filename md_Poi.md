@@ -4,6 +4,13 @@
 
 本模块用于采集高德地图和天地图的 POI（Point of Interest）数据，支持多种搜索模式，统一通过 `main.py` 入口调用。
 
+**核心特性：**
+- 支持从数据库动态获取区域边界（省/市两级）
+- 支持按区域级别过滤数据（市级只保留city匹配，省级只保留province匹配）
+- 支持限流自动重试（指数退避策略）
+- 支持详细的POI类型统计日志
+- 网格大小单位为**米**，便于精细控制
+
 ---
 
 ## 命令行接口结构
@@ -25,6 +32,8 @@ main.py --category <poi|dji> [--provider <amap|tianditu>] [--action <poitype|poi
 ## 接口详细说明
 
 ### 1. POI 模块接口
+
+POI数据获取支持**两种搜索模式**，系统会根据传入参数自动判断使用哪种模式，优先级从高到低为：**区域分块模式 > 矩形范围模式**。
 
 #### 1.1 获取 POI 类型列表
 
@@ -147,100 +156,21 @@ Action: Get POI Types
 
 **接口作用**：根据指定的搜索范围和条件，爬取高德或天地图的 POI 数据。
 
-**支持三种搜索模式**：
+**两种搜索模式**（优先级：区域分块 > 矩形范围）：
 
-##### 模式一：单点周边搜索
+##### 模式一：矩形范围搜索（Bounds Crawl）
 
-**调用方式**：
-```bash
-python main.py --category poi --provider amap --action poidata \
-  --lat 34.72 --lng 113.62 --radius 5 --keywords "学校"
-```
-
-**参数说明**：
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `--category` | string | 是 | 固定值 `poi` |
-| `--provider` | string | 是 | `amap` 或 `tianditu` |
-| `--action` | string | 是 | 固定值 `poidata` |
-| `--lat` | float | 否 | 中心纬度，默认使用配置的默认值 |
-| `--lng` | float | 否 | 中心经度，默认使用配置的默认值 |
-| `--radius` | float | 否 | 搜索半径（公里），默认 5 公里 |
-| `--keywords` | string | 否 | 搜索关键词，如"学校"、"医院" |
-
-**返回结果**：
-
-POI 数据默认不再只输出 JSON 文件，而是直接写入 PostgreSQL：
-
-| 数据源 | 入库表 |
-|--------|--------|
-| 高德 | `gis_poiType_gd` |
-| 天地图 | `gis_poiType_td` |
-
-控制台会输出入库数量：
-
-```text
-成功！共获取 128 个高德POI，已入库 128 条
-入库表: gis_poiType_gd
-```
-
-入库表会自动创建，核心字段如下：
-
-| 字段 | 说明 |
-|------|------|
-| `source_platform` | 数据源：`amap` 或 `tianditu` |
-| `poi_id` | 平台 POI 唯一 ID |
-| `name` | POI 名称 |
-| `type_code` | POI 类型编码 |
-| `type_name` | POI 类型名称 |
-| `address` | 地址 |
-| `province/city/district` | 行政区信息 |
-| `lng/lat` | 坐标 |
-| `geom` | PostGIS 点位，SRID=4326 |
-| `raw_data` | 平台原始 JSON |
-| `metadata` | 采集参数，例如模式、区域、关键词 |
-
-函数返回结构仍保留原始数据，便于调试：
-
-```json
-{
-  "status": "success",
-  "count": 128,
-  "metadata": {
-    "mode": "around",
-    "location": {"lat": 34.72, "lng": 113.62},
-    "radius": 5000,
-    "keywords": "学校"
-  },
-  "data": [
-    {
-      "id": "B0FFFHB25F",
-      "name": "郑州市第一中学",
-      "type": "科教文化服务|学校|中学",
-      "typecode": "130201",
-      "location": "113.6453,34.7521",
-      "address": "郑州市金水区文化路60号",
-      "cityname": "郑州市",
-      "adname": "金水区"
-    }
-  ]
-}
-```
-
-**注意事项**：
-- 坐标使用 WGS84 坐标系
-- radius 参数单位为公里，内部转换为米
-- keywords 为空时返回所有类型 POI
-
----
-
-##### 模式二：矩形范围搜索
+**适用场景**：自定义矩形区域搜索，如搜索某个城市范围内的POI
 
 **调用方式**：
 ```bash
+# 搜索郑州市指定矩形范围内的医院
 python main.py --category poi --provider amap --action poidata \
   --lat-min 34.65 --lat-max 34.80 --lng-min 113.55 --lng-max 113.75 --keywords "医院"
+
+# 获取矩形范围内所有POI类型
+python main.py --category poi --provider amap --action poidata \
+  --lat-min 34.65 --lat-max 34.80 --lng-min 113.55 --lng-max 113.75 --keywords "全部"
 ```
 
 **参数说明**：
@@ -250,11 +180,17 @@ python main.py --category poi --provider amap --action poidata \
 | `--category` | string | 是 | 固定值 `poi` |
 | `--provider` | string | 是 | `amap` 或 `tianditu` |
 | `--action` | string | 是 | 固定值 `poidata` |
-| `--lat-min` | float | 是 | 最小纬度 |
-| `--lat-max` | float | 是 | 最大纬度 |
-| `--lng-min` | float | 是 | 最小经度 |
-| `--lng-max` | float | 是 | 最大经度 |
-| `--keywords` | string | 否 | 搜索关键词 |
+| `--lat-min` | float | 是 | 最小纬度（矩形左下角） |
+| `--lat-max` | float | 是 | 最大纬度（矩形右上角） |
+| `--lng-min` | float | 是 | 最小经度（矩形左下角） |
+| `--lng-max` | float | 是 | 最大经度（矩形右上角） |
+| `--keywords` | string | 否 | 搜索关键词；输入 `all` 或 `全部` 可获取所有POI类型 |
+
+**模式特点**：
+- 灵活定义搜索范围，适合不规则区域
+- 四个边界参数必须同时提供
+- 范围不宜过大，建议单次搜索面积不超过 100 平方公里
+- 天地图矩形搜索优先使用多边形搜索，失败后自动降级为视野内搜索
 
 **返回结果**：
 
@@ -288,12 +224,17 @@ POI 数据默认直接入库：
 
 ---
 
-##### 模式三：区域分块搜索
+##### 模式二：区域分块搜索（Region Crawl）
+
+**适用场景**：大规模区域采集，如城市、省份、全国范围的POI数据采集
 
 **调用方式**：
 ```bash
-python main.py --category poi --provider amap --action poidata \
-  --region zhengzhou --grid-size 20 --keywords "学校"
+# 搜索郑州市范围内的学校（网格大小50000米=50公里）
+python main.py --category poi --provider amap --action poidata --region "郑州市" --grid-size 50000 --keywords "学校"
+
+# 获取河南省范围内所有POI类型（网格大小200000米=200公里）
+python main.py --category poi --provider amap --action poidata --region "河南省" --grid-size 200000 --keywords "all"
 ```
 
 **参数说明**：
@@ -303,20 +244,45 @@ python main.py --category poi --provider amap --action poidata \
 | `--category` | string | 是 | 固定值 `poi` |
 | `--provider` | string | 是 | `amap` 或 `tianditu` |
 | `--action` | string | 是 | 固定值 `poidata` |
-| `--region` | string | 是 | 预定义区域名称（见下表） |
-| `--grid-size` | float | 否 | 网格大小（公里），使用区域默认值 |
-| `--keywords` | string | 否 | 搜索关键词 |
+| `--region` | string | 是 | **中文区域名称**（如"河南省"、"郑州市"） |
+| `--grid-size` | int | 否 | 网格大小（**米**），默认根据区域级别自动设置 |
+| `--keywords` | string | 否 | 搜索关键词；输入 `all` 或 `全部` 可获取所有POI类型 |
 
-**支持的区域**：
+**模式特点**：
+- 自动将大区域划分为多个网格进行爬取
+- 支持自动去重，避免重复数据
+- 适合大规模区域采集，如城市、省份、全国
+- **区域边界优先从数据库获取**（`jc_sheng` 表查省级，`jc_shi` 表查市级）
+- 数据库查询失败时回退到配置文件 `config/settings.py` 中的 `REGION_CONFIG`
+- 根据区域级别自动过滤数据（市级只保留city匹配，省级只保留province匹配）
 
-| 区域代码 | 名称 | 默认网格 |
-|----------|------|----------|
-| `zhengzhou` | 郑州市 | 20km |
-| `henan` | 河南省 | 200km |
-| `china` | 中国 | 1000km |
-| `beijing` | 北京市 | 100km |
-| `shanghai` | 上海市 | 100km |
-| `guangdong` | 广东省 | 200km |
+**区域级别与默认网格大小**：
+
+| 区域级别 | 默认网格大小 | 说明 |
+|----------|--------------|------|
+| 省级 | 200000 米（200公里） | 如河南省 |
+| 市级 | 100000 米（100公里） | 如郑州市 |
+
+**数据库表结构**（用于获取区域边界）：
+
+**省级表 `jc_sheng`**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `gid` | int4 | 主键 |
+| `shengname` | varchar(24) | 省份名称（中文） |
+| `shengcode` | varchar(10) | 省份代码 |
+| `geom` | geometry(MULTIPOLYGON, 4326) | 几何边界 |
+
+**市级表 `jc_shi`**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `gid` | int4 | 主键 |
+| `shiname` | varchar(30) | 城市名称（中文） |
+| `shicode` | varchar(10) | 城市代码 |
+| `shengname` | varchar(24) | 所属省份名称 |
+| `geom` | geometry(MULTIPOLYGON, 4326) | 几何边界 |
 
 **返回结果**：
 
@@ -425,13 +391,62 @@ TIANDITU_CONFIG["api_key"] = "your_key"
 
 ---
 
+## 限流处理机制
+
+当触发高德 API 限流（错误码 `CUQPS_HAS_EXCEEDED_THE_LIMIT`）时，系统会自动重试：
+
+| 参数 | 值 | 说明 |
+|------|----|------|
+| 最大重试次数 | 5 次 | 超过后放弃当前请求 |
+| 重试延迟策略 | 指数退避 | 10s → 20s → 40s → 80s → 160s |
+| 触发条件 | `info == 'CUQPS_HAS_EXCEEDED_THE_LIMIT'` | 仅针对限流错误重试 |
+
+**日志输出示例**：
+```
+范围搜索 页码: 1
+API返回错误: CUQPS_HAS_EXCEEDED_THE_LIMIT
+⚠️ 触发限流，等待 10 秒后重试 (第 1/5 次)
+```
+
+---
+
+## 日志统计说明
+
+爬取过程中会输出详细的统计信息：
+
+### 网格级别统计
+```
+📊 当前网格POI类型统计:
+  - 110000 (交通设施服务): 45 条
+  - 210000 (地名地址信息): 32 条
+  - 120000 (金融保险服务): 18 条
+  总计: 95 条
+```
+
+### 总体统计
+```
+📊 爬取结果统计
+==========================================
+总网格数: 9
+成功: 9, 失败: 0
+去重前: 1256 条
+去重后: 987 条
+
+按类型统计:
+  - 110000 (交通设施服务): 234 条 (23.7%)
+  - 210000 (地名地址信息): 189 条 (19.1%)
+```
+
+---
+
 ## 通用注意事项
 
-1. **API 限流**：每个请求之间有 0.2 秒间隔，避免触发限流
+1. **API 限流**：每个请求之间有 0.2 秒间隔，避免触发限流；触发限流时自动指数退避重试
 2. **数据去重**：区域分块模式会自动去重，高德按 `id`，天地图按 `hotPointID`
 3. **坐标系统**：统一使用 WGS84 坐标系（EPSG:4326）
 4. **网络超时**：请求超时时间为 30 秒，可在配置中调整
 5. **数据库入库**：当前 POI 数据默认写入 PostgreSQL；高德写入 `gis_poiType_gd`，天地图写入 `gis_poiType_td`
+6. **区域匹配**：传入中文区域名称（如"河南省"、"郑州市"），系统自动区分省/市级别并过滤数据
 
 ---
 

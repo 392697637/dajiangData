@@ -25,13 +25,42 @@ warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
 
 class TiandituPOICrawler(BaseCrawler):
-    """天地图POI爬虫"""
+    """
+    天地图POI爬虫类
+    
+    支持四种搜索模式：
+    1. 视野内搜索 (queryType=2) - mapBound 矩形范围
+    2. 多边形搜索 (queryType=10) - polygon 多边形/矩形范围
+    3. 周边搜索 (queryType=3) - 中心点 + 半径
+    4. 区域分块搜索 - 按省份/自定义区域网格化爬取
+    
+    主要特性：
+    - 支持从数据库动态获取区域边界（优先）
+    - 支持按区域级别过滤数据
+    - 网格大小单位为米
+    """
 
-    QUERY_MAPBOUND = 2
-    QUERY_AROUND = 3
-    QUERY_POLYGON = 10
+    QUERY_MAPBOUND = 2    # 视野内搜索
+    QUERY_AROUND = 3      # 周边搜索
+    QUERY_POLYGON = 10    # 多边形搜索
 
     def __init__(self, config):
+        """
+        初始化天地图POI爬虫
+        
+        Args:
+            config (dict): 配置字典，包含以下关键字段：
+                - api_url: 天地图API地址
+                - api_key: 天地图搜索服务Key
+                - data_types: 数据类型过滤
+                - level: 地图级别（默认12）
+                - page_size: 每页条数（默认100）
+                - default_keyword: 默认搜索关键词
+                - show: 返回结果格式
+                - request_delay: 请求间隔（秒）
+                - region_config: 区域配置字典
+                - db_config: 数据库连接配置
+        """
         super().__init__(config)
 
         self.api_url = config['api_url']
@@ -45,10 +74,21 @@ class TiandituPOICrawler(BaseCrawler):
         self.region_config = config.get('region_config', {})
 
     def _check_api_key(self):
+        """
+        检查API密钥是否已配置
+        
+        Raises:
+            Exception: 如果API密钥未配置或为默认值
+        """
         if not self.api_key or self.api_key == 'your_tianditu_api_key':
             raise Exception("请先在config/settings.py中配置天地图API Key")
 
     def _sleep(self):
+        """
+        根据配置的请求间隔进行休眠
+        
+        用于控制API请求频率，避免触发限流
+        """
         if self.request_delay > 0:
             time.sleep(self.request_delay)
 
@@ -232,20 +272,59 @@ class TiandituPOICrawler(BaseCrawler):
             "keywords": keywords,
         })
 
-    def crawl_region(self, region_name="henan", grid_size_km=None, keywords=None, output_file=None):
-        """按区域分块搜索POI"""
+    def crawl_region(self, region_name="河南省", grid_size_m=None, keywords=None, output_file=None):
+        """
+        按区域分块搜索POI（核心方法）
+        
+        将指定区域按网格分块，对每个网格进行矩形范围搜索，最后合并去重。
+        
+        工作流程：
+        1. 优先从数据库获取区域边界（支持省/市两级）
+        2. 根据网格大小将区域划分为多个网格点
+        3. 对每个网格点进行矩形范围搜索
+        4. 合并所有结果并去重
+        
+        Args:
+            region_name (str): 区域中文名称（如"河南省"、"郑州市"），默认"河南省"
+            grid_size_m (int, optional): 网格大小（米），默认根据区域级别自动设置
+            keywords (str, optional): 搜索关键词
+            output_file (str, optional): 输出文件名
+            
+        Returns:
+            dict: 包含爬取结果的字典
+            
+        Notes:
+            - 区域边界优先从数据库 jc_sheng/jc_shi 表获取
+            - 网格大小单位为**米**，与DJI爬虫的千米单位不同
+        """
         self._check_api_key()
 
-        region_info = self.region_config.get(region_name)
-        if not region_info:
-            raise Exception("区域配置不存在: {}".format(region_name))
+        # 优先从数据库获取区域边界信息
+        db_region_info = self._get_region_bounds_from_db(region_name)
+        region_level = None
+        
+        if db_region_info:
+            print(f"✅ 从数据库获取区域边界信息: {db_region_info['name']}")
+            region_info = db_region_info
+            region_name_cn = db_region_info["name"]
+            region_name = db_region_info["name_en"]
+            region_level = db_region_info.get("level")
+        else:
+            # 数据库查询失败，回退到配置文件
+            print(f"⚠️ 数据库查询失败，使用配置文件中的区域配置")
+            region_info = self.region_config.get(region_name)
+            if not region_info:
+                raise Exception("区域配置不存在: {}".format(region_name))
+            region_name_cn = region_info.get("name", region_name)
 
-        region_name_cn = region_info.get("name", region_name)
         lat_min = region_info.get("lat_min")
         lat_max = region_info.get("lat_max")
         lng_min = region_info.get("lng_min")
         lng_max = region_info.get("lng_max")
-        grid_size_km = grid_size_km or region_info.get("grid_size_km", 200)
+        
+        # 使用传入的网格大小（米），或数据库/配置中的默认值（转换为米）
+        if grid_size_m is None:
+            grid_size_m = region_info.get("grid_size_km", 200) * 1000
 
         print("=" * 70)
         print("开始按区域分块爬取天地图POI")
@@ -253,10 +332,10 @@ class TiandituPOICrawler(BaseCrawler):
         print("边界: 纬度 {:.2f}~{:.2f}, 经度 {:.2f}~{:.2f}".format(
             lat_min, lat_max, lng_min, lng_max
         ))
-        print("网格大小: {} km".format(grid_size_km))
+        print("网格大小: {} 米".format(grid_size_m))
         print("=" * 70)
 
-        grid_points = generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_km)
+        grid_points = generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_m)
         all_pois = []
         success_count = 0
         fail_count = 0
@@ -266,7 +345,7 @@ class TiandituPOICrawler(BaseCrawler):
                 index, len(grid_points), lat, lng
             ))
             try:
-                ltlat, ltlng, rblat, rblng = latlng_to_rectangle(lat, lng, grid_size_km / 2)
+                ltlat, ltlng, rblat, rblng = latlng_to_rectangle(lat, lng, grid_size_m / 2)
                 polygon = bounds_to_tianditu_polygon(ltlng, rblat, rblng, ltlat)
                 pois = self._fetch_by_polygon(polygon, keywords=keywords)
                 if not pois:
@@ -283,12 +362,12 @@ class TiandituPOICrawler(BaseCrawler):
         unique_pois = self._dedupe_pois(all_pois)
 
         if output_file is None:
-            output_file = "poi_{}_{}km.json".format(region_name, grid_size_km)
+            output_file = "poi_{}_{}m.json".format(region_name, grid_size_m)
 
         return self._build_result(unique_pois, output_file, {
             "mode": "region",
             "region": region_name_cn,
-            "grid_size_km": grid_size_km,
+            "grid_size_m": grid_size_m,
             "total_grids": len(grid_points),
             "success_grids": success_count,
             "fail_grids": fail_count,

@@ -574,45 +574,84 @@ def _print_poi_types(types_data, provider):
     logger.info(f"共 {len(types)} 个一级分类")
 
 
+def _normalize_keywords(keywords):
+    """
+    标准化keywords参数：如果为 'all' 或 '全部'（支持带引号或前后空格），返回 None 以获取所有POI类型
+    """
+    if keywords:
+        # 去除前后空格和可能的引号
+        normalized = keywords.strip().strip('\'"')
+        # 判断是否为"全部"类型
+        if normalized.lower() in ['all', '全部']:
+            return None
+    return keywords
+
+
 def _run_poi_crawler(crawler, args, config):
-    """执行POI数据爬取（高德/天地图通用逻辑）"""
+    """
+    执行POI数据爬取（高德/天地图通用逻辑）
+    
+    POI数据获取支持两种模式，优先级从高到低：
+    1. 区域分块模式 (Region Crawl)：通过 --region 指定预定义区域，自动分块爬取
+    2. 矩形范围模式 (Bounds Crawl)：通过 --lat-min/--lat-max/--lng-min/--lng-max 指定矩形区域
+    
+    Args:
+        crawler: POI爬虫实例（AmapPOICrawler 或 TiandituPOICrawler）
+        args: 命令行参数对象
+        config: 数据源配置字典
+    """
+    # 标准化keywords参数：支持 'all' 或 '全部' 获取所有POI类型
+    keywords = _normalize_keywords(args.keywords)
+    
+    # 模式一：区域分块爬取（最高优先级）
+    # 适用于大规模区域采集，如城市、省份、全国
+    # 自动将区域划分为网格，逐块爬取后合并去重
     if args.region:
-        print("Mode: Region Crawl")
-        print("Region: {}".format(args.region))
-        print("Grid Size: {} km".format(args.grid_size))
+        print("\n┌─────────────────────────────────────────────────────────┐")
+        print("│ 【模式一】区域分块爬取 (Region Crawl)                   │")
+        print("├─────────────────────────────────────────────────────────┤")
+        print("│ 区域名称: {}".format(args.region))
+        print("│ 网格大小: {} km".format(args.grid_size))
+        if args.keywords and keywords is None:
+            print("│ 搜索关键词: ALL（获取所有POI类型）")
+        elif args.keywords:
+            print("│ 搜索关键词: {}".format(args.keywords))
+        print("└─────────────────────────────────────────────────────────┘")
+        
         crawler.crawl_region(
             region_name=args.region,
             grid_size_km=args.grid_size,
-            keywords=args.keywords,
+            keywords=keywords,
         )
+    
+    # 模式二：矩形范围爬取（唯一其他模式）
+    # 适用于自定义矩形区域采集
     elif _has_bounds(args):
-        print("Mode: Bounds Crawl")
-        print("Bounds: lat {:.4f}~{:.4f}, lng {:.4f}~{:.4f}".format(
-            args.lat_min, args.lat_max, args.lng_min, args.lng_max
-        ))
+        print("\n┌─────────────────────────────────────────────────────────┐")
+        print("│ 【模式二】矩形范围爬取 (Bounds Crawl)                   │")
+        print("├─────────────────────────────────────────────────────────┤")
+        print("│ 纬度范围: {:.4f} ~ {:.4f}".format(args.lat_min, args.lat_max))
+        print("│ 经度范围: {:.4f} ~ {:.4f}".format(args.lng_min, args.lng_max))
+        if args.keywords and keywords is None:
+            print("│ 搜索关键词: ALL（获取所有POI类型）")
+        elif args.keywords:
+            print("│ 搜索关键词: {}".format(args.keywords))
+        print("└─────────────────────────────────────────────────────────┘")
+        
         crawler.crawl_bounds(
             lat_min=args.lat_min,
             lat_max=args.lat_max,
             lng_min=args.lng_min,
             lng_max=args.lng_max,
-            keywords=args.keywords,
+            keywords=keywords,
         )
+    
+    # 未指定有效模式
     else:
-        from config import DEFAULT_LAT, DEFAULT_LNG
-        lat = args.lat or DEFAULT_LAT
-        lng = args.lng or DEFAULT_LNG
-        print("Mode: Around Search")
-        print("Center: ({}, {})".format(lat, lng))
-        if args.radius:
-            print("Radius: {} km".format(args.radius))
-        if args.keywords:
-            print("Keywords: {}".format(args.keywords))
-        crawler.crawl(
-            lat=lat,
-            lng=lng,
-            radius=args.radius,
-            keywords=args.keywords,
-        )
+        print("\n❌ 请指定有效的搜索模式：")
+        print("   - 区域分块模式：--region <区域名称>")
+        print("   - 矩形范围模式：--lat-min --lat-max --lng-min --lng-max")
+        raise ValueError("未指定有效的POI搜索模式")
 
 
 def handle_poi_category(args):
@@ -640,24 +679,14 @@ def handle_poi_category(args):
                         print("\n【入库结果】: ❌ 入库失败")
 
         elif args.action == 'poidata':
-            print("\nAction: Get POI Data")
+            print("\n【操作类型】: Get POI Data")
             crawler = AmapPOICrawler(AMAP_CONFIG)
             try:
-                if not args.region and not _has_bounds(args) and args.radius:
-                    from config import DEFAULT_LAT, DEFAULT_LNG
-                    lat = args.lat or DEFAULT_LAT
-                    lng = args.lng or DEFAULT_LNG
-                    radius_m = int(args.radius * 1000)
-                    print("Mode: Around Search")
-                    print("Center: ({}, {}), Radius: {} m".format(lat, lng, radius_m))
-                    if args.keywords:
-                        print("Keywords: {}".format(args.keywords))
-                    crawler.crawl(lat=lat, lng=lng, radius=radius_m, keywords=args.keywords)
-                else:
-                    _run_poi_crawler(crawler, args, AMAP_CONFIG)
-                print("\nSUCCESS!")
+                # 使用通用爬取逻辑处理区域分块和矩形范围模式
+                _run_poi_crawler(crawler, args, AMAP_CONFIG)
+                print("\n✅ SUCCESS!")
             except Exception as e:
-                print("\nFAILED: {}".format(e))
+                print("\n❌ FAILED: {}".format(e))
 
     elif provider == 'tianditu':
         print("=" * 60)
@@ -682,13 +711,14 @@ def handle_poi_category(args):
                     print("\n【入库结果】: ❌ 入库失败")
 
         elif args.action == 'poidata':
-            print("\nAction: Get POI Data")
+            print("\n【操作类型】: Get POI Data")
             crawler = TiandituPOICrawler(TIANDITU_CONFIG)
             try:
+                # 使用通用爬取逻辑处理三种模式
                 _run_poi_crawler(crawler, args, TIANDITU_CONFIG)
-                print("\nSUCCESS!")
+                print("\n✅ SUCCESS!")
             except Exception as e:
-                print("\nFAILED: {}".format(e))
+                print("\n❌ FAILED: {}".format(e))
 
 
 def handle_dji_category(args):
@@ -753,22 +783,20 @@ def main():
         help='POI操作类型（仅poi分类）:\n  poitype - 获取POI类型列表\n  poidata - 获取POI数据'
     )
 
-    # 通用坐标参数
-    parser.add_argument('--lat', type=float, help='中心纬度')
-    parser.add_argument('--lng', type=float, help='中心经度')
-    parser.add_argument('--radius', type=float, help='搜索半径(公里)')
-
-    # 范围搜索参数
-    parser.add_argument('--lat-min', type=float, help='范围最小纬度')
-    parser.add_argument('--lat-max', type=float, help='范围最大纬度')
-    parser.add_argument('--lng-min', type=float, help='范围最小经度')
-    parser.add_argument('--lng-max', type=float, help='范围最大经度')
+    # 范围搜索参数（POI模块专用）
+    parser.add_argument('--lat-min', type=float, help='范围最小纬度（矩形范围模式）')
+    parser.add_argument('--lat-max', type=float, help='范围最大纬度（矩形范围模式）')
+    parser.add_argument('--lng-min', type=float, help='范围最小经度（矩形范围模式）')
+    parser.add_argument('--lng-max', type=float, help='范围最大经度（矩形范围模式）')
 
     # DJI专用参数
     parser.add_argument('--drone', type=str, help='DJI无人机型号slug')
+    parser.add_argument('--lat', type=float, help='中心纬度（仅DJI模块）')
+    parser.add_argument('--lng', type=float, help='中心经度（仅DJI模块）')
+    parser.add_argument('--radius', type=float, help='搜索半径(公里)（仅DJI模块）')
 
     # POI专用参数
-    parser.add_argument('--keywords', type=str, help='POI搜索关键词')
+    parser.add_argument('--keywords', type=str, help='POI搜索关键词（输入 all 或 全部 可获取所有POI类型）')
     parser.add_argument('--save-to-db', action='store_true', help='将POI类型数据保存到数据库（仅poitype操作）')
 
     # 区域分块参数

@@ -34,7 +34,7 @@ def deg2rad(deg):
     return deg * (math.pi / 180.0)
 
 
-def generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_km):
+def generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_m):
     """
     生成网格中心点坐标
 
@@ -45,11 +45,12 @@ def generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_km):
         lat_max (float): 最大纬度
         lng_min (float): 最小经度
         lng_max (float): 最大经度
-        grid_size_km (float): 网格边长（公里）
+        grid_size_m (float): 网格边长（米）
 
     Returns:
         list: [(lat, lng, index), ...]
     """
+    grid_size_km = grid_size_m / 1000.0
     avg_lat = (lat_min + lat_max) / 2
     lat_grid_count = int((lat_max - lat_min) * 111 / grid_size_km) + 1
     lng_grid_count = int((lng_max - lng_min) * 111 * abs(math.cos(deg2rad(avg_lat))) / grid_size_km) + 1
@@ -115,7 +116,7 @@ def bounds_to_tianditu_polygon(lng_min, lat_min, lng_max, lat_max):
     return ",".join("{},{}".format(lng, lat) for lng, lat in coords)
 
 
-def latlng_to_rectangle(lat, lng, radius_km):
+def latlng_to_rectangle(lat, lng, radius_m):
     """
     将中心点和半径转换为矩形区域
     
@@ -129,7 +130,7 @@ def latlng_to_rectangle(lat, lng, radius_km):
     Args:
         lat (float): 中心点纬度
         lng (float): 中心点经度
-        radius_km (float): 搜索半径（公里）
+        radius_m (float): 搜索半径（米）
         
     Returns:
         tuple: (ltlat, ltlng, rblat, rblng)
@@ -139,9 +140,11 @@ def latlng_to_rectangle(lat, lng, radius_km):
             - rblng: 右下角经度
         
     Example:
-        >>> latlng_to_rectangle(34.72, 113.62, 50)
+        >>> latlng_to_rectangle(34.72, 113.62, 50000)
         (35.17045045, 112.87665583, 34.26954955, 114.36334417)
     """
+    radius_km = radius_m / 1000.0
+    
     # 计算纬度方向的增量（1度 ≈ 111公里）
     delta_lat = radius_km / 111.0
     

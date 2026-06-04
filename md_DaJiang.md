@@ -8,6 +8,7 @@
 - 当前无需 API Key。
 - 支持单点半径爬取。
 - 支持省份、全国区域分块爬取。
+- **区域边界优先从数据库获取**（支持省/市两级）。
 - 输出标准 GeoJSON。
 - 自动处理圆形、多边形和子区域。
 
@@ -15,28 +16,39 @@
 
 ```bash
 # 默认单点模式：郑州附近 50km
-python main.py --type dji
+python main.py --category dji --action dji
 
-# 指定坐标和半径
-python main.py --type dji --lat 39.90 --lng 116.40 --radius 100
+# 指定坐标和半径（半径单位：米）
+python main.py --category dji --action dji --lat 39.90 --lng 116.40 --radius 100000
 
-# 河南省分块爬取
-python main.py --type dji --region henan --grid-size 200
+# 河南省分块爬取（网格大小单位：千米）
+python main.py --category dji --action dji --region "河南省" --grid-size 200
 
-# 全国分块爬取
-python main.py --type dji --region china --grid-size 1000
+# 全国分块爬取（网格大小单位：千米）
+python main.py --category dji --action dji --region "中国" --grid-size 1000
 ```
 
 ## 参数说明
 
 | 参数 | 说明 |
 |------|------|
-| `--type dji` | 使用 DJI 禁飞区爬虫 |
+| `--category dji` | 使用 DJI 禁飞区爬虫 |
+| `--action dji` | 执行禁飞区爬取操作 |
 | `--lat` | 中心点纬度 |
 | `--lng` | 中心点经度 |
-| `--radius` | 搜索半径，单位 km |
-| `--region` | 区域代码，例如 `zhengzhou`、`henan`、`china` |
-| `--grid-size` | 区域分块大小，单位 km |
+| `--radius` | 搜索半径，单位 **米** |
+| `--region` | 区域中文名称，例如 `"河南省"`、`"郑州市"`、`"中国"` |
+| `--grid-size` | 区域分块大小，单位 **千米**（与POI爬虫不同） |
+
+## 与 POI 爬虫的区别
+
+| 特性 | DJI 禁飞区 | POI 爬虫 |
+|------|-----------|----------|
+| `--grid-size` 单位 | **千米 (km)** | **米 (m)** |
+| 默认网格大小 | 1000 km（全国） | 200000 米（省级） |
+| 区域名称格式 | 中文（如"河南省"） | 中文（如"河南省"） |
+| 数据来源 | DJI FlySafe API | 高德/天地图 API |
+| API Key 需求 | 不需要 | 需要 |
 
 ## 输出文件
 

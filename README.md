@@ -61,18 +61,31 @@ pip install -r requirements.txt
 # 查看命令帮助
 python main.py --help
 
-# 高德 POI：郑州市学校
-python main.py --type amap --region zhengzhou --grid-size 20 --keywords "学校"
+# 高德 POI：郑州市学校（网格50000米=50公里）
+python main.py --category poi --provider amap --action poidata --region "郑州市" --grid-size 50000 --keywords "学校"
+
+# 高德 POI：河南省所有POI（网格200000米=200公里）
+python main.py --category poi --provider amap --action poidata --region "河南省" --grid-size 200000 --keywords "all"
 
 # 天地图 POI：郑州市公园
-python main.py --type tianditu --region zhengzhou --grid-size 20 --keywords "公园"
+python main.py --category poi --provider tianditu --action poidata --region "郑州市" --grid-size 50000 --keywords "公园"
 
-# DJI 禁飞区：河南省
-python main.py --type dji --region henan --grid-size 200
+# DJI 禁飞区：河南省（网格200千米）
+python main.py --category dji --action dji --region "河南省" --grid-size 200
 
-# DJI 禁飞区：全国
-python main.py --type dji --region china --grid-size 500
+# DJI 禁飞区：全国（网格1000千米）
+python main.py --category dji --action dji --region "中国" --grid-size 1000
 ```
+
+## 核心功能特性
+
+| 功能 | 说明 |
+|------|------|
+| 区域边界自动获取 | 优先从数据库 `jc_sheng`/`jc_shi` 表获取，支持省/市两级 |
+| 数据过滤 | 根据区域级别自动过滤，确保 city/province 字段与输入区域匹配 |
+| 限流自动重试 | 触发限流时自动指数退避重试（最多5次） |
+| 详细统计日志 | 输出每个网格和总体的POI类型统计信息 |
+| 独立网格单位 | POI爬虫使用米，DJI爬虫使用千米，互不影响 |
 
 ## API Key 配置
 

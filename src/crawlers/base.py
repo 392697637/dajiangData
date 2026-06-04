@@ -295,6 +295,107 @@ class BaseCrawler:
         finally:
             conn.close()
     
+    def _get_region_bounds_from_db(self, region_name):
+        """
+        从数据库获取区域边界和城市名称
+        
+        仅支持中文名称查询，自动区分省和市：
+        - 先查询省级表 jc_sheng（匹配 shengname）
+        - 如果未找到，查询市级表 jc_shi（匹配 shiname）
+        
+        Args:
+            region_name: 区域中文名称（如"河南省"、"郑州市"）
+        
+        Returns:
+            dict: 包含区域信息的字典，格式如下：
+                {
+                    'name': '河南省',           # 区域中文名称
+                    'name_en': 'henan',         # 区域英文名称
+                    'lat_min': 31.4,            # 最小纬度（从geom计算）
+                    'lat_max': 36.4,            # 最大纬度（从geom计算）
+                    'lng_min': 110.4,           # 最小经度（从geom计算）
+                    'lng_max': 116.7,           # 最大经度（从geom计算）
+                    'grid_size_km': 200,        # 默认网格大小（公里）
+                    'level': 'province'|'city'  # 区域级别
+                }
+                如果数据库查询失败，返回 None
+        """
+        if psycopg2 is None:
+            print("⚠️ 缺少psycopg2依赖，无法从数据库查询区域边界")
+            return None
+        
+        conn = None
+        try:
+            conn = psycopg2.connect(**self.db_config)
+            cur = conn.cursor()
+            
+            # 第一步：查询省级表 jc_sheng
+            print(f"🔍 尝试从 jc_sheng 表查询区域: {region_name}")
+            cur.execute("""
+                SELECT shengname, shengcode,
+                       ST_YMin(geom) as min_lat, ST_YMax(geom) as max_lat,
+                       ST_XMin(geom) as min_lng, ST_XMax(geom) as max_lng
+                FROM jc_sheng 
+                WHERE shengname = %s OR shengname LIKE %s OR shengname LIKE %s
+                ORDER BY 
+                    CASE WHEN shengname = %s THEN 1 
+                         WHEN shengname LIKE %s THEN 2 
+                         ELSE 3 END
+                LIMIT 1
+            """, (region_name, f"%{region_name}%", f"{region_name}省", region_name, f"%{region_name}%"))
+            row = cur.fetchone()
+            if row:
+                print(f"✅ 从 jc_sheng 表找到区域: {row[0]}")
+                return {
+                    'name': row[0],
+                    'name_en': row[1].lower() if row[1] else region_name,
+                    'lat_min': float(row[2]) if row[2] else None,
+                    'lat_max': float(row[3]) if row[3] else None,
+                    'lng_min': float(row[4]) if row[4] else None,
+                    'lng_max': float(row[5]) if row[5] else None,
+                    'grid_size_km': 200,
+                    'level': 'province'
+                }
+            
+            # 第二步：查询市级表 jc_shi
+            print(f"🔍 尝试从 jc_shi 表查询区域: {region_name}")
+            cur.execute("""
+                SELECT shiname, shicode, shengname,
+                       ST_YMin(geom) as min_lat, ST_YMax(geom) as max_lat,
+                       ST_XMin(geom) as min_lng, ST_XMax(geom) as max_lng
+                FROM jc_shi 
+                WHERE shiname = %s OR shiname LIKE %s OR shiname LIKE %s
+                ORDER BY 
+                    CASE WHEN shiname = %s THEN 1 
+                         WHEN shiname LIKE %s THEN 2 
+                         ELSE 3 END
+                LIMIT 1
+            """, (region_name, f"%{region_name}%", f"{region_name}市", region_name, f"%{region_name}%"))
+            row = cur.fetchone()
+            if row:
+                print(f"✅ 从 jc_shi 表找到区域: {row[0]}（属于{row[2]}）")
+                return {
+                    'name': row[0],
+                    'name_en': row[1].lower() if row[1] else region_name,
+                    'lat_min': float(row[3]) if row[3] else None,
+                    'lat_max': float(row[4]) if row[4] else None,
+                    'lng_min': float(row[5]) if row[5] else None,
+                    'lng_max': float(row[6]) if row[6] else None,
+                    'grid_size_km': 100,
+                    'level': 'city',
+                    'province_name': row[2]
+                }
+            
+            print(f"❌ 未在数据库中找到区域: {region_name}")
+            return None
+            
+        except Exception as e:
+            print(f"⚠️ 数据库查询失败: {str(e)}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+
     def crawl(self, **kwargs):
         """
         爬取数据（抽象方法，子类必须实现）
