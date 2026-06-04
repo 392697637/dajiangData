@@ -272,16 +272,16 @@ class DJIFlySafeCrawler(BaseCrawler):
         """
         爬取单个区域的DJI禁飞区数据
         
-        核心方法，负责发送API请求、解析响应并保存结果。
+        核心方法，负责发送API请求、解析响应并返回结果。
         
         Args:
             lat (float): 中心纬度（可选，默认为配置中的默认值）
             lng (float): 中心经度（可选，默认为配置中的默认值）
             radius (float): 搜索半径（米，可选，默认为配置中的默认值）
-            output_file (str): 输出文件路径（可选，自动生成）
+            output_file (str): 输出文件路径（可选，默认为None不输出文件）
         
         Returns:
-            dict: GeoJSON格式的禁飞区数据
+            dict: 包含features的字典
         
         Raises:
             Exception: 请求失败、解析失败或数据异常时抛出异常
@@ -292,10 +292,6 @@ class DJIFlySafeCrawler(BaseCrawler):
         lat = lat if lat is not None else DEFAULT_LAT
         lng = lng if lng is not None else DEFAULT_LNG
         radius = radius if radius is not None else DEFAULT_RADIUS
-        
-        # 生成输出文件名（如果未指定）
-        if output_file is None:
-            output_file = "flyzones_{}_{}_{}.geojson".format(lat, lng, radius)
         
         # 将中心点和半径转换为矩形区域
         ltlat, ltlng, rblat, rblng = latlng_to_rectangle(lat, lng, radius)
@@ -311,15 +307,8 @@ class DJIFlySafeCrawler(BaseCrawler):
             "level": self.levels            # 禁飞区级别
         }
         
-        # 打印请求参数信息
-        print("请求参数:")
-        print("  矩形区域: ltlat={:.8f}, ltlng={:.8f}, rblat={:.8f}, rblng={:.8f}".format(ltlat, ltlng, rblat, rblng))
-        print("  无人机型号: {}".format(self.drone_model))
-        print("  禁飞区级别: {}".format(self.levels))
-        
         # 发送API请求
         resp = self._make_request(self.api_url, params=params)
-        print("\n响应状态码: {}".format(resp.status_code))
         
         # 解析JSON响应
         data = resp.json()
@@ -331,22 +320,240 @@ class DJIFlySafeCrawler(BaseCrawler):
         if not features:
             raise Exception("未获取到禁飞区数据")
         
-        # 构建完整的GeoJSON对象
-        geojson = {
+        # 构建结果对象（不输出GeoJSON文件）
+        result = {
             "type": "FeatureCollection",
             "features": features,
             "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::4326"}}
         }
         
-        # 保存GeoJSON文件
-        filepath = self._save_json(geojson, output_file)
-        
         # 打印成功信息
-        print("\n成功！共获取 {} 个禁飞区".format(len(features)))
-        print("输出文件: {}".format(filepath))
+        print("  ✓ 成功获取 {} 个禁飞区".format(len(features)))
         
-        return geojson
+        return result
     
+    def _create_flyzone_table(self, conn):
+        """
+        创建禁飞区数据表（如果不存在），先删除现有表再创建
+        
+        Args:
+            conn: 数据库连接对象
+        
+        Returns:
+            bool: 创建成功返回True，失败返回False
+        """
+        try:
+            with conn.cursor() as cur:
+                # 先删除现有表
+                drop_sql = f'DROP TABLE IF EXISTS "{self.db_table}"'
+                cur.execute(drop_sql)
+                print(f"  删除旧表: {self.db_table}")
+                
+                # 创建新表（PostgreSQL不支持在CREATE TABLE中直接使用COMMENT）
+                create_sql = f'''
+                    CREATE TABLE "{self.db_table}" (
+                        "gid" SERIAL PRIMARY KEY,
+                        "area_id" BIGINT,
+                        "name" VARCHAR(254),
+                        "type" NUMERIC,
+                        "level" NUMERIC,
+                        "color" VARCHAR(254),
+                        "country" VARCHAR(254),
+                        "city" VARCHAR(254),
+                        "address" VARCHAR(254),
+                        "descriptio" VARCHAR(254),
+                        "height" NUMERIC,
+                        "radius" NUMERIC,
+                        "begin_at" NUMERIC,
+                        "end_at" NUMERIC,
+                        "data_sourc" NUMERIC,
+                        "url" VARCHAR(254),
+                        "__gid" NUMERIC,
+                        "shiid" VARCHAR(10),
+                        "shicode" VARCHAR(10),
+                        "shiname" VARCHAR(30),
+                        "shengcode" VARCHAR(10),
+                        "shengid" VARCHAR(10),
+                        "shengname" VARCHAR(24),
+                        "geom" GEOMETRY(MULTIPOLYGON, 4326)
+                    )
+                '''
+                cur.execute(create_sql)
+                print(f"  创建新表: {self.db_table}")
+                
+                # 创建空间索引（先删除已存在的索引）
+                drop_index_sql = f'DROP INDEX IF EXISTS "{self.db_table}_geom_idx"'
+                cur.execute(drop_index_sql)
+                index_sql = f'CREATE INDEX "{self.db_table}_geom_idx" ON "{self.db_table}" USING GIST (geom)'
+                cur.execute(index_sql)
+                print(f"  创建空间索引: {self.db_table}_geom_idx")
+                
+                # 添加字段注释（PostgreSQL使用COMMENT ON COLUMN语法）
+                comments = [
+                    ('area_id', '禁飞区唯一标识'),
+                    ('name', '禁飞区名称'),
+                    ('type', '禁飞区类型'),
+                    ('level', '禁飞级别(0-机场禁飞区,1-机场限飞区,2-国家级机场禁飞区,3-临时限飞区,7-干扰源区域,8-军事管理区,10-特殊管控区)'),
+                    ('color', '显示颜色'),
+                    ('country', '国家'),
+                    ('city', '城市'),
+                    ('address', '详细地址'),
+                    ('descriptio', '描述信息'),
+                    ('height', '高度限制(米)'),
+                    ('radius', '半径(米)'),
+                    ('begin_at', '开始时间(时间戳)'),
+                    ('end_at', '结束时间(时间戳)'),
+                    ('data_sourc', '数据源标识'),
+                    ('url', '详情链接'),
+                    ('__gid', '内部ID'),
+                    ('shiid', '市级ID'),
+                    ('shicode', '市级编码'),
+                    ('shiname', '市级名称'),
+                    ('shengcode', '省级编码'),
+                    ('shengid', '省级ID'),
+                    ('shengname', '省级名称'),
+                    ('geom', '几何数据(坐标系EPSG:4326)')
+                ]
+                
+                for col_name, comment in comments:
+                    comment_sql = f'COMMENT ON COLUMN "{self.db_table}"."{col_name}" IS %s'
+                    cur.execute(comment_sql, (comment,))
+                print(f"  添加字段注释完成")
+            
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"❌ 创建表失败: {str(e)}")
+            return False
+
+    def _save_flyzones_to_db(self, features, region_info=None):
+        """
+        将禁飞区数据保存到数据库（先删除旧表再创建新表）
+        
+        Args:
+            features (list): GeoJSON features列表，每个feature包含禁飞区信息
+            region_info (dict, optional): 区域信息，包含shengname, shengcode, shiname, shicode等
+        
+        Returns:
+            int: 成功入库的记录数，失败返回0
+        """
+        if not self.save_to_db:
+            return 0
+        if not self.db_table:
+            print("⚠️ 未配置禁飞区入库表名 db_table")
+            return 0
+        if not features:
+            return 0
+        
+        try:
+            import psycopg2
+            from psycopg2.extras import execute_values
+        except ImportError:
+            print("⚠️ 缺少psycopg2-binary依赖，请先安装: pip install psycopg2-binary")
+            return 0
+        
+        try:
+            conn = psycopg2.connect(**self.db_config)
+            
+            # 先删除旧表并创建新表
+            print(f"\n📦 准备创建禁飞区数据表: {self.db_table}")
+            if not self._create_flyzone_table(conn):
+                conn.close()
+                return 0
+            
+            # 获取区域信息
+            shengname = region_info.get("shengname") if region_info else None
+            shengcode = region_info.get("shengcode") if region_info else None
+            shengid = region_info.get("shengid") if region_info else None
+            shiname = region_info.get("shiname") if region_info else None
+            shicode = region_info.get("shicode") if region_info else None
+            shiid = region_info.get("shiid") if region_info else None
+            
+            # 准备插入数据
+            rows = []
+            for feature in features:
+                props = feature.get("properties", {})
+                geometry = feature.get("geometry", {})
+                
+                # 解析几何数据
+                geom_type = geometry.get("type")
+                coordinates = geometry.get("coordinates", [])
+                
+                # 将坐标转换为WKT格式（限制精度为6位小数）
+                def format_coord(coord):
+                    return "{:.6f} {:.6f}".format(coord[0], coord[1])
+                
+                if geom_type == "Polygon":
+                    wkt_geom = "MULTIPOLYGON(({}))".format(
+                        ",".join([format_coord(c) for c in coordinates[0]])
+                    )
+                elif geom_type == "MultiPolygon":
+                    polygons = []
+                    for polygon in coordinates:
+                        rings = []
+                        for ring in polygon:
+                            rings.append("(" + ",".join([format_coord(c) for c in ring]) + ")")
+                        polygons.append("(" + ",".join(rings) + ")")
+                    wkt_geom = "MULTIPOLYGON({})".format(",".join(polygons))
+                else:
+                    wkt_geom = None
+                
+                rows.append((
+                    props.get("area_id"),
+                    props.get("name"),
+                    props.get("type"),
+                    props.get("level"),
+                    props.get("color"),
+                    props.get("country"),
+                    props.get("city"),
+                    props.get("address"),
+                    props.get("description"),
+                    props.get("height"),
+                    props.get("radius"),
+                    props.get("begin_at"),
+                    props.get("end_at"),
+                    props.get("data_source"),
+                    props.get("url"),
+                    props.get("__gid"),
+                    shiid,
+                    shicode,
+                    shiname,
+                    shengcode,
+                    shengid,
+                    shengname,
+                    wkt_geom,
+                ))
+            
+            # 批量插入数据（使用ST_GeomFromText解析WKT几何数据）
+            # 使用EXECUTE动态执行，避免execute_values将ST_GeomFromText当作字符串
+            insert_sql = f'''
+                INSERT INTO "{self.db_table}" (
+                    area_id, name, type, level, color, country, city, address,
+                    descriptio, height, radius, begin_at, end_at, data_sourc, url,
+                    __gid, shiid, shicode, shiname, shengcode, shengid, shengname, geom
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
+                    ST_GeomFromText(%s, 4326)
+                )
+            '''
+            
+            with conn.cursor() as cur:
+                for row in rows:
+                    cur.execute(insert_sql, row)
+            conn.commit()
+            
+            count = len(rows)
+            print(f"\n✅ 成功入库 {count} 条禁飞区数据")
+            print(f"   入库表: {self.db_table}")
+            
+            conn.close()
+            return count
+        except Exception as e:
+            print(f"\n❌ 禁飞区入库失败: {str(e)}")
+            return 0
+
     def crawl_region(self, region_name="中国", grid_size_km=1000):
         """
         按区域分块爬取DJI禁飞区数据（核心方法）
@@ -391,6 +598,15 @@ class DJIFlySafeCrawler(BaseCrawler):
         # 获取区域配置
         region_info = None
         
+        # 中文到英文区域名称映射（用于回退到配置文件时）
+        cn_to_en_map = {
+            "中国": "china",
+            "河南省": "henan",
+            "北京市": "beijing",
+            "上海市": "shanghai",
+            "广东省": "guangdong",
+        }
+        
         # 优先从数据库获取区域边界信息
         db_region_info = self._get_region_bounds_from_db(region_name)
         if db_region_info:
@@ -401,7 +617,14 @@ class DJIFlySafeCrawler(BaseCrawler):
         else:
             # 数据库查询失败，回退到配置文件
             print(f"⚠️ 数据库查询失败，使用配置文件中的区域配置")
+            
+            # 尝试直接获取，或通过中文映射获取
             region_info = self.region_config.get(region_name)
+            if not region_info and region_name in cn_to_en_map:
+                region_info = self.region_config.get(cn_to_en_map[region_name])
+                region_name_cn = region_name
+                region_name = cn_to_en_map[region_name]
+            
             if not region_info:
                 raise Exception("区域配置不存在: {}".format(region_name))
             region_name_cn = region_info.get("name", region_name)
@@ -463,8 +686,8 @@ class DJIFlySafeCrawler(BaseCrawler):
                 seen_ids.add(area_id)
                 unique_features.append(feature)
         
-        # 构建合并后的GeoJSON
-        merged_geojson = {
+        # 构建结果对象
+        result = {
             "type": "FeatureCollection",
             "features": unique_features,
             "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::4326"}},
@@ -479,12 +702,6 @@ class DJIFlySafeCrawler(BaseCrawler):
             }
         }
         
-        # 生成输出文件名
-        output_file = "flyzones_{}_{}km.geojson".format(region_name, grid_size_km)
-        
-        # 保存合并后的文件
-        filepath = self._save_json(merged_geojson, output_file)
-        
         # 打印汇总信息
         print("\n" + "=" * 70)
         print("区域爬取完成！")
@@ -494,7 +711,18 @@ class DJIFlySafeCrawler(BaseCrawler):
         print("成功: {}, 失败: {}".format(success_count, fail_count))
         print("合并前禁飞区数量: {}".format(len(all_features)))
         print("去重后禁飞区数量: {}".format(len(unique_features)))
-        print("输出文件: {}".format(filepath))
         print("=" * 70)
         
-        return merged_geojson
+        # 将禁飞区数据直接入库（不输出GeoJSON文件）
+        if unique_features:
+            db_region_info = {
+                "shengname": region_info.get("shengname"),
+                "shengcode": region_info.get("shengcode"),
+                "shengid": region_info.get("shengid"),
+                "shiname": region_info.get("shiname"),
+                "shicode": region_info.get("shicode"),
+                "shiid": region_info.get("shiid"),
+            }
+            self._save_flyzones_to_db(unique_features, db_region_info)
+        
+        return result

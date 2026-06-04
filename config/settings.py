@@ -56,6 +56,11 @@ DJI_CONFIG = {
     "drones_api_url": "https://flysafe-api.dji.com/dji/drones",
     # 输出配置
     "output_dir": "output/dji",
+    # 数据库配置（用于获取区域边界和入库）
+    "db_config": DATABASE_CONFIG,
+    # 禁飞区数据入库配置
+    "save_to_db": True,
+    "db_table": "wrj_jfq_dj",  # 禁飞区数据表（已从 wrj_jfq_dj1 改为 wrj_jfq_dj）
     # 请求参数配置
     "params": {
         "default_drone": "dji-mavic-3",  # 默认无人机型号

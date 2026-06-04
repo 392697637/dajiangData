@@ -611,7 +611,7 @@ def _run_poi_crawler(crawler, args, config):
         print("│ 【模式一】区域分块爬取 (Region Crawl)                   │")
         print("├─────────────────────────────────────────────────────────┤")
         print("│ 区域名称: {}".format(args.region))
-        print("│ 网格大小: {} km".format(args.grid_size))
+        print("│ 网格大小: {} 米".format(args.grid_size))
         if args.keywords and keywords is None:
             print("│ 搜索关键词: ALL（获取所有POI类型）")
         elif args.keywords:
@@ -620,7 +620,7 @@ def _run_poi_crawler(crawler, args, config):
         
         crawler.crawl_region(
             region_name=args.region,
-            grid_size_km=args.grid_size,
+            grid_size_m=args.grid_size,
             keywords=keywords,
         )
     
@@ -737,6 +737,12 @@ def handle_dji_category(args):
             args.lng or DJI_CONFIG.get('default_lng', 113.62),
             args.radius or DJI_CONFIG.get('default_radius', 50)
         ))
+    
+    # 检查是否需要入库
+    if args.save_dji_to_db:
+        print("Save to DB: Yes")
+        DJI_CONFIG['save_to_db'] = True
+    
     print("=" * 60)
 
     crawler = DJIFlySafeCrawler(DJI_CONFIG)
@@ -794,14 +800,15 @@ def main():
     parser.add_argument('--lat', type=float, help='中心纬度（仅DJI模块）')
     parser.add_argument('--lng', type=float, help='中心经度（仅DJI模块）')
     parser.add_argument('--radius', type=float, help='搜索半径(公里)（仅DJI模块）')
+    parser.add_argument('--save-dji-to-db', action='store_true', help='将禁飞区数据保存到数据库（仅DJI模块）')
 
     # POI专用参数
     parser.add_argument('--keywords', type=str, help='POI搜索关键词（输入 all 或 全部 可获取所有POI类型）')
-    parser.add_argument('--save-to-db', action='store_true', help='将POI类型数据保存到数据库（仅poitype操作）')
+    parser.add_argument('--save-poi-to-db', action='store_true', help='将POI类型数据保存到数据库（仅poitype操作）')
 
     # 区域分块参数
-    parser.add_argument('--region', type=str, help='区域名称（如 henan、beijing）')
-    parser.add_argument('--grid-size', type=float, default=1000, help='网格大小（公里，默认1000）')
+    parser.add_argument('--region', type=str, help='区域名称（如 "河南省"、"郑州市"）')
+    parser.add_argument('--grid-size', type=float, default=1000, help='网格大小（默认：DJI用公里，POI用米）')
 
     args = parser.parse_args()
 
