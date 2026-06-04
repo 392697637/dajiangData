@@ -24,6 +24,17 @@ DEFAULT_RADIUS = 50  # 默认搜索半径（公里）
 TIMEOUT = 30  # 请求超时时间（秒）
 
 
+# ==================== PostgreSQL数据库配置 ====================
+# POI数据直接入库使用；优先读取环境变量，未设置时使用默认连接信息。
+DATABASE_CONFIG = {
+    "host": os.getenv("DB_HOST", "192.168.110.6"),
+    "port": int(os.getenv("DB_PORT", "5432")),
+    "database": os.getenv("DB_NAME", "ktd_lx_gis_shp"),
+    "user": os.getenv("DB_USER", "zhuoyi"),
+    "password": os.getenv("DB_PASSWORD", "Ktd@postSQL@2026!@#"),
+}
+
+
 # ==================== 区域边界配置（DJI/POI 共用） ====================
 REGION_CONFIG = {
     "china": {
@@ -361,6 +372,10 @@ AMAP_CONFIG = {
     "polygon_api_url": "https://restapi.amap.com/v5/place/polygon",
     # 输出配置
     "output_dir": "output/amap",
+    # POI数据直接入库配置
+    "save_to_db": True,
+    "db_table": "gis_poiType_gd",
+    "db_config": DATABASE_CONFIG,
     # API认证配置（需要在高德地图开放平台申请，或通过环境变量 AMAP_API_KEY 设置）
     "api_key": os.environ.get("AMAP_API_KEY", "3db5913a17927510f547cbddab83d41c"),
     # 区域分块配置
@@ -408,6 +423,10 @@ TIANDITU_CONFIG = {
     "api_url": "https://api.tianditu.gov.cn/v2/search",
     # 输出配置
     "output_dir": "output/tianditu",
+    # POI数据直接入库配置
+    "save_to_db": True,
+    "db_table": "gis_poiType_td",
+    "db_config": DATABASE_CONFIG,
     # API认证配置（需要在天地图开放平台申请，或通过环境变量 TIANDITU_API_KEY 设置）
     "api_key": os.environ.get("TIANDITU_API_KEY", "cf128e0b51efeb7df5f1720de282678e"),
     # 区域分块配置

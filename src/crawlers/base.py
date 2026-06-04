@@ -19,6 +19,15 @@
 import os
 import json
 import requests
+from datetime import datetime
+
+try:
+    import psycopg2
+    from psycopg2.extras import Json, execute_values
+except ImportError:  # pragma: no cover - handled at runtime when DB saving is enabled
+    psycopg2 = None
+    Json = None
+    execute_values = None
 
 
 class BaseCrawler:
@@ -48,6 +57,11 @@ class BaseCrawler:
         
         # 设置输出目录，默认为'output'
         self.output_dir = config.get('output_dir', 'output')
+
+        # POI数据入库配置。默认关闭，避免影响DJI等非POI爬虫。
+        self.save_to_db = config.get('save_to_db', False)
+        self.db_table = config.get('db_table')
+        self.db_config = config.get('db_config', {})
     
     def _make_request(self, url, method='GET', params=None, headers=None, data=None):
         """
@@ -131,6 +145,151 @@ class BaseCrawler:
             json.dump(data, f, ensure_ascii=False, indent=2)
         
         return filepath
+
+    def _get_db_connection(self):
+        """创建PostgreSQL连接。"""
+        if psycopg2 is None:
+            raise Exception("缺少psycopg2-binary依赖，请先执行 pip install -r requirements.txt")
+        return psycopg2.connect(
+            host=self.db_config.get("host"),
+            port=self.db_config.get("port"),
+            dbname=self.db_config.get("database"),
+            user=self.db_config.get("user"),
+            password=self.db_config.get("password"),
+        )
+
+    def _ensure_poi_table(self, conn, table_name):
+        """创建POI入库表；高德/天地图分别使用各自表名。"""
+        sql = f'''
+        CREATE TABLE IF NOT EXISTS "{table_name}" (
+            id BIGSERIAL PRIMARY KEY,
+            source_platform VARCHAR(32) NOT NULL,
+            poi_id VARCHAR(128),
+            name TEXT,
+            type_code TEXT,
+            type_name TEXT,
+            address TEXT,
+            province TEXT,
+            city TEXT,
+            district TEXT,
+            lng DOUBLE PRECISION,
+            lat DOUBLE PRECISION,
+            geom geometry(Point, 4326),
+            raw_data JSONB NOT NULL,
+            metadata JSONB,
+            created_at TIMESTAMPTZ DEFAULT now(),
+            updated_at TIMESTAMPTZ DEFAULT now(),
+            UNIQUE (source_platform, poi_id)
+        );
+        CREATE INDEX IF NOT EXISTS "idx_{table_name}_geom" ON "{table_name}" USING GIST (geom);
+        CREATE INDEX IF NOT EXISTS "idx_{table_name}_type_code" ON "{table_name}" (type_code);
+        CREATE INDEX IF NOT EXISTS "idx_{table_name}_name" ON "{table_name}" (name);
+        '''
+        with conn.cursor() as cur:
+            cur.execute(sql)
+        conn.commit()
+
+    def _parse_lng_lat(self, poi, platform):
+        """从不同平台POI结构中解析经纬度。"""
+        if platform == "amap":
+            location = poi.get("location")
+            if isinstance(location, str) and "," in location:
+                lng, lat = location.split(",", 1)
+                return float(lng), float(lat)
+
+        if platform == "tianditu":
+            lon = poi.get("lon") or poi.get("lng") or poi.get("longitude")
+            lat = poi.get("lat") or poi.get("latitude")
+            if lon is not None and lat is not None:
+                return float(lon), float(lat)
+
+        return None, None
+
+    def _normalize_poi_row(self, poi, platform, metadata):
+        """转换为统一入库字段。"""
+        lng, lat = self._parse_lng_lat(poi, platform)
+
+        if platform == "amap":
+            poi_id = poi.get("id")
+            type_code = poi.get("typecode")
+            type_name = poi.get("type")
+            province = poi.get("pname")
+            city = poi.get("cityname")
+            district = poi.get("adname")
+        else:
+            poi_id = poi.get("hotPointID") or poi.get("id")
+            type_code = poi.get("typeCode") or poi.get("typecode")
+            type_name = poi.get("typeName") or poi.get("type")
+            province = poi.get("province")
+            city = poi.get("city")
+            district = poi.get("county") or poi.get("district")
+
+        return (
+            platform,
+            poi_id,
+            poi.get("name"),
+            type_code,
+            type_name,
+            poi.get("address") or poi.get("addr"),
+            province,
+            city,
+            district,
+            lng,
+            lat,
+            Json(poi),
+            Json(metadata or {}),
+        )
+
+    def _save_pois_to_db(self, pois, platform, metadata=None):
+        """将POI列表直接写入数据库，按平台落到对应POI类型表。"""
+        if not self.save_to_db:
+            return 0
+        if not self.db_table:
+            raise Exception("未配置POI入库表名 db_table")
+        if not pois:
+            return 0
+
+        conn = self._get_db_connection()
+        try:
+            self._ensure_poi_table(conn, self.db_table)
+            rows = [self._normalize_poi_row(poi, platform, metadata) for poi in pois]
+            sql = f'''
+                INSERT INTO "{self.db_table}" (
+                    source_platform, poi_id, name, type_code, type_name, address,
+                    province, city, district, lng, lat, raw_data, metadata, geom, updated_at
+                ) VALUES %s
+                ON CONFLICT (source_platform, poi_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    type_code = EXCLUDED.type_code,
+                    type_name = EXCLUDED.type_name,
+                    address = EXCLUDED.address,
+                    province = EXCLUDED.province,
+                    city = EXCLUDED.city,
+                    district = EXCLUDED.district,
+                    lng = EXCLUDED.lng,
+                    lat = EXCLUDED.lat,
+                    raw_data = EXCLUDED.raw_data,
+                    metadata = EXCLUDED.metadata,
+                    geom = EXCLUDED.geom,
+                    updated_at = now()
+            '''
+            template = '''
+                (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                 CASE WHEN %s IS NOT NULL AND %s IS NOT NULL THEN ST_SetSRID(ST_MakePoint(%s, %s), 4326) ELSE NULL END,
+                 now())
+            '''
+            expanded_rows = []
+            for row in rows:
+                lng = row[9]
+                lat = row[10]
+                expanded_rows.append(row + (lng, lat, lng, lat))
+
+            with conn.cursor() as cur:
+                execute_values(cur, sql, expanded_rows, template=template, page_size=500)
+            conn.commit()
+            return len(rows)
+        finally:
+            conn.close()
     
     def crawl(self, **kwargs):
         """
