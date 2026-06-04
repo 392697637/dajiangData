@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 DJI禁飞区与POI爬虫 - 主入口文件
 
@@ -22,6 +22,35 @@ DJI 模块 (--category dji):
 
 import argparse
 import requests
+import logging
+import os
+from datetime import datetime
+
+# 配置日志
+def _setup_logging():
+    """配置日志记录，将日志写入文件"""
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    log_filename = f"{log_dir}/poi_crawler_{datetime.now().strftime('%Y%m%d')}.log"
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_filename, encoding='utf-8'),
+            # logging.StreamHandler()  # 不输出到控制台
+        ]
+    )
+    return logging.getLogger(__name__)
+
+logger = _setup_logging()
+
+# 每次执行添加日志分隔符
+logger.info("=" * 60)
+logger.info(f"执行开始 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+logger.info("=" * 60)
 
 from config import DJI_CONFIG, AMAP_CONFIG, TIANDITU_CONFIG
 from src.crawlers import DJIFlySafeCrawler, AmapPOICrawler, TiandituPOICrawler
@@ -124,45 +153,69 @@ _AMAP_POI_TYPES_FALLBACK = [
 ]
 
 
-def _get_amap_poi_types(api_key):
-    """获取高德地图完整POI类型列表（优先API，失败时使用本地备用列表）"""
+def _fetch_amap_poi_types_from_api(api_key):
+    """
+    从高德API获取POI类型列表（备用方法），失败时返回本地备用数据
+    
+    Args:
+        api_key (str): 高德API Key
+    
+    Returns:
+        dict: 返回POI类型数据结构
+    """
     url = "https://restapi.amap.com/v3/assistantimetypes"
     params = {"key": api_key, "output": "json"}
-
+    
     try:
         resp = requests.get(url, params=params, verify=False, timeout=10)
         data = resp.json()
-
+        
         if data.get("status") == "1" and data.get("types"):
+            logger.info("获取POI类型: 从高德API获取成功")
             return data
         else:
-            print("API返回数据异常，使用本地备用类型列表")
+            logger.warning("获取POI类型: 高德API返回数据异常，使用本地备用数据")
             return {"status": "1", "info": "使用本地备用数据", "types": _AMAP_POI_TYPES_FALLBACK}
     except Exception as e:
-        print("API调用失败: {}".format(str(e)))
-        print("使用本地备用类型列表")
+        logger.error(f"获取POI类型: 调用高德API失败: {str(e)}")
+        logger.info("获取POI类型: 使用本地备用数据")
         return {"status": "1", "info": "使用本地备用数据", "types": _AMAP_POI_TYPES_FALLBACK}
 
 
-def _save_poi_types_to_db(types_data, provider, db_config):
-    """将POI类型数据保存到数据库"""
+def _get_amap_poi_types(db_config=None, api_key=None):
+    """
+    获取高德POI类型列表（优先从API获取最新数据）
+    
+    Args:
+        db_config (dict, optional): 数据库配置字典，包含host/port/database/user/password
+                                    如果不提供，将从config.DATABASE_CONFIG获取
+        api_key (str, optional): 高德API Key，优先使用API获取最新数据
+    
+    Returns:
+        dict: 返回POI类型数据结构
+            - status: "1"表示成功，"0"表示失败
+            - info: 状态信息
+            - types: POI类型列表，每个元素包含code/name/subtypes
+    """
+    # 优先从API获取最新数据
+    if api_key:
+        logger.info("获取POI类型: 正在从高德API获取最新数据")
+        return _fetch_amap_poi_types_from_api(api_key)
+    
+    # 如果没有API Key，尝试从数据库读取（降级方案）
     try:
         import psycopg2
-        from psycopg2.extras import execute_values
     except ImportError:
-        print("错误：缺少psycopg2-binary依赖，请先安装")
-        return 0
+        logger.error("缺少psycopg2-binary依赖，请先安装")
+        return {"status": "0", "info": "缺少依赖"}
 
-    if types_data.get("status") != "1":
-        print("数据无效，无法入库")
-        return 0
-
-    types = types_data.get("types", [])
-    if not types:
-        print("没有数据需要入库")
-        return 0
+    # 获取数据库配置
+    if not db_config:
+        from config import DATABASE_CONFIG
+        db_config = DATABASE_CONFIG
 
     try:
+        # 建立数据库连接
         conn = psycopg2.connect(
             host=db_config.get("host"),
             port=db_config.get("port"),
@@ -171,10 +224,247 @@ def _save_poi_types_to_db(types_data, provider, db_config):
             password=db_config.get("password"),
         )
 
-        # 创建表
-        table_name = "gis_poi_types"
+        # 查询一级分类（level=1）
+        query = '''
+            SELECT type_code, type_name 
+            FROM gis_poi_type_gd 
+            WHERE level = 1 
+            ORDER BY type_code
+        '''
+        
+        with conn.cursor() as cur:
+            cur.execute(query)
+            primary_types = cur.fetchall()
+
+        # 检查是否有数据
+        if not primary_types:
+            conn.close()
+            return {"status": "0", "info": "数据库中暂无高德POI类型数据，请先执行 --save-to-db 入库"}
+
+        # 构建类型树结构
+        types = []
+        for code, name in primary_types:
+            # 查询子类型（level=2）
+            sub_query = '''
+                SELECT type_code, type_name 
+                FROM gis_poi_type_gd 
+                WHERE parent_code = %s 
+                ORDER BY type_code
+            '''
+            cur.execute(sub_query, (code,))
+            subtypes = [{"code": sc, "name": sn} for sc, sn in cur.fetchall()]
+            
+            types.append({
+                "code": code,
+                "name": name,
+                "subtypes": subtypes
+            })
+
+        conn.close()
+        logger.info("获取POI类型: 从数据库读取成功")
+        return {"status": "1", "info": "从数据库读取", "types": types}
+
+    except psycopg2.errors.UndefinedTable:
+        # 表不存在，尝试从API获取
+        conn.close()
+        if api_key:
+            logger.info("获取POI类型: 数据库表尚未创建，尝试从高德API获取")
+            return _fetch_amap_poi_types_from_api(api_key)
+        return {"status": "0", "info": "数据库表不存在，请先执行 --save-to-db 入库"}
+    except Exception as e:
+        logger.error(f"获取POI类型: 数据库读取失败: {str(e)}")
+        # 降级到API获取
+        if api_key:
+            logger.info("获取POI类型: 尝试从高德API获取")
+            return _fetch_amap_poi_types_from_api(api_key)
+        return {"status": "0", "info": f"数据库读取失败: {str(e)}"}
+
+
+# 天地图POI类型本地备用列表（当数据库不存在时使用）
+_TIANDITU_POI_TYPES_FALLBACK = [
+    {"code": "001", "name": "学校", "subtypes": [
+        {"code": "001001", "name": "小学"},
+        {"code": "001002", "name": "中学"},
+        {"code": "001003", "name": "大学"},
+        {"code": "001004", "name": "幼儿园"},
+    ]},
+    {"code": "002", "name": "医院", "subtypes": [
+        {"code": "002001", "name": "综合医院"},
+        {"code": "002002", "name": "专科医院"},
+        {"code": "002003", "name": "诊所"},
+        {"code": "002004", "name": "药店"},
+    ]},
+    {"code": "003", "name": "公园", "subtypes": [
+        {"code": "003001", "name": "城市公园"},
+        {"code": "003002", "name": "湿地公园"},
+        {"code": "003003", "name": "森林公园"},
+        {"code": "003004", "name": "植物园"},
+    ]},
+    {"code": "004", "name": "商场", "subtypes": [
+        {"code": "004001", "name": "购物中心"},
+        {"code": "004002", "name": "超市"},
+        {"code": "004003", "name": "便利店"},
+        {"code": "004004", "name": "专卖店"},
+    ]},
+    {"code": "005", "name": "酒店", "subtypes": [
+        {"code": "005001", "name": "星级酒店"},
+        {"code": "005002", "name": "经济型酒店"},
+        {"code": "005003", "name": "民宿"},
+        {"code": "005004", "name": "度假村"},
+    ]},
+    {"code": "006", "name": "餐厅", "subtypes": [
+        {"code": "006001", "name": "中餐馆"},
+        {"code": "006002", "name": "西餐厅"},
+        {"code": "006003", "name": "快餐店"},
+        {"code": "006004", "name": "咖啡厅"},
+    ]},
+    {"code": "007", "name": "银行", "subtypes": [
+        {"code": "007001", "name": "商业银行"},
+        {"code": "007002", "name": "ATM"},
+        {"code": "007003", "name": "证券公司"},
+        {"code": "007004", "name": "保险公司"},
+    ]},
+    {"code": "008", "name": "交通设施", "subtypes": [
+        {"code": "008001", "name": "火车站"},
+        {"code": "008002", "name": "地铁站"},
+        {"code": "008003", "name": "机场"},
+        {"code": "008004", "name": "公交站"},
+    ]},
+]
+
+
+def _get_tianditu_poi_types(db_config=None):
+    """
+    获取天地图POI类型列表（优先从数据库读取，失败时使用本地备用数据）
+    
+    Args:
+        db_config (dict, optional): 数据库配置字典，包含host/port/database/user/password
+                                    如果不提供，将从config.DATABASE_CONFIG获取
+    
+    Returns:
+        dict: 返回POI类型数据结构
+            - status: "1"表示成功，"0"表示失败
+            - info: 状态信息
+            - types: POI类型列表，每个元素包含code/name/subtypes
+    """
+    try:
+        import psycopg2
+    except ImportError:
+        logger.warning("获取POI类型: 缺少psycopg2-binary依赖，使用本地备用数据")
+        return {"status": "1", "info": "使用本地备用数据", "types": _TIANDITU_POI_TYPES_FALLBACK}
+
+    # 获取数据库配置
+    if not db_config:
+        from config import DATABASE_CONFIG
+        db_config = DATABASE_CONFIG
+
+    try:
+        # 建立数据库连接
+        conn = psycopg2.connect(
+            host=db_config.get("host"),
+            port=db_config.get("port"),
+            dbname=db_config.get("database"),
+            user=db_config.get("user"),
+            password=db_config.get("password"),
+        )
+
+        # 查询一级分类（level=1）
+        query = '''
+            SELECT type_code, type_name 
+            FROM gis_poi_type_td 
+            WHERE level = 1 
+            ORDER BY type_code
+        '''
+        
+        with conn.cursor() as cur:
+            cur.execute(query)
+            primary_types = cur.fetchall()
+
+        # 检查是否有数据
+        if not primary_types:
+            conn.close()
+            logger.info("获取POI类型: 数据库中暂无数据，使用本地备用数据")
+            return {"status": "1", "info": "使用本地备用数据", "types": _TIANDITU_POI_TYPES_FALLBACK}
+
+        # 构建类型树结构
+        types = []
+        for code, name in primary_types:
+            # 查询子类型（level=2）
+            sub_query = '''
+                SELECT type_code, type_name 
+                FROM gis_poi_type_td 
+                WHERE parent_code = %s 
+                ORDER BY type_code
+            '''
+            cur.execute(sub_query, (code,))
+            subtypes = [{"code": sc, "name": sn} for sc, sn in cur.fetchall()]
+            
+            types.append({
+                "code": code,
+                "name": name,
+                "subtypes": subtypes
+            })
+
+        conn.close()
+        logger.info("获取POI类型: 从数据库读取成功")
+        return {"status": "1", "info": "从数据库读取", "types": types}
+
+    except psycopg2.errors.UndefinedTable:
+        # 表不存在，使用本地备用数据
+        conn.close()
+        logger.info("获取POI类型: 数据库表尚未创建，使用本地备用数据")
+        return {"status": "1", "info": "使用本地备用数据", "types": _TIANDITU_POI_TYPES_FALLBACK}
+    except Exception as e:
+        logger.error(f"获取POI类型: 数据库读取失败: {str(e)}")
+        logger.info("获取POI类型: 使用本地备用数据")
+        return {"status": "1", "info": "使用本地备用数据", "types": _TIANDITU_POI_TYPES_FALLBACK}
+
+
+def _save_poi_types_to_db(types_data, provider, db_config, type_table):
+    """
+    将POI类型数据保存到数据库（覆盖写入，先删除旧表再重建）
+    
+    Args:
+        types_data (dict): POI类型数据，需包含status和types字段
+        provider (str): 数据源标识，如 'amap' 或 'tianditu'
+        db_config (dict): 数据库配置字典
+        type_table (str): 目标表名
+    
+    Returns:
+        int: 成功入库的记录数，失败返回0
+    """
+    try:
+        import psycopg2
+        from psycopg2.extras import execute_values
+    except ImportError:
+        logger.error("POI类型入库: 缺少psycopg2-binary依赖，请先安装: pip install psycopg2-binary")
+        return 0
+    
+    # 验证数据有效性
+    if types_data.get("status") != "1":
+        logger.error("POI类型入库: POI类型数据无效，无法入库")
+        return 0
+    
+    types = types_data.get("types", [])
+    if not types:
+        logger.warning("POI类型入库: 没有POI类型数据需要入库")
+        return 0
+    
+    try:
+        # 建立数据库连接
+        conn = psycopg2.connect(
+            host=db_config.get("host"),
+            port=db_config.get("port"),
+            dbname=db_config.get("database"),
+            user=db_config.get("user"),
+            password=db_config.get("password"),
+        )
+        
+        # 创建表（如果存在则删除重建）
+        table_name = type_table
+        drop_sql = f'DROP TABLE IF EXISTS "{table_name}" CASCADE;'
         create_table_sql = f'''
-        CREATE TABLE IF NOT EXISTS "{table_name}" (
+        CREATE TABLE "{table_name}" (
             id BIGSERIAL PRIMARY KEY,
             provider VARCHAR(32) NOT NULL,
             type_code VARCHAR(32) NOT NULL,
@@ -184,76 +474,104 @@ def _save_poi_types_to_db(types_data, provider, db_config):
             created_at TIMESTAMPTZ DEFAULT now(),
             UNIQUE (provider, type_code)
         );
-        CREATE INDEX IF NOT EXISTS "idx_{table_name}_provider" ON "{table_name}" (provider);
-        CREATE INDEX IF NOT EXISTS "idx_{table_name}_type_code" ON "{table_name}" (type_code);
+        CREATE INDEX "idx_{table_name}_provider" ON "{table_name}" (provider);
+        CREATE INDEX "idx_{table_name}_type_code" ON "{table_name}" (type_code);
         '''
-
+        
         with conn.cursor() as cur:
+            cur.execute(drop_sql)
             cur.execute(create_table_sql)
         conn.commit()
-
-        # 准备数据
+        
+        # 添加表注释和字段注释
+        provider_name = "高德" if provider == "amap" else "天地图"
+        comment_sql = f'''
+        COMMENT ON TABLE "{table_name}" IS 'POI类型表（{provider_name}）';
+        COMMENT ON COLUMN "{table_name}".id IS '主键ID';
+        COMMENT ON COLUMN "{table_name}".provider IS '数据源标识（amap/tianditu）';
+        COMMENT ON COLUMN "{table_name}".type_code IS '类型编码';
+        COMMENT ON COLUMN "{table_name}".type_name IS '类型名称';
+        COMMENT ON COLUMN "{table_name}".parent_code IS '父类型编码（二级分类）';
+        COMMENT ON COLUMN "{table_name}".level IS '层级（1=一级分类，2=二级分类）';
+        COMMENT ON COLUMN "{table_name}".created_at IS '创建时间';
+        '''
+        with conn.cursor() as cur:
+            cur.execute(comment_sql)
+        conn.commit()
+        
+        logger.info(f"POI类型入库: 表 {table_name} 已创建（带注释）")
+        
+        # 准备插入数据
         rows = []
         for item in types:
             code = item.get("code", "")
             name = item.get("name", "")
+            # 一级分类
             rows.append((provider, code, name, None, 1))
-
+            
+            # 二级分类
             subtypes = item.get("subtypes", [])
             for sub in subtypes:
                 sub_code = sub.get("code", "")
                 sub_name = sub.get("name", "")
                 rows.append((provider, sub_code, sub_name, code, 2))
-
-        # 插入数据
+        
+        # 批量插入数据
         insert_sql = f'''
             INSERT INTO "{table_name}" (provider, type_code, type_name, parent_code, level)
             VALUES %s
-            ON CONFLICT (provider, type_code) DO UPDATE SET
-                type_name = EXCLUDED.type_name,
-                parent_code = EXCLUDED.parent_code,
-                level = EXCLUDED.level
         '''
-
+        
         with conn.cursor() as cur:
             execute_values(cur, insert_sql, rows)
         conn.commit()
-
+        
         count = len(rows)
-        print(f"\n成功！POI类型数据已入库 {count} 条")
-        print(f"入库表: {table_name}")
-
+        logger.info(f"POI类型入库: 成功入库 {count} 条")
+        logger.info(f"POI类型入库: 入库表: {table_name}")
+        
         conn.close()
         return count
     except Exception as e:
-        print(f"\n入库失败: {str(e)}")
+        logger.error(f"POI类型入库: 入库失败: {str(e)}")
         return 0
 
 
 def _print_poi_types(types_data, provider):
-    """打印POI类型列表"""
-    print("\n=== {} POI类型列表 ===".format(provider))
+    """
+    将POI类型列表输出到日志文件
+    
+    Args:
+        types_data (dict): POI类型数据字典
+        provider (str): 数据源名称，如 '高德' 或 '天地图'
+    """
+    logger.info(f"=== {provider} POI类型列表 ===")
 
+    # 检查数据状态
     if types_data.get("status") != "1":
-        print("获取类型列表失败:", types_data.get("info", "Unknown error"))
+        logger.error(f"获取类型列表失败: {types_data.get('info', 'Unknown error')}")
         return
 
-    if types_data.get("info") == "使用本地备用数据":
-        print("（本地备用数据）")
-
+    # 获取类型列表
     types = types_data.get("types", [])
+    if not types:
+        logger.info("暂无POI类型数据")
+        return
+
+    # 将类型树写入日志
     for item in types:
         code = item.get("code", "")
         name = item.get("name", "")
-        print(f"\n[{code}] {name}")
+        logger.info(f"[{code}] {name}")
 
+        # 写入子类型
         subtypes = item.get("subtypes", [])
         if subtypes:
             for sub in subtypes:
                 sub_code = sub.get("code", "")
                 sub_name = sub.get("name", "")
-                print(f"  └── [{sub_code}] {sub_name}")
-    print(f"\n共 {len(types)} 个一级分类")
+                logger.info(f"  └── [{sub_code}] {sub_name}")
+    logger.info(f"共 {len(types)} 个一级分类")
 
 
 def _run_poi_crawler(crawler, args, config):
@@ -307,13 +625,19 @@ def handle_poi_category(args):
         print("=" * 60)
 
         if args.action == 'poitype':
-            print("\nAction: Get POI Types")
-            types_data = _get_amap_poi_types(AMAP_CONFIG["api_key"])
-            _print_poi_types(types_data, "高德")
+                print("\n【操作类型】: Get POI Types")
+                types_data = _get_amap_poi_types(AMAP_CONFIG.get("db_config", {}), AMAP_CONFIG.get("api_key"))
+                data_source = types_data.get("info", "未知来源")
+                print(f"【数据来源】: {data_source}")
+                _print_poi_types(types_data, "高德")
 
-            if args.save_to_db:
-                print("\n正在将POI类型数据入库...")
-                _save_poi_types_to_db(types_data, "amap", AMAP_CONFIG.get("db_config", {}))
+                if args.save_to_db:
+                    table_name = AMAP_CONFIG.get("type_table", "gis_poi_type_gd")
+                    count = _save_poi_types_to_db(types_data, "amap", AMAP_CONFIG.get("db_config", {}), table_name)
+                    if count > 0:
+                        print(f"\n【入库结果】: ✅ 入库成功，共 {count} 条（表名: {table_name}）")
+                    else:
+                        print("\n【入库结果】: ❌ 入库失败")
 
         elif args.action == 'poidata':
             print("\nAction: Get POI Data")
@@ -341,12 +665,21 @@ def handle_poi_category(args):
         print("=" * 60)
 
         if args.action == 'poitype':
-            print("\nAction: Get POI Types")
-            print("天地图POI类型配置: {}".format(TIANDITU_CONFIG.get("data_types", "未配置")))
-            print("\n天地图类型参数说明:")
-            print("  - dataTypes: 分类名称，多个用英文逗号分隔")
-            print("  - 常用类型: 学校,医院,公园,商场,酒店,餐厅等")
-            print("  - 空字符串表示不限制类型")
+            print("\n【操作类型】: Get POI Types")
+            types_data = _get_tianditu_poi_types(TIANDITU_CONFIG.get("db_config", {}))
+            data_source = types_data.get("info", "未知来源")
+            print(f"【数据来源】: {data_source}")
+            if data_source == "使用本地备用数据":
+                print(f"【提示】: 天地图POI类型数据来自本地预设，共 {len(types_data.get('types', []))} 个一级分类")
+            _print_poi_types(types_data, "天地图")
+            
+            if args.save_to_db:
+                table_name = TIANDITU_CONFIG.get("type_table", "gis_poi_type_td")
+                count = _save_poi_types_to_db(types_data, "tianditu", TIANDITU_CONFIG.get("db_config", {}), table_name)
+                if count > 0:
+                    print(f"\n【入库结果】: ✅ 入库成功，共 {count} 条（表名: {table_name}）")
+                else:
+                    print("\n【入库结果】: ❌ 入库失败")
 
         elif args.action == 'poidata':
             print("\nAction: Get POI Data")

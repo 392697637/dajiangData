@@ -28,19 +28,24 @@ main.py --category <poi|dji> [--provider <amap|tianditu>] [--action <poitype|poi
 
 #### 1.1 获取 POI 类型列表
 
-**接口作用**：获取高德或天地图的 POI 分类类型列表，用于了解可用的 POI 分类编码和名称。
+**接口作用**：从数据库读取高德或天地图的 POI 分类类型列表，用于了解可用的 POI 分类编码和名称。
 
 **调用方式**：
 
 ```bash
-# 高德地图
+# 高德类型列表入库到 gis_poiType_gd
+python main.py --category poi --provider amap --action poitype --save-to-db
+
+# 天地图类型列表入库到 gis_poiType_td
+python main.py --category poi --provider tianditu --action poitype --save-to-db
+
+# 高德地图 - 从数据库读取POI类型
 python main.py --category poi --provider amap --action poitype
 
-# 天地图
+# 天地图 - 从数据库读取POI类型
 python main.py --category poi --provider tianditu --action poitype
 
-# 高德类型列表入库到 gis_poi_types
-python main.py --category poi --provider amap --action poitype --save-to-db
+
 ```
 
 **参数说明**：
@@ -50,31 +55,35 @@ python main.py --category poi --provider amap --action poitype --save-to-db
 | `--category` | string | 是 | 固定值 `poi` |
 | `--provider` | string | 是 | `amap` 或 `tianditu` |
 | `--action` | string | 是 | 固定值 `poitype` |
-| `--save-to-db` | bool | 否 | 将 POI 类型写入数据库表 `gis_poi_types` |
+| `--save-to-db` | bool | 否 | 将 POI 类型写入对应数据库表 |
 
 **接口实现说明**：
 
 | 数据源 | 获取方式 | 入库表 |
 |--------|----------|--------|
-| 高德 | `main.py` 调用 `_get_amap_poi_types()`，优先请求高德 POI 类型接口，失败时使用本地备用分类 | `gis_poi_types` |
-| 天地图 | 当前读取 `config/settings.py` 中的 `TIANDITU_CONFIG["data_types"]` 配置并打印说明 | 暂不自动入库 |
+| 高德 | `main.py` 调用 `_get_amap_poi_types()`，从数据库 `gis_poiType_gd` 表读取 | `gis_poiType_gd` |
+| 天地图 | `main.py` 调用 `_get_tianditu_poi_types()`，从数据库 `gis_poiType_td` 表读取 | `gis_poiType_td` |
 
-高德类型接口当前封装在 `main.py`：
+**核心代码函数**：
 
-```python
-url = "https://restapi.amap.com/v3/assistantimetypes"
-params = {"key": api_key, "output": "json"}
-```
+| 函数名 | 功能 | 位置 |
+|--------|------|------|
+| `_get_amap_poi_types(db_config)` | 从数据库读取高德POI类型列表 | `main.py` 第34行 |
+| `_get_tianditu_poi_types(db_config)` | 从数据库读取天地图POI类型列表 | `main.py` 第114行 |
+| `_save_poi_types_to_db(types_data, provider, db_config, type_table)` | 将POI类型数据入库 | `main.py` 第194行 |
+| `_print_poi_types(types_data, provider)` | 打印POI类型列表到控制台 | `main.py` 第294行 |
 
-高德类型入库字段：
+**数据库表结构**（`gis_poiType_gd` / `gis_poiType_td`）：
 
-| 字段 | 说明 |
-|------|------|
-| `provider` | 数据源，当前为 `amap` |
-| `type_code` | POI 类型编码 |
-| `type_name` | POI 类型名称 |
-| `parent_code` | 父级类型编码 |
-| `level` | 类型层级 |
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | BIGSERIAL | 主键自增 |
+| `provider` | VARCHAR(32) | 数据源标识（amap/tianditu） |
+| `type_code` | VARCHAR(32) | POI类型编码 |
+| `type_name` | VARCHAR(128) | POI类型名称 |
+| `parent_code` | VARCHAR(32) | 父类型编码（二级分类） |
+| `level` | INT | 类型层级（1=一级分类，2=二级分类） |
+| `created_at` | TIMESTAMPTZ | 创建时间 |
 
 **返回结果**（控制台输出）：
 
@@ -85,6 +94,7 @@ Amap POI Module
 ============================================================
 
 Action: Get POI Types
+[INFO] 从数据库读取高德POI类型成功
 
 === 高德 POI类型列表 ===
 
@@ -108,18 +118,28 @@ Tianditu POI Module
 ============================================================
 
 Action: Get POI Types
-天地图POI类型配置: 学校,医院,公园
+[INFO] 从数据库读取天地图POI类型成功
 
-天地图类型参数说明:
-  - dataTypes: 分类名称，多个用英文逗号分隔
-  - 常用类型: 学校,医院,公园,商场,酒店,餐厅等
-  - 空字符串表示不限制类型
+=== 天地图 POI类型列表 ===
+
+[001] 学校
+  └── [001001] 小学
+  └── [001002] 中学
+
+[002] 医院
+  └── [002001] 综合医院
+  └── [002002] 专科医院
+
+...
+
+共 8 个一级分类
 ```
 
 **注意事项**：
-- 高德地图通过调用官方 API 获取实时类型列表
-- 天地图类型配置在 `config/settings.py` 中设置，此接口仅显示当前配置
-- 需要确保配置了有效的 API Key
+- POI类型数据存储在数据库中，需要先执行 `--save-to-db` 入库后才能读取
+- 首次使用时，如果数据库中没有数据，会提示"数据库中暂无POI类型数据，请先执行 --save-to-db 入库"
+- 入库操作会先删除旧表再重建（`DROP TABLE IF EXISTS`），请注意数据备份
+- 需要确保配置了正确的数据库连接信息（`config/settings.py` 中的 `DATABASE_CONFIG`）
 
 ---
 
@@ -332,74 +352,12 @@ POI 数据默认直接入库：
 
 ---
 
-### 2. DJI 禁飞区模块接口
-
-**接口作用**：爬取 DJI 无人机禁飞区数据，支持单点和区域分块模式。
-
-**调用方式**：
-
-```bash
-# 单点搜索
-python main.py --category dji --lat 34.72 --lng 113.62 --radius 50
-
-# 区域分块搜索
-python main.py --category dji --region zhengzhou --grid-size 20
-
-# 指定无人机型号
-python main.py --category dji --region henan --grid-size 200 --drone dji-mavic-3
-```
-
-**参数说明**：
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `--category` | string | 是 | 固定值 `dji` |
-| `--lat` | float | 否 | 中心纬度 |
-| `--lng` | float | 否 | 中心经度 |
-| `--radius` | float | 否 | 搜索半径（公里），默认 50 |
-| `--region` | string | 否 | 预定义区域名称 |
-| `--grid-size` | float | 否 | 网格大小（公里） |
-| `--drone` | string | 否 | 无人机型号 slug |
-
-**返回结果**：
-
-输出文件：`output/dji/flysafe_{mode}_{params}.json`
-
-```json
-{
-  "status": "success",
-  "count": 15,
-  "metadata": {
-    "mode": "region",
-    "region": "郑州市",
-    "grid_size_km": 20
-  },
-  "data": [
-    {
-      "id": "zone_1",
-      "type": 0,
-      "level_description": "机场禁飞区",
-      "name": "郑州新郑国际机场",
-      "geometry": {...}
-    }
-  ]
-}
-```
-
-**注意事项**：
-- 禁飞区级别说明：0-机场禁飞区，1-机场限飞区，2-国家级机场禁飞区，3-临时限飞区
-- 无人机型号不影响禁飞区数据，仅用于兼容 API 调用
-- 区域分块模式会自动合并去重
-
----
-
 ## 数据源配置
 
 | 平台 | 数据源 | API 版本 | 输出目录 | 是否需要 Key |
 |------|--------|----------|----------|--------------|
 | 高德 POI | 高德 Web 服务 API | v3/v5 | `output/amap/` | 是 |
 | 天地图 POI | 天地图搜索 V2.0 API | V2.0 | `output/tianditu/` | 是 |
-| DJI 禁飞区 | DJI FlySafe API | - | `output/dji/` | 否 |
 
 ---
 
@@ -484,7 +442,6 @@ TIANDITU_CONFIG["api_key"] = "your_key"
 | `main.py` | 命令行入口 |
 | `src/crawlers/amap.py` | 高德 POI 爬虫实现 |
 | `src/crawlers/tianditu.py` | 天地图 POI 爬虫实现 |
-| `src/crawlers/dji.py` | DJI 禁飞区爬虫实现 |
 | `src/crawlers/base.py` | 爬虫基类（HTTP请求、JSON保存、数据库操作） |
 | `src/utils/geo.py` | 坐标转换、网格生成工具函数 |
 | `config/settings.py` | API Key、区域、类型配置 |

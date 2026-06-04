@@ -374,7 +374,8 @@ AMAP_CONFIG = {
     "output_dir": "output/amap",
     # POI数据直接入库配置
     "save_to_db": True,
-    "db_table": "gis_poiType_gd",
+    "db_table": "gis_poi_gd",  # POI点数据表
+    "type_table": "gis_poi_type_gd",  # POI类型表
     "db_config": DATABASE_CONFIG,
     # API认证配置（需要在高德地图开放平台申请，或通过环境变量 AMAP_API_KEY 设置）
     "api_key": os.environ.get("AMAP_API_KEY", "3db5913a17927510f547cbddab83d41c"),
@@ -425,7 +426,8 @@ TIANDITU_CONFIG = {
     "output_dir": "output/tianditu",
     # POI数据直接入库配置
     "save_to_db": True,
-    "db_table": "gis_poiType_td",
+    "db_table": "gis_poi_td",  # POI点数据表
+    "type_table": "gis_poi_type_td",  # POI类型表
     "db_config": DATABASE_CONFIG,
     # API认证配置（需要在天地图开放平台申请，或通过环境变量 TIANDITU_API_KEY 设置）
     "api_key": os.environ.get("TIANDITU_API_KEY", "cf128e0b51efeb7df5f1720de282678e"),
