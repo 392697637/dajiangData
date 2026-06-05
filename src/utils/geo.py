@@ -14,19 +14,40 @@
 
 import math
 
+try:
+    from config import DJI_CONFIG
+except Exception:
+    DJI_CONFIG = {}
+
+
+def _get_description(mapping, key):
+    """
+    从配置映射中获取 key 的描述。
+
+    支持 int 或 str 类型的键查询，避免配置字典键类型不一致的问题。
+    """
+    if not isinstance(mapping, dict):
+        return None
+    if key in mapping:
+        return mapping[key]
+    if key is None:
+        return None
+    str_key = str(key)
+    return mapping.get(str_key)
+
 
 def deg2rad(deg):
     """
     角度转弧度
-    
+
     将角度值转换为弧度值，用于三角函数计算。
-    
+
     Args:
         deg (float): 角度值
-        
+
     Returns:
         float: 弧度值
-        
+
     Example:
         >>> deg2rad(180)
         3.141592653589793
@@ -53,14 +74,19 @@ def generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_m):
     grid_size_km = grid_size_m / 1000.0
     avg_lat = (lat_min + lat_max) / 2
     lat_grid_count = int((lat_max - lat_min) * 111 / grid_size_km) + 1
-    lng_grid_count = int((lng_max - lng_min) * 111 * abs(math.cos(deg2rad(avg_lat))) / grid_size_km) + 1
+    lng_grid_count = (
+        int((lng_max - lng_min) * 111 * abs(math.cos(deg2rad(avg_lat))) / grid_size_km)
+        + 1
+    )
 
     lat_grid_count = max(lat_grid_count, 1)
     lng_grid_count = max(lng_grid_count, 1)
 
-    print("生成网格: {} × {} = {} 个中心点".format(
-        lng_grid_count, lat_grid_count, lng_grid_count * lat_grid_count
-    ))
+    print(
+        "生成网格: {} × {} = {} 个中心点".format(
+            lng_grid_count, lat_grid_count, lng_grid_count * lat_grid_count
+        )
+    )
 
     lat_step = (lat_max - lat_min) / lat_grid_count if lat_grid_count > 1 else 0
     lng_step = (lng_max - lng_min) / lng_grid_count if lng_grid_count > 1 else 0
@@ -119,62 +145,62 @@ def bounds_to_tianditu_polygon(lng_min, lat_min, lng_max, lat_max):
 def latlng_to_rectangle(lat, lng, radius_m):
     """
     将中心点和半径转换为矩形区域
-    
+
     根据给定的中心点坐标和搜索半径，计算出一个矩形区域的边界坐标。
     该矩形区域用于DJI禁飞区API的矩形查询参数。
-    
+
     计算原理:
     - 地球表面1度纬度约等于111公里
     - 经度的距离随纬度变化，需要乘以cos(lat)进行修正
-    
+
     Args:
         lat (float): 中心点纬度
         lng (float): 中心点经度
         radius_m (float): 搜索半径（米）
-        
+
     Returns:
         tuple: (ltlat, ltlng, rblat, rblng)
             - ltlat: 左上角纬度
             - ltlng: 左上角经度
             - rblat: 右下角纬度
             - rblng: 右下角经度
-        
+
     Example:
         >>> latlng_to_rectangle(34.72, 113.62, 50000)
         (35.17045045, 112.87665583, 34.26954955, 114.36334417)
     """
     radius_km = radius_m / 1000.0
-    
+
     # 计算纬度方向的增量（1度 ≈ 111公里）
     delta_lat = radius_km / 111.0
-    
+
     # 计算经度方向的增量（需要考虑纬度的影响）
     delta_lng = radius_km / (111.0 * abs(math.cos(deg2rad(lat))))
-    
+
     # 计算矩形四个边界点的坐标
     ltlat = lat + delta_lat  # 左上角纬度
     ltlng = lng - delta_lng  # 左上角经度
     rblat = lat - delta_lat  # 右下角纬度
     rblng = lng + delta_lng  # 右下角经度
-    
+
     return (ltlat, ltlng, rblat, rblng)
 
 
 def circle_to_polygon(lat, lng, radius_m):
     """
     将圆形转换为近似多边形
-    
+
     将给定中心点和半径的圆形转换为一个36边的正多边形，用于GeoJSON输出。
     GeoJSON标准不支持圆形类型，因此需要转换为多边形。
-    
+
     Args:
         lat (float): 中心点纬度
         lng (float): 中心点经度
         radius_m (float): 半径（米）
-        
+
     Returns:
         dict: GeoJSON Polygon格式的几何对象
-        
+
     Example:
         >>> circle_to_polygon(34.72, 113.62, 1000)
         {
@@ -184,44 +210,41 @@ def circle_to_polygon(lat, lng, radius_m):
     """
     # 存储多边形顶点
     points = []
-    
+
     # 使用36个顶点近似圆形（每个顶点间隔10度）
     num_points = 36
-    
+
     # 将半径从米转换为度数（1度纬度 ≈ 111000米）
     radius_deg = radius_m / 111000.0
-    
+
     # 生成每个顶点的坐标
     for i in range(num_points):
         # 计算当前顶点的角度（弧度）
         angle = (2 * math.pi * i) / num_points
-        
+
         # 计算经度偏移（需要考虑纬度影响）
         x = lng + radius_deg * math.cos(angle) / math.cos(deg2rad(lat))
-        
+
         # 计算纬度偏移
         y = lat + radius_deg * math.sin(angle)
-        
+
         # 添加顶点坐标
         points.append([x, y])
-    
+
     # 闭合多边形（最后一个点等于第一个点）
     points.append(points[0])
-    
+
     # 返回GeoJSON格式的Polygon对象
-    return {
-        "type": "Polygon",
-        "coordinates": [points]
-    }
+    return {"type": "Polygon", "coordinates": [points]}
 
 
 def create_geometry(item):
     """
     根据shape类型创建GeoJSON geometry
-    
+
     根据DJI API返回的区域数据，创建对应的GeoJSON几何对象。
     支持三种几何类型：多边形、圆形（转换为多边形）、点。
-    
+
     API返回数据格式说明（根据实际返回数据）:
     {
         "area_id": 1791,
@@ -234,23 +257,23 @@ def create_geometry(item):
         "polygon_points": null,
         "sub_areas": [...]    // 子区域数组（可能包含多个多边形）
     }
-    
+
     Args:
         item (dict): DJI API返回的区域数据项
-        
+
     Returns:
         dict or None: GeoJSON几何对象，如果无法解析则返回None
     """
     # 获取形状类型（0:点, 1:多边形, 2:圆形）
     shape_type = item.get("shape", 2)
-    
+
     # 获取坐标和半径信息
     lat = item.get("lat")
     lng = item.get("lng")
     radius = item.get("radius")
     polygon_points = item.get("polygon_points")
     sub_areas = item.get("sub_areas")
-    
+
     # 优先处理子区域（如果有子区域，使用子区域的几何信息）
     if sub_areas and isinstance(sub_areas, list) and len(sub_areas) > 0:
         geometries = []
@@ -260,17 +283,14 @@ def create_geometry(item):
             sub_lng = sub_area.get("lng", lng)
             sub_radius = sub_area.get("radius", radius)
             sub_points = sub_area.get("polygon_points")
-            
+
             if sub_shape == 1 and sub_points:
                 # 多边形子区域
-                geometries.append({
-                    "type": "Polygon",
-                    "coordinates": sub_points
-                })
+                geometries.append({"type": "Polygon", "coordinates": sub_points})
             elif sub_shape == 2 and sub_lat and sub_lng and sub_radius:
                 # 圆形子区域
                 geometries.append(circle_to_polygon(sub_lat, sub_lng, sub_radius))
-        
+
         if geometries:
             if len(geometries) == 1:
                 return geometries[0]
@@ -278,26 +298,22 @@ def create_geometry(item):
                 # 多个子区域，返回MultiPolygon
                 return {
                     "type": "MultiPolygon",
-                    "coordinates": [g["coordinates"] for g in geometries if g["type"] == "Polygon"]
+                    "coordinates": [
+                        g["coordinates"] for g in geometries if g["type"] == "Polygon"
+                    ],
                 }
-    
+
     # 如果没有子区域或子区域为空，使用主区域的几何信息
     if shape_type == 1 and polygon_points:
         # 多边形类型：直接使用返回的多边形顶点
-        return {
-            "type": "Polygon",
-            "coordinates": polygon_points
-        }
+        return {"type": "Polygon", "coordinates": polygon_points}
     elif shape_type == 2 and lat and lng and radius:
         # 圆形类型：转换为近似多边形
         return circle_to_polygon(lat, lng, radius)
     elif lat and lng:
         # 点类型或其他未知类型：创建Point对象
-        return {
-            "type": "Point",
-            "coordinates": [lng, lat]
-        }
-    
+        return {"type": "Point", "coordinates": [lng, lat]}
+
     # 如果无法解析，返回None
     return None
 
@@ -305,9 +321,9 @@ def create_geometry(item):
 def parse_dji_response(data):
     """
     解析DJI禁飞区API响应数据
-    
+
     将DJI API返回的原始数据转换为GeoJSON格式的features列表。
-    
+
     API响应格式:
     {
         "code": 0,
@@ -320,26 +336,26 @@ def parse_dji_response(data):
             "radius": 28406
         }
     }
-    
+
     Args:
         data (dict): DJI API返回的原始数据
-        
+
     Returns:
         list: GeoJSON features列表
     """
     features = []
-    
+
     # 检查API返回状态
     if data.get("code") != 0:
         return features
-    
+
     # 获取禁飞区数据
     areas = data.get("data", {}).get("areas", [])
-    
+
     for item in areas:
         # 创建几何对象
         geometry = create_geometry(item)
-        
+
         if geometry:
             # 构建属性字典
             properties = {
@@ -347,6 +363,12 @@ def parse_dji_response(data):
                 "name": item.get("name"),
                 "type": item.get("type"),
                 "level": item.get("level"),
+                "levelName": _get_description(
+                    DJI_CONFIG.get("level_descriptions"), item.get("level")
+                ),
+                "typeName": _get_description(
+                    DJI_CONFIG.get("type_descriptions"), item.get("type")
+                ),
                 "color": item.get("color"),
                 "country": item.get("country"),
                 "city": item.get("city"),
@@ -357,16 +379,16 @@ def parse_dji_response(data):
                 "begin_at": item.get("begin_at"),
                 "end_at": item.get("end_at"),
                 "data_source": item.get("data_source"),
-                "url": item.get("url")
+                "url": item.get("url"),
             }
-            
+
             # 创建Feature对象
             feature = {
                 "type": "Feature",
                 "geometry": geometry,
-                "properties": properties
+                "properties": properties,
             }
-            
+
             features.append(feature)
-    
+
     return features
