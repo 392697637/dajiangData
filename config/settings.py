@@ -27,9 +27,11 @@ TIMEOUT = 30  # 请求超时时间（秒）
 # ==================== PostgreSQL数据库配置 ====================
 # POI数据直接入库使用；优先读取环境变量，未设置时使用默认连接信息。
 DATABASE_CONFIG = {
-    "host": os.getenv("DB_HOST", "192.168.110.6"),
-    "port": int(os.getenv("DB_PORT", "5432")),
-    "database": os.getenv("DB_NAME", "ktd_lx_gis_shp"),
+    # "host": os.getenv("DB_HOST", "192.168.110.6"),
+    # "port": int(os.getenv("DB_PORT", "5432")),
+    "host": os.getenv("DB_HOST", "123.52.43.165"),
+    "port": int(os.getenv("DB_PORT", "15432")),
+    "database": os.getenv("DB_NAME", "ktd_lx_2026gis"),
     "user": os.getenv("DB_USER", "zhuoyi"),
     "password": os.getenv("DB_PASSWORD", "Ktd@postSQL@2026!@#"),
 }
@@ -104,7 +106,8 @@ AMAP_CONFIG = {
     "type_table": "gis_poi_type_gd",  # POI类型表
     "db_config": DATABASE_CONFIG,
     # API认证配置（需要在高德地图开放平台申请，或通过环境变量 AMAP_API_KEY 设置）
-    "api_key": os.environ.get("AMAP_API_KEY", "3db5913a17927510f547cbddab83d41c"),
+    # "api_key": os.environ.get("AMAP_API_KEY", "3db5913a17927510f547cbddab83d41c"),
+    "api_key": os.environ.get("AMAP_API_KEY", "731aabd9daa54e1edada10c8e4215eba"),
     # 区域分块配置
     "region_config": REGION_CONFIG,
     # POI类型配置（高德POI分类码）
@@ -156,7 +159,8 @@ TIANDITU_CONFIG = {
     "type_table": "gis_poi_type_td",  # POI类型表
     "db_config": DATABASE_CONFIG,
     # API认证配置（需要在天地图开放平台申请，或通过环境变量 TIANDITU_API_KEY 设置）
-    "api_key": os.environ.get("TIANDITU_API_KEY", "cf128e0b51efeb7df5f1720de282678e"),
+    # "api_key": os.environ.get("TIANDITU_API_KEY", "cf128e0b51efeb7df5f1720de282678e"),
+    "api_key": os.environ.get("TIANDITU_API_KEY", "2e8ab11409321530e508ac35ad2c19b5"),
     # 区域分块配置
     "region_config": REGION_CONFIG,
     # POI数据分类（天地图分类编码/名称，多个用英文逗号分隔）

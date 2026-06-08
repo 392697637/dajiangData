@@ -104,7 +104,10 @@ AMAP_CONFIG["api_key"] = "your_key"
 TIANDITU_CONFIG["api_key"] = "your_key"
 ```
 
-**注意**：DJI 禁飞区接口当前无需 API Key。
+**注意**：
+- DJI 禁飞区接口当前无需 API Key。
+- 天地图 POI 搜索必须使用“天地图搜索服务 V2.0 Key”，不能使用瓦片 Key 或浏览器端 Key。
+- 如果出现 `301012 权限类型错误`，请申请天地图搜索服务 Key 并替换当前 `TIANDITU_API_KEY`。
 
 ## 文件说明
 

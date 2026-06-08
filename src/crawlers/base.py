@@ -33,17 +33,17 @@ except ImportError:  # pragma: no cover - handled at runtime when DB saving is e
 class BaseCrawler:
     """
     爬虫基类，提供通用功能
-    
+
     Attributes:
         config (dict): 爬虫配置字典
         timeout (int): 请求超时时间（秒）
         output_dir (str): 输出目录路径
     """
-    
+
     def __init__(self, config):
         """
         初始化爬虫基类
-        
+
         Args:
             config (dict): 爬虫配置字典，应包含以下关键字:
                 - timeout: 请求超时时间（可选，默认30秒）
@@ -51,70 +51,99 @@ class BaseCrawler:
         """
         # 保存配置
         self.config = config
-        
+
         # 设置超时时间，默认为30秒
-        self.timeout = config.get('timeout', 30)
-        
+        self.timeout = config.get("timeout", 30)
+
         # 设置输出目录，默认为'output'
-        self.output_dir = config.get('output_dir', 'output')
+        self.output_dir = config.get("output_dir", "output")
 
         # POI数据入库配置。默认关闭，避免影响DJI等非POI爬虫。
-        self.save_to_db = config.get('save_to_db', False)
-        self.db_table = config.get('db_table')
-        self.db_config = config.get('db_config', {})
-    
-    def _make_request(self, url, method='GET', params=None, headers=None, data=None):
+        self.save_to_db = config.get("save_to_db", False)
+        self.db_table = config.get("db_table")
+        self.db_config = config.get("db_config", {})
+
+    def _make_request(self, url, method="GET", params=None, headers=None, data=None):
         """
         发送HTTP请求（私有方法）
-        
+
         封装requests库，提供统一的请求接口和错误处理。
-        
+
         Args:
             url (str): 请求URL
             method (str): 请求方法，支持'GET'和'POST'（默认'GET'）
             params (dict): URL参数（查询字符串）
             headers (dict): 请求头
             data (dict): 请求体数据（POST时使用）
-        
+
         Returns:
             requests.Response: 响应对象
-        
+
         Raises:
             ValueError: 不支持的请求方法
             Exception: 请求失败时抛出异常
         """
         try:
             # 根据请求方法选择对应的requests方法
-            if method.upper() == 'GET':
+            if method.upper() == "GET":
                 resp = requests.get(
                     url,
                     params=params,
                     headers=headers,
                     timeout=self.timeout,
-                    verify=False  # 禁用SSL验证（部分环境可能需要）
+                    verify=False,  # 禁用SSL验证（部分环境可能需要）
                 )
-            elif method.upper() == 'POST':
+            elif method.upper() == "POST":
                 resp = requests.post(
                     url,
                     params=params,
                     headers=headers,
                     data=data,
                     timeout=self.timeout,
-                    verify=False
+                    verify=False,
                 )
             else:
                 raise ValueError(f"不支持的请求方法: {method}")
-            
+
             # 检查HTTP状态码，非200则抛出异常
             resp.raise_for_status()
-            
+
             return resp
 
         except requests.exceptions.HTTPError as e:
             detail = ""
             if e.response is not None:
                 try:
-                    detail = e.response.text[:300]
+                    text = e.response.text
+                    detail = text[:300]
+                    if "application/json" in e.response.headers.get(
+                        "Content-Type", ""
+                    ) or text.strip().startswith("{"):
+                        try:
+                            body = e.response.json()
+                            if isinstance(body, dict):
+                                code = (
+                                    body.get("code")
+                                    or body.get("infocode")
+                                    or body.get("status")
+                                )
+                                msg = (
+                                    body.get("msg")
+                                    or body.get("message")
+                                    or body.get("cndesc")
+                                )
+                                resolve = body.get("resolve")
+                                json_detail = []
+                                if code is not None:
+                                    json_detail.append(f"code={code}")
+                                if msg:
+                                    json_detail.append(f"msg={msg}")
+                                if resolve:
+                                    json_detail.append(f"resolve={resolve}")
+                                if json_detail:
+                                    detail = " | ".join(json_detail)
+                        except ValueError:
+                            pass
                 except Exception:
                     pass
             if detail:
@@ -122,34 +151,36 @@ class BaseCrawler:
             raise Exception("请求失败: {}".format(str(e)))
         except requests.exceptions.RequestException as e:
             raise Exception("请求失败: {}".format(str(e)))
-    
+
     def _save_json(self, data, filename):
         """
         保存JSON数据到文件（私有方法）
-        
+
         Args:
             data (dict or list): 要保存的JSON数据
             filename (str): 输出文件名（不含路径）
-        
+
         Returns:
             str: 输出文件的完整路径
         """
         # 确保输出目录存在
         os.makedirs(self.output_dir, exist_ok=True)
-        
+
         # 构建完整文件路径
         filepath = os.path.join(self.output_dir, filename)
-        
+
         # 写入JSON文件（使用UTF-8编码，格式化输出）
-        with open(filepath, 'w', encoding='utf-8') as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        
+
         return filepath
 
     def _get_db_connection(self):
         """创建PostgreSQL连接。"""
         if psycopg2 is None:
-            raise Exception("缺少psycopg2-binary依赖，请先执行 pip install -r requirements.txt")
+            raise Exception(
+                "缺少psycopg2-binary依赖，请先执行 pip install -r requirements.txt"
+            )
         return psycopg2.connect(
             host=self.db_config.get("host"),
             port=self.db_config.get("port"),
@@ -277,11 +308,11 @@ class BaseCrawler:
                     geom = EXCLUDED.geom,
                     updated_at = now()
             '''
-            template = '''
+            template = """
                 (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                  CASE WHEN %s IS NOT NULL AND %s IS NOT NULL THEN ST_SetSRID(ST_MakePoint(%s, %s), 4326) ELSE NULL END,
                  now())
-            '''
+            """
             expanded_rows = []
             for row in rows:
                 lng = row[9]
@@ -289,23 +320,25 @@ class BaseCrawler:
                 expanded_rows.append(row + (lng, lat, lng, lat))
 
             with conn.cursor() as cur:
-                execute_values(cur, sql, expanded_rows, template=template, page_size=500)
+                execute_values(
+                    cur, sql, expanded_rows, template=template, page_size=500
+                )
             conn.commit()
             return len(rows)
         finally:
             conn.close()
-    
+
     def _get_region_bounds_from_db(self, region_name):
         """
         从数据库获取区域边界和城市名称
-        
+
         仅支持中文名称查询，自动区分省和市：
         - 先查询省级表 jc_sheng（匹配 shengname）
         - 如果未找到，查询市级表 jc_shi（匹配 shiname）
-        
+
         Args:
             region_name: 区域中文名称（如"河南省"、"郑州市"）
-        
+
         Returns:
             dict: 包含区域信息的字典，格式如下：
                 {
@@ -323,15 +356,16 @@ class BaseCrawler:
         if psycopg2 is None:
             print("⚠️ 缺少psycopg2依赖，无法从数据库查询区域边界")
             return None
-        
+
         conn = None
         try:
             conn = psycopg2.connect(**self.db_config)
             cur = conn.cursor()
-            
+
             # 第一步：查询省级表 jc_sheng
             print(f"🔍 尝试从 jc_sheng 表查询区域: {region_name}")
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT shengname, shengcode,
                        ST_YMin(geom) as min_lat, ST_YMax(geom) as max_lat,
                        ST_XMin(geom) as min_lng, ST_XMax(geom) as max_lng
@@ -342,24 +376,33 @@ class BaseCrawler:
                          WHEN shengname LIKE %s THEN 2 
                          ELSE 3 END
                 LIMIT 1
-            """, (region_name, f"%{region_name}%", f"{region_name}省", region_name, f"%{region_name}%"))
+            """,
+                (
+                    region_name,
+                    f"%{region_name}%",
+                    f"{region_name}省",
+                    region_name,
+                    f"%{region_name}%",
+                ),
+            )
             row = cur.fetchone()
             if row:
                 print(f"✅ 从 jc_sheng 表找到区域: {row[0]}")
                 return {
-                    'name': row[0],
-                    'name_en': row[1].lower() if row[1] else region_name,
-                    'lat_min': float(row[2]) if row[2] else None,
-                    'lat_max': float(row[3]) if row[3] else None,
-                    'lng_min': float(row[4]) if row[4] else None,
-                    'lng_max': float(row[5]) if row[5] else None,
-                    'grid_size_km': 200,
-                    'level': 'province'
+                    "name": row[0],
+                    "name_en": row[1].lower() if row[1] else region_name,
+                    "lat_min": float(row[2]) if row[2] else None,
+                    "lat_max": float(row[3]) if row[3] else None,
+                    "lng_min": float(row[4]) if row[4] else None,
+                    "lng_max": float(row[5]) if row[5] else None,
+                    "grid_size_km": 200,
+                    "level": "province",
                 }
-            
+
             # 第二步：查询市级表 jc_shi
             print(f"🔍 尝试从 jc_shi 表查询区域: {region_name}")
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT shiname, shicode, shengname,
                        ST_YMin(geom) as min_lat, ST_YMax(geom) as max_lat,
                        ST_XMin(geom) as min_lng, ST_XMax(geom) as max_lng
@@ -370,25 +413,33 @@ class BaseCrawler:
                          WHEN shiname LIKE %s THEN 2 
                          ELSE 3 END
                 LIMIT 1
-            """, (region_name, f"%{region_name}%", f"{region_name}市", region_name, f"%{region_name}%"))
+            """,
+                (
+                    region_name,
+                    f"%{region_name}%",
+                    f"{region_name}市",
+                    region_name,
+                    f"%{region_name}%",
+                ),
+            )
             row = cur.fetchone()
             if row:
                 print(f"✅ 从 jc_shi 表找到区域: {row[0]}（属于{row[2]}）")
                 return {
-                    'name': row[0],
-                    'name_en': row[1].lower() if row[1] else region_name,
-                    'lat_min': float(row[3]) if row[3] else None,
-                    'lat_max': float(row[4]) if row[4] else None,
-                    'lng_min': float(row[5]) if row[5] else None,
-                    'lng_max': float(row[6]) if row[6] else None,
-                    'grid_size_km': 100,
-                    'level': 'city',
-                    'province_name': row[2]
+                    "name": row[0],
+                    "name_en": row[1].lower() if row[1] else region_name,
+                    "lat_min": float(row[3]) if row[3] else None,
+                    "lat_max": float(row[4]) if row[4] else None,
+                    "lng_min": float(row[5]) if row[5] else None,
+                    "lng_max": float(row[6]) if row[6] else None,
+                    "grid_size_km": 100,
+                    "level": "city",
+                    "province_name": row[2],
                 }
-            
+
             print(f"❌ 未在数据库中找到区域: {region_name}")
             return None
-            
+
         except Exception as e:
             print(f"⚠️ 数据库查询失败: {str(e)}")
             return None
@@ -399,15 +450,15 @@ class BaseCrawler:
     def crawl(self, **kwargs):
         """
         爬取数据（抽象方法，子类必须实现）
-        
+
         子类应重写此方法实现具体的爬取逻辑。
-        
+
         Args:
             **kwargs: 爬取参数（如坐标、半径等）
-        
+
         Returns:
             爬取结果（具体类型由子类定义）
-        
+
         Raises:
             NotImplementedError: 如果子类未实现此方法
         """

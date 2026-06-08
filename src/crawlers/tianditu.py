@@ -21,33 +21,33 @@ from src.utils.geo import (
     latlng_to_rectangle,
 )
 
-warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 
 class TiandituPOICrawler(BaseCrawler):
     """
     天地图POI爬虫类
-    
+
     支持四种搜索模式：
     1. 视野内搜索 (queryType=2) - mapBound 矩形范围
     2. 多边形搜索 (queryType=10) - polygon 多边形/矩形范围
     3. 周边搜索 (queryType=3) - 中心点 + 半径
     4. 区域分块搜索 - 按省份/自定义区域网格化爬取
-    
+
     主要特性：
     - 支持从数据库动态获取区域边界（优先）
     - 支持按区域级别过滤数据
     - 网格大小单位为米
     """
 
-    QUERY_MAPBOUND = 2    # 视野内搜索
-    QUERY_AROUND = 3      # 周边搜索
-    QUERY_POLYGON = 10    # 多边形搜索
+    QUERY_MAPBOUND = 2  # 视野内搜索
+    QUERY_AROUND = 3  # 周边搜索
+    QUERY_POLYGON = 10  # 多边形搜索
 
     def __init__(self, config):
         """
         初始化天地图POI爬虫
-        
+
         Args:
             config (dict): 配置字典，包含以下关键字段：
                 - api_url: 天地图API地址
@@ -63,30 +63,30 @@ class TiandituPOICrawler(BaseCrawler):
         """
         super().__init__(config)
 
-        self.api_url = config['api_url']
-        self.api_key = config.get('api_key', '')
-        self.data_types = config.get('data_types', '')
-        self.level = config.get('level', 12)
-        self.page_size = config.get('page_size', 100)
-        self.default_keyword = config.get('default_keyword', 'POI')
-        self.show = config.get('show', '2')
-        self.request_delay = config.get('request_delay', 0.2)
-        self.region_config = config.get('region_config', {})
+        self.api_url = config["api_url"]
+        self.api_key = config.get("api_key", "")
+        self.data_types = config.get("data_types", "")
+        self.level = config.get("level", 12)
+        self.page_size = config.get("page_size", 100)
+        self.default_keyword = config.get("default_keyword", "POI")
+        self.show = config.get("show", "2")
+        self.request_delay = config.get("request_delay", 0.2)
+        self.region_config = config.get("region_config", {})
 
     def _check_api_key(self):
         """
         检查API密钥是否已配置
-        
+
         Raises:
             Exception: 如果API密钥未配置或为默认值
         """
-        if not self.api_key or self.api_key == 'your_tianditu_api_key':
+        if not self.api_key or self.api_key == "your_tianditu_api_key":
             raise Exception("请先在config/settings.py中配置天地图API Key")
 
     def _sleep(self):
         """
         根据配置的请求间隔进行休眠
-        
+
         用于控制API请求频率，避免触发限流
         """
         if self.request_delay > 0:
@@ -95,7 +95,7 @@ class TiandituPOICrawler(BaseCrawler):
     def _search(self, post_data):
         """发送天地图搜索请求"""
         params = {
-            "postStr": json.dumps(post_data, ensure_ascii=False, separators=(',', ':')),
+            "postStr": json.dumps(post_data, ensure_ascii=False, separators=(",", ":")),
             "type": "query",
             "tk": self.api_key,
         }
@@ -106,17 +106,30 @@ class TiandituPOICrawler(BaseCrawler):
         if not data:
             return []
 
-        status = data.get('status', {})
-        infocode = status.get('infocode', -1)
-        if infocode != 1000 and infocode != 0:
-            cndesc = status.get('cndesc', 'Unknown error')
-            print("API返回错误: {} ({})".format(cndesc, infocode))
+        status = data.get("status", {})
+        infocode = status.get("infocode", -1)
+        code = data.get("code", infocode)
+        if (infocode != 1000 and infocode != 0) or (
+            isinstance(code, int) and code != 1000 and code != 0
+        ):
+            cndesc = (
+                status.get("cndesc")
+                or data.get("msg")
+                or data.get("message")
+                or "Unknown error"
+            )
+            if code == 301012 or infocode == 301012:
+                print(
+                    "天地图 API 权限类型错误：当前 Key 可能是浏览器端或非搜索服务 Key。"
+                    "请使用天地图搜索服务 V2.0 的服务端 Key。"
+                )
+            print("API返回错误: {} ({})".format(cndesc, code))
             return []
 
-        if data.get('resultType') != 1:
+        if data.get("resultType") != 1:
             return []
 
-        return data.get('pois', [])
+        return data.get("pois", [])
 
     def _fetch_pois_paged(self, base_post_data):
         """分页获取POI"""
@@ -125,12 +138,12 @@ class TiandituPOICrawler(BaseCrawler):
 
         while True:
             post_data = dict(base_post_data)
-            post_data['start'] = str(start)
-            post_data['count'] = str(self.page_size)
+            post_data["start"] = str(start)
+            post_data["count"] = str(self.page_size)
 
-            print("请求 queryType={}, start={}".format(
-                post_data.get('queryType'), start
-            ))
+            print(
+                "请求 queryType={}, start={}".format(post_data.get("queryType"), start)
+            )
             data = self._search(post_data)
             pois = self._extract_pois(data)
 
@@ -140,7 +153,7 @@ class TiandituPOICrawler(BaseCrawler):
             all_results.extend(pois)
             start += len(pois)
 
-            total = data.get('count', 0)
+            total = data.get("count", 0)
             if start >= total or len(pois) < self.page_size:
                 break
 
@@ -152,7 +165,7 @@ class TiandituPOICrawler(BaseCrawler):
         seen = set()
         unique = []
         for poi in pois:
-            poi_id = poi.get('hotPointID')
+            poi_id = poi.get("hotPointID")
             if poi_id and poi_id in seen:
                 continue
             if poi_id:
@@ -161,13 +174,19 @@ class TiandituPOICrawler(BaseCrawler):
         return unique
 
     def _resolve_keyword(self, keywords):
+        if isinstance(keywords, list):
+            return [keyword for keyword in keywords if keyword]
         return keywords if keywords else self.default_keyword
 
     def _build_post_data(self, query_type, keywords=None, **extra):
         post_data = {
             "queryType": str(query_type),
-            "keyWord": self._resolve_keyword(keywords),
         }
+
+        resolved_keyword = self._resolve_keyword(keywords)
+        if isinstance(resolved_keyword, str) and resolved_keyword:
+            post_data["keyWord"] = resolved_keyword
+
         if self.data_types:
             post_data["dataTypes"] = self.data_types
         if self.show:
@@ -177,6 +196,20 @@ class TiandituPOICrawler(BaseCrawler):
 
     def _fetch_by_map_bound(self, lng_min, lat_min, lng_max, lat_max, keywords=None):
         map_bound = bounds_to_map_bound(lng_min, lat_min, lng_max, lat_max)
+        if isinstance(keywords, list):
+            all_pois = []
+            for keyword in keywords:
+                print(f"正在搜索关键词: {keyword}")
+                post_data = self._build_post_data(
+                    self.QUERY_MAPBOUND,
+                    keywords=keyword,
+                    mapBound=map_bound,
+                    level=str(self.level),
+                )
+                all_pois.extend(self._fetch_pois_paged(post_data))
+                self._sleep()
+            return all_pois
+
         post_data = self._build_post_data(
             self.QUERY_MAPBOUND,
             keywords=keywords,
@@ -186,6 +219,19 @@ class TiandituPOICrawler(BaseCrawler):
         return self._fetch_pois_paged(post_data)
 
     def _fetch_by_polygon(self, polygon, keywords=None):
+        if isinstance(keywords, list):
+            all_pois = []
+            for keyword in keywords:
+                print(f"正在搜索关键词: {keyword}")
+                post_data = self._build_post_data(
+                    self.QUERY_POLYGON,
+                    keywords=keyword,
+                    polygon=polygon,
+                )
+                all_pois.extend(self._fetch_pois_paged(post_data))
+                self._sleep()
+            return all_pois
+
         post_data = self._build_post_data(
             self.QUERY_POLYGON,
             keywords=keywords,
@@ -194,6 +240,21 @@ class TiandituPOICrawler(BaseCrawler):
         return self._fetch_pois_paged(post_data)
 
     def _fetch_by_around(self, lat, lng, radius_m, keywords=None):
+        if isinstance(keywords, list):
+            all_pois = []
+            for keyword in keywords:
+                print(f"正在搜索关键词: {keyword}")
+                post_data = self._build_post_data(
+                    self.QUERY_AROUND,
+                    keywords=keyword,
+                    pointLonlat="{},{}".format(lng, lat),
+                    queryRadius=str(radius_m),
+                    level=str(self.level),
+                )
+                all_pois.extend(self._fetch_pois_paged(post_data))
+                self._sleep()
+            return all_pois
+
         post_data = self._build_post_data(
             self.QUERY_AROUND,
             keywords=keywords,
@@ -215,7 +276,9 @@ class TiandituPOICrawler(BaseCrawler):
         saved_count = self._save_pois_to_db(pois, "tianditu", metadata=metadata)
         result["db_table"] = self.db_table
         result["db_count"] = saved_count
-        print("\n成功！共获取 {} 个天地图POI，已入库 {} 条".format(len(pois), saved_count))
+        print(
+            "\n成功！共获取 {} 个天地图POI，已入库 {} 条".format(len(pois), saved_count)
+        )
         print("入库表: {}".format(self.db_table))
         return result
 
@@ -232,14 +295,20 @@ class TiandituPOICrawler(BaseCrawler):
             output_file = "poi_{}_{}_{}.json".format(lat, lng, radius_m)
 
         pois = self._fetch_by_around(lat, lng, radius_m, keywords=keywords)
-        return self._build_result(pois, output_file, {
-            "mode": "around",
-            "location": {"lat": lat, "lng": lng},
-            "radius": radius_m,
-            "keywords": keywords,
-        })
+        return self._build_result(
+            pois,
+            output_file,
+            {
+                "mode": "around",
+                "location": {"lat": lat, "lng": lng},
+                "radius": radius_m,
+                "keywords": keywords,
+            },
+        )
 
-    def crawl_bounds(self, lat_min, lat_max, lng_min, lng_max, keywords=None, output_file=None):
+    def crawl_bounds(
+        self, lat_min, lat_max, lng_min, lng_max, keywords=None, output_file=None
+    ):
         """按矩形范围搜索POI（优先使用多边形搜索）"""
         self._check_api_key()
 
@@ -248,9 +317,11 @@ class TiandituPOICrawler(BaseCrawler):
                 lat_min, lat_max, lng_min, lng_max
             )
 
-        print("矩形范围: 纬度 {:.4f}~{:.4f}, 经度 {:.4f}~{:.4f}".format(
-            lat_min, lat_max, lng_min, lng_max
-        ))
+        print(
+            "矩形范围: 纬度 {:.4f}~{:.4f}, 经度 {:.4f}~{:.4f}".format(
+                lat_min, lat_max, lng_min, lng_max
+            )
+        )
 
         polygon = bounds_to_tianditu_polygon(lng_min, lat_min, lng_max, lat_max)
         pois = self._fetch_by_polygon(polygon, keywords=keywords)
@@ -263,36 +334,44 @@ class TiandituPOICrawler(BaseCrawler):
 
         pois = self._dedupe_pois(pois)
 
-        return self._build_result(pois, output_file, {
-            "mode": "bounds",
-            "bounds": {
-                "lat_min": lat_min, "lat_max": lat_max,
-                "lng_min": lng_min, "lng_max": lng_max,
+        return self._build_result(
+            pois,
+            output_file,
+            {
+                "mode": "bounds",
+                "bounds": {
+                    "lat_min": lat_min,
+                    "lat_max": lat_max,
+                    "lng_min": lng_min,
+                    "lng_max": lng_max,
+                },
+                "keywords": keywords,
             },
-            "keywords": keywords,
-        })
+        )
 
-    def crawl_region(self, region_name="河南省", grid_size_m=None, keywords=None, output_file=None):
+    def crawl_region(
+        self, region_name="河南省", grid_size_m=None, keywords=None, output_file=None
+    ):
         """
         按区域分块搜索POI（核心方法）
-        
+
         将指定区域按网格分块，对每个网格进行矩形范围搜索，最后合并去重。
-        
+
         工作流程：
         1. 优先从数据库获取区域边界（支持省/市两级）
         2. 根据网格大小将区域划分为多个网格点
         3. 对每个网格点进行矩形范围搜索
         4. 合并所有结果并去重
-        
+
         Args:
             region_name (str): 区域中文名称（如"河南省"、"郑州市"），默认"河南省"
             grid_size_m (int, optional): 网格大小（米），默认根据区域级别自动设置
             keywords (str, optional): 搜索关键词
             output_file (str, optional): 输出文件名
-            
+
         Returns:
             dict: 包含爬取结果的字典
-            
+
         Notes:
             - 区域边界优先从数据库 jc_sheng/jc_shi 表获取
             - 网格大小单位为**米**，与DJI爬虫的千米单位不同
@@ -302,7 +381,7 @@ class TiandituPOICrawler(BaseCrawler):
         # 优先从数据库获取区域边界信息
         db_region_info = self._get_region_bounds_from_db(region_name)
         region_level = None
-        
+
         if db_region_info:
             print(f"✅ 从数据库获取区域边界信息: {db_region_info['name']}")
             region_info = db_region_info
@@ -321,7 +400,7 @@ class TiandituPOICrawler(BaseCrawler):
         lat_max = region_info.get("lat_max")
         lng_min = region_info.get("lng_min")
         lng_max = region_info.get("lng_max")
-        
+
         # 使用传入的网格大小（米），或数据库/配置中的默认值（转换为米）
         if grid_size_m is None:
             grid_size_m = region_info.get("grid_size_km", 200) * 1000
@@ -329,23 +408,31 @@ class TiandituPOICrawler(BaseCrawler):
         print("=" * 70)
         print("开始按区域分块爬取天地图POI")
         print("区域: {}".format(region_name_cn))
-        print("边界: 纬度 {:.2f}~{:.2f}, 经度 {:.2f}~{:.2f}".format(
-            lat_min, lat_max, lng_min, lng_max
-        ))
+        print(
+            "边界: 纬度 {:.2f}~{:.2f}, 经度 {:.2f}~{:.2f}".format(
+                lat_min, lat_max, lng_min, lng_max
+            )
+        )
         print("网格大小: {} 米".format(grid_size_m))
         print("=" * 70)
 
-        grid_points = generate_grid_points(lat_min, lat_max, lng_min, lng_max, grid_size_m)
+        grid_points = generate_grid_points(
+            lat_min, lat_max, lng_min, lng_max, grid_size_m
+        )
         all_pois = []
         success_count = 0
         fail_count = 0
 
         for lat, lng, index in grid_points:
-            print("\n[{}/{}] 爬取网格: ({:.4f}, {:.4f})".format(
-                index, len(grid_points), lat, lng
-            ))
+            print(
+                "\n[{}/{}] 爬取网格: ({:.4f}, {:.4f})".format(
+                    index, len(grid_points), lat, lng
+                )
+            )
             try:
-                ltlat, ltlng, rblat, rblng = latlng_to_rectangle(lat, lng, grid_size_m / 2)
+                ltlat, ltlng, rblat, rblng = latlng_to_rectangle(
+                    lat, lng, grid_size_m / 2
+                )
                 polygon = bounds_to_tianditu_polygon(ltlng, rblat, rblng, ltlat)
                 pois = self._fetch_by_polygon(polygon, keywords=keywords)
                 if not pois:
@@ -364,13 +451,17 @@ class TiandituPOICrawler(BaseCrawler):
         if output_file is None:
             output_file = "poi_{}_{}m.json".format(region_name, grid_size_m)
 
-        return self._build_result(unique_pois, output_file, {
-            "mode": "region",
-            "region": region_name_cn,
-            "grid_size_m": grid_size_m,
-            "total_grids": len(grid_points),
-            "success_grids": success_count,
-            "fail_grids": fail_count,
-            "total_before_dedup": len(all_pois),
-            "keywords": keywords,
-        })
+        return self._build_result(
+            unique_pois,
+            output_file,
+            {
+                "mode": "region",
+                "region": region_name_cn,
+                "grid_size_m": grid_size_m,
+                "total_grids": len(grid_points),
+                "success_grids": success_count,
+                "fail_grids": fail_count,
+                "total_before_dedup": len(all_pois),
+                "keywords": keywords,
+            },
+        )
