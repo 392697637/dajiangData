@@ -1,0 +1,64 @@
+2026-06-08 15:37:56,133 - INFO - ================================================================================
+2026-06-08 15:37:56,134 - INFO - Database sync started
+2026-06-08 15:37:56,134 - INFO - Source: 192.168.110.6:5432/ktd_lx_2026gis
+2026-06-08 15:37:56,134 - INFO - Target: 192.168.110.15:5432/ktd_lx_2026gis
+2026-06-08 15:37:56,134 - INFO - Mode: tables
+2026-06-08 15:37:56,134 - INFO - Clean target tables: True
+2026-06-08 15:37:56,134 - INFO - Tables: 2
+2026-06-08 15:37:56,134 - INFO - Will sync table: public.bo_electric_fence
+2026-06-08 15:37:56,135 - INFO - Will sync table: public.bo_ground_ele
+2026-06-08 15:37:56,169 - ERROR - Database sync failed, elapsed=0.04s
+Traceback (most recent call last):
+  File "E:\CHAJIAN\dajiangData\src\dbsync.py", line 259, in ensure_target_database
+    with connect_db(db):
+         ~~~~~~~~~~^^^^
+  File "E:\CHAJIAN\dajiangData\src\dbsync.py", line 56, in connect_db
+    return psycopg2.connect(
+           ~~~~~~~~~~~~~~~~^
+        host=db.host,
+        ^^^^^^^^^^^^^
+    ...<3 lines>...
+        password=db.password,
+        ^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "E:\CHAJIAN\dajiangData\.venv\Lib\site-packages\psycopg2\__init__.py", line 135, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+psycopg2.OperationalError: connection to server at "192.168.110.15", port 5432 failed: FATAL:  password authentication failed for user "zhuoyi"
+
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "E:\CHAJIAN\dajiangData\maindata.py", line 177, in main
+    synced_tables = sync_tables(
+        SOURCE_DB,
+    ...<6 lines>...
+        logger=logger,
+    )
+  File "E:\CHAJIAN\dajiangData\src\dbsync.py", line 331, in sync_tables
+    ensure_target_database(target_db)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "E:\CHAJIAN\dajiangData\src\dbsync.py", line 262, in ensure_target_database
+    raise RuntimeError(
+        f"Cannot connect to target database {db.database} at {db.host}:{db.port}: {exc}"
+    ) from exc
+RuntimeError: Cannot connect to target database ktd_lx_2026gis at 192.168.110.15:5432: connection to server at "192.168.110.15", port 5432 failed: FATAL:  password authentication failed for user "zhuoyi"
+
+2026-06-08 15:43:21,137 - INFO - ================================================================================
+2026-06-08 15:43:21,138 - INFO - Database sync started
+2026-06-08 15:43:21,138 - INFO - Source: 192.168.110.6:5432/ktd_lx_2026gis
+2026-06-08 15:43:21,138 - INFO - Target: 192.168.110.15:5432/ktd_lx_2026gis
+2026-06-08 15:43:21,138 - INFO - Mode: tables
+2026-06-08 15:43:21,138 - INFO - Clean target tables: True
+2026-06-08 15:43:21,138 - INFO - Tables: 2
+2026-06-08 15:43:21,139 - INFO - Will sync table: public.bo_electric_fence
+2026-06-08 15:43:21,139 - INFO - Will sync table: public.bo_ground_ele
+2026-06-08 15:43:21,177 - INFO - [TABLE] Start sync: public.bo_electric_fence
+2026-06-08 15:43:21,281 - INFO - Target table does not exist, skip drop: public.bo_electric_fence
+2026-06-08 15:43:21,991 - INFO - [TABLE] Success: public.bo_electric_fence, elapsed=0.81s
+2026-06-08 15:43:21,991 - INFO - [TABLE] Start sync: public.bo_ground_ele
+2026-06-08 15:43:22,067 - INFO - Target table does not exist, skip drop: public.bo_ground_ele
+2026-06-08 15:43:22,628 - INFO - [TABLE] Success: public.bo_ground_ele, elapsed=0.64s
+2026-06-08 15:43:22,629 - INFO - Done. Synced 2 table(s), 0 function(s), 0 view(s). elapsed=1.49s
+2026-06-08 15:43:22,629 - INFO - Database sync finished
