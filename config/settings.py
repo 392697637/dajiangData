@@ -106,7 +106,7 @@ AMAP_CONFIG = {
     "type_table": "gis_poi_type_gd",  # POI类型表
     "db_config": DATABASE_CONFIG,
     # API认证配置（需要在高德地图开放平台申请，或通过环境变量 AMAP_API_KEY 设置）
-    # "api_key": os.environ.get("AMAP_API_KEY", "3db5913a17927510f547cbddab83d41c"),
+    # "api_key": os.environ.get("AMAP_API_KEY", "bd3315c0ce56994191654752cdc1ce93"),
     "api_key": os.environ.get("AMAP_API_KEY", "731aabd9daa54e1edada10c8e4215eba"),
     # 区域分块配置
     "region_config": REGION_CONFIG,

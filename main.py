@@ -960,7 +960,7 @@ def main():
     parser.add_argument(
         "--action",
         type=str,
-        choices=["poitype", "poidata"],
+        choices=["poitype", "poidata", "dji"],
         help="POI操作类型（仅poi分类）:\n  poitype - 获取POI类型列表\n  poidata - 获取POI数据",
     )
 
