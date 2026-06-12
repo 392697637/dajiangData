@@ -524,33 +524,47 @@ BEGIN
     EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS zone_type VARCHAR(20);', v_table);
 
     -- ===================== 创建临时表：计算每个网格点最高优先级的区域类型 =====================
-    -- 使用 DISTINCT ON + 排序保证每个网格点只取优先级最高的围栏（禁飞>管控>适飞）
-    -- 空间判断：网格点与围栏几何相交 ST_Intersects
+    -- 先过滤有效围栏，再使用 bbox 预筛选 + ST_Intersects，减少空间连接成本
     EXECUTE format('
-        CREATE TEMP TABLE tmp_zone_grid AS
-        SELECT DISTINCT ON (n.id) n.id,
-        CASE f.fence_type
-            WHEN ''1'' THEN ''禁飞区''
-            WHEN ''2'' THEN ''管控区''
-            WHEN ''3'' THEN ''适飞区''
-        END AS zone_type
-        FROM %I n
-					-- JOIN bo_electric_fence f ON ST_DWithin(n.geom::geography, f.geom::geography, 100)
-				-- JOIN bo_electric_fence f ON ST_Intersects(n.geom, f.geom)
-        JOIN bo_electric_fence f  ON ST_Intersects(n.geom, ST_SetSRID(f.geom, 4326))
-        WHERE f.del_flag = false
-				--  AND n.alt <= f.height                      -- 只考虑高度在围栏限制内的网格点
-          AND f.fence_type IN (''1'',''2'',''3'')
-          AND ( $1 = '''' OR f.project_id::TEXT = $1::TEXT )   -- 项目隔离过滤
-        ORDER BY n.id,
-        CASE f.fence_type                                    -- 优先级排序：1<2<3
-            WHEN ''1'' THEN 1
-            WHEN ''2'' THEN 2
-            WHEN ''3'' THEN 3
-            ELSE 4
-        END
+        CREATE TEMP TABLE tmp_zone_grid ON COMMIT DROP AS
+        WITH filtered_fences AS (
+            SELECT
+                id,
+                project_id,
+                fence_type,
+                ST_SetSRID(geom, 4326) AS geom4326,
+                CASE fence_type
+                    WHEN ''1'' THEN 1
+                    WHEN ''2'' THEN 2
+                    WHEN ''3'' THEN 3
+                    ELSE 4
+                END AS priority
+            FROM bo_electric_fence
+            WHERE del_flag = false
+              AND fence_type IN (''1'', ''2'', ''3'')
+              AND ($1 = '''' OR project_id::TEXT = $1::TEXT)
+        ),
+        ranked_matches AS (
+            SELECT
+                n.id,
+                CASE f.fence_type
+                    WHEN ''1'' THEN ''禁飞区''
+                    WHEN ''2'' THEN ''管控区''
+                    WHEN ''3'' THEN ''适飞区''
+                END AS zone_type,
+                ROW_NUMBER() OVER (PARTITION BY n.id ORDER BY f.priority) AS rn
+            FROM %I n
+            JOIN filtered_fences f
+              ON n.geom && f.geom4326
+             AND ST_Intersects(n.geom, f.geom4326)
+        )
+        SELECT id, zone_type
+        FROM ranked_matches
+        WHERE rn = 1
     ', v_table) USING p_project_id;
 
+    EXECUTE 'CREATE INDEX ON tmp_zone_grid(id);';
+    EXECUTE 'ANALYZE tmp_zone_grid;';
     -- ===================== 批量更新网格表区域类型 =====================
     -- 仅更新值发生变化的行，减少不必要IO
     EXECUTE format('
@@ -633,6 +647,8 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_table TEXT;
+    v_updated_match_rows INT := 0;
+    v_cleared_rows INT := 0;
 BEGIN
     -- 确定网格表名
     IF p_project_id = '' OR p_project_id IS NULL THEN
@@ -640,14 +656,75 @@ BEGIN
     ELSE
         v_table := 'gis_grid_nodes_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
     END IF;
+    table_name := v_table;
 
-    -- 仅重置非空的 zone_type 为 NULL（避免全表更新）
-    EXECUTE format('
-        UPDATE %I SET zone_type = NULL WHERE zone_type IS NOT NULL;
+    -- 兼容旧表结构：确保目标表存在 zone_type 列
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS zone_type VARCHAR(20);', v_table);
+
+    -- 计算应该写入的目标 zone_type，按围栏优先级取最高优先级值
+    EXECUTE format(' 
+        CREATE TEMP TABLE tmp_desired_zone ON COMMIT DROP AS
+        WITH filtered_fences AS (
+            SELECT
+                id,
+                fence_type,
+                ST_SetSRID(geom, 4326) AS geom4326,
+                CASE fence_type
+                    WHEN ''1'' THEN 1
+                    WHEN ''2'' THEN 2
+                    WHEN ''3'' THEN 3
+                    ELSE 4
+                END AS priority
+            FROM bo_electric_fence
+            WHERE del_flag = false
+              AND fence_type IN (''1'', ''2'', ''3'')
+              AND ($1 = '''' OR project_id::TEXT = $1::TEXT)
+        ),
+        ranked_matches AS (
+            SELECT
+                n.id,
+                CASE f.fence_type
+                    WHEN ''1'' THEN ''禁飞区''
+                    WHEN ''2'' THEN ''管控区''
+                    WHEN ''3'' THEN ''适飞区''
+                END AS zone_type,
+                ROW_NUMBER() OVER (PARTITION BY n.id ORDER BY f.priority) AS rn
+            FROM %I n
+            JOIN filtered_fences f
+              ON n.geom && f.geom4326
+             AND ST_Intersects(n.geom, f.geom4326)
+        )
+        SELECT id, zone_type
+        FROM ranked_matches
+        WHERE rn = 1
+    ', v_table) USING p_project_id;
+
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_tmp_desired_zone_id ON tmp_desired_zone(id);';
+    EXECUTE 'ANALYZE tmp_desired_zone;';
+
+    -- 更新当前应保留或修改的 zone_type
+    EXECUTE format(' 
+        UPDATE %I n
+        SET zone_type = t.zone_type
+        FROM tmp_desired_zone t
+        WHERE n.id = t.id
+          AND (n.zone_type IS DISTINCT FROM t.zone_type)
     ', v_table);
+    GET DIAGNOSTICS v_updated_match_rows = ROW_COUNT;
 
-    -- 重新调用标记函数完成区域标注
-    RETURN QUERY SELECT * FROM gis_mark_electric_fence(p_project_id);
+    -- 清除不再落在有效围栏内的旧 zone_type
+    EXECUTE format('
+        UPDATE %I n
+        SET zone_type = NULL
+        WHERE n.zone_type IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM tmp_desired_zone t WHERE t.id = n.id)
+    ', v_table);
+    GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
+
+    count := v_updated_match_rows + v_cleared_rows;
+    code := 200;
+    msg := format('刷新电子围栏标记完成，更新 %s 条记录', count);
+    RETURN NEXT;
 
 EXCEPTION WHEN OTHERS THEN
     code := 500;
