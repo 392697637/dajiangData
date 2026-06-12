@@ -367,6 +367,14 @@ $$;
 -- PG库调用
 SELECT * FROM gis_get_electric_fence_project('%project_id%', '%fence_type%')
  
+-- geoserverUrl  
+-- http://192.168.110.6:8089/geoserver/ktd_lx_2026gis/wms
+-- geoserver服务地址
+
+-- geoserverEelectricFenceLayers
+-- ktd_lx_2026gis:electric_fence_project
+-- geoserver电子围栏图层名称
+-- --  
 --  project_id  zhengzhou_demo  ^[a-zA-Z0-9_]+$
 -- fence_type  1,2,3   ^(-1|\d+([;,]\d+)*|)$
 -- 单类型
