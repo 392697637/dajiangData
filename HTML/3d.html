@@ -1,0 +1,944 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cesium 加载3DTiles</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+      }
+      html,
+      body,
+      #cesiumContainer {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+      .loading-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.7);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 9999;
+        color: #fff;
+        font-family: Arial, sans-serif;
+        font-size: 18px;
+      }
+      .loading-overlay.hidden {
+        display: none;
+      }
+      .loading-content {
+        text-align: center;
+      }
+      .loading-spinner {
+        width: 40px;
+        height: 40px;
+        border: 4px solid #333;
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin: 0 auto 15px;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .error-message {
+        background: rgba(255, 0, 0, 0.2);
+        padding: 10px 20px;
+        border-radius: 5px;
+        margin-top: 10px;
+      }
+      /* 比例尺样式 */
+      #scaleBar {
+        position: absolute;
+        bottom: 30px;
+        left: 10px;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 5px 10px;
+        border-radius: 4px;
+        color: #fff;
+        font-size: 12px;
+        font-family: Arial, sans-serif;
+        z-index: 100;
+      }
+      #scaleBar .scale-line {
+        display: flex;
+        align-items: center;
+        margin-top: 3px;
+      }
+      #scaleBar .scale-bar-graphic {
+        width: 100px;
+        height: 4px;
+        background: #fff;
+        position: relative;
+      }
+      #scaleBar .scale-bar-graphic::before,
+      #scaleBar .scale-bar-graphic::after {
+        content: "";
+        position: absolute;
+        width: 2px;
+        height: 10px;
+        background: #fff;
+        top: -3px;
+      }
+      #scaleBar .scale-bar-graphic::before {
+        left: 0;
+      }
+      #scaleBar .scale-bar-graphic::after {
+        right: 0;
+      }
+      #scaleBar .scale-text {
+        margin-left: 8px;
+      }
+      /* 控制面板样式 */
+      #controlPanel {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 12px 15px;
+        border-radius: 8px;
+        z-index: 100;
+        color: #fff;
+        font-size: 13px;
+        font-family: Arial, sans-serif;
+        width: 220px;
+        max-height: 90vh;
+        overflow-y: auto;
+      }
+      #controlPanel .panel-title {
+        font-weight: bold;
+        margin-bottom: 10px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+        color: #4caf50;
+      }
+      #controlPanel .section-title {
+        font-weight: bold;
+        margin: 10px 0 5px 0;
+        color: #aaa;
+        font-size: 12px;
+      }
+      #controlPanel .control-item {
+        display: flex;
+        align-items: center;
+        margin: 5px 0;
+      }
+      #controlPanel .control-item label {
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        width: 100%;
+      }
+      #controlPanel .control-item input[type="checkbox"] {
+        margin-right: 8px;
+        cursor: pointer;
+      }
+      #controlPanel .btn {
+        padding: 6px 12px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+        margin-top: 5px;
+        width: 100%;
+        transition: background 0.2s;
+      }
+      #controlPanel .btn-primary {
+        background: #4caf50;
+        color: white;
+      }
+      #controlPanel .btn-primary:hover {
+        background: #45a049;
+      }
+      #controlPanel .btn-secondary {
+        background: #2196f3;
+        color: white;
+      }
+      #controlPanel .btn-secondary:hover {
+        background: #1976d2;
+      }
+      #controlPanel .btn-warning {
+        background: #ff9800;
+        color: white;
+      }
+      #controlPanel .btn-warning:hover {
+        background: #f57c00;
+      }
+      #controlPanel .input-group {
+        margin: 8px 0;
+      }
+      #controlPanel .input-group label {
+        display: block;
+        font-size: 11px;
+        color: #aaa;
+        margin-bottom: 3px;
+      }
+      #controlPanel .input-group input {
+        width: 100%;
+        padding: 5px 8px;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.1);
+        color: #fff;
+        font-size: 12px;
+        box-sizing: border-box;
+      }
+      #controlPanel .input-group input:focus {
+        outline: none;
+        border-color: #4caf50;
+      }
+      #controlPanel .slider-group {
+        margin: 8px 0;
+      }
+      #controlPanel .slider-group label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: #aaa;
+        margin-bottom: 3px;
+      }
+      #controlPanel .slider-group input[type="range"] {
+        width: 100%;
+        cursor: pointer;
+      }
+      #controlPanel .slider-value {
+        color: #4caf50;
+        font-weight: bold;
+      }
+      #controlPanel .divider {
+        height: 1px;
+        background: rgba(255, 255, 255, 0.2);
+        margin: 10px 0;
+      }
+    </style>
+    <!-- 必须在加载 Cesium 之前禁用默认图层 -->
+    <script>
+      window.CESIUM_DISABLE_DEFAULT_LAYERS = true;
+    </script>
+    <!-- Cesium 1.92 -->
+    <script src="https://cdn.jsdelivr.net/npm/cesium@1.92/Build/Cesium/Cesium.js"></script>
+    <link
+      href="https://cdn.jsdelivr.net/npm/cesium@1.92/Build/Cesium/Widgets/widgets.css"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="cesiumContainer"></div>
+    <div id="loadingOverlay" class="loading-overlay">
+      <div class="loading-content">
+        <div class="loading-spinner"></div>
+        <div>正在加载 3D 模型...</div>
+      </div>
+    </div>
+    <!-- 比例尺 -->
+    <div id="scaleBar">
+      <div class="scale-line">
+        <div class="scale-bar-graphic"></div>
+        <span class="scale-text" id="scaleText">0 m</span>
+      </div>
+    </div>
+    <!-- 控制面板 -->
+    <div id="controlPanel">
+      <div class="panel-title">图层控制</div>
+
+      <div class="section-title">底图图层</div>
+      <div class="control-item">
+        <label>
+          <input
+            type="checkbox"
+            id="showImage"
+            checked
+            onchange="toggleImageLayer()"
+          />
+          <span>影像图</span>
+        </label>
+      </div>
+      <div class="control-item">
+        <label>
+          <input
+            type="checkbox"
+            id="showImageLabel"
+            checked
+            onchange="toggleImageLabelLayer()"
+          />
+          <span>影像注记</span>
+        </label>
+      </div>
+      <div class="control-item">
+        <label>
+          <input
+            type="checkbox"
+            id="showVector"
+            onchange="toggleVectorLayer()"
+          />
+          <span>电子地图</span>
+        </label>
+      </div>
+      <div class="control-item">
+        <label>
+          <input
+            type="checkbox"
+            id="showVectorLabel"
+            onchange="toggleVectorLabelLayer()"
+          />
+          <span>电子地图注记</span>
+        </label>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="section-title">3D模型控制</div>
+      <div class="control-item">
+        <label>
+          <input
+            type="checkbox"
+            id="show3DTiles"
+            checked
+            onchange="toggle3DTiles()"
+          />
+          <span>3D模型显示</span>
+        </label>
+      </div>
+
+      <div class="slider-group">
+        <label>
+          <span>模型缩放比例</span>
+          <span class="slider-value" id="scaleValue">5.0</span>
+        </label>
+        <input
+          type="range"
+          id="modelScale"
+          min="0.1"
+          max="20"
+          step="0.1"
+          value="5"
+          onchange="updateModelScale()"
+        />
+      </div>
+
+      <div class="input-group">
+        <label>经度</label>
+        <input
+          type="number"
+          id="modelLon"
+          step="0.0001"
+          value="113.51"
+          placeholder="经度"
+        />
+      </div>
+      <div class="input-group">
+        <label>纬度</label>
+        <input
+          type="number"
+          id="modelLat"
+          step="0.0001"
+          value="34.82"
+          placeholder="纬度"
+        />
+      </div>
+      <div class="input-group">
+        <label>高度(m)</label>
+        <input
+          type="number"
+          id="modelHeight"
+          step="1"
+          value="0"
+          placeholder="高度"
+        />
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="section-title">颜色渲染</div>
+      <div class="control-item">
+        <label>
+          <input
+            type="checkbox"
+            id="enableColorStyle"
+            onchange="toggleColorStyle()"
+          />
+          <span>启用颜色调整</span>
+        </label>
+      </div>
+
+      <div class="slider-group">
+        <label>
+          <span>亮度</span>
+          <span class="slider-value" id="brightnessValue">1.0</span>
+        </label>
+        <input
+          type="range"
+          id="brightness"
+          min="0.1"
+          max="3"
+          step="0.1"
+          value="1"
+          onchange="updateColorStyle()"
+          disabled
+        />
+      </div>
+
+      <div class="slider-group">
+        <label>
+          <span>对比度</span>
+          <span class="slider-value" id="contrastValue">1.0</span>
+        </label>
+        <input
+          type="range"
+          id="contrast"
+          min="0.1"
+          max="3"
+          step="0.1"
+          value="1"
+          onchange="updateColorStyle()"
+          disabled
+        />
+      </div>
+
+      <div class="slider-group">
+        <label>
+          <span>透明度</span>
+          <span class="slider-value" id="alphaValue">1.0</span>
+        </label>
+        <input
+          type="range"
+          id="alpha"
+          min="0"
+          max="1"
+          step="0.1"
+          value="1"
+          onchange="updateColorStyle()"
+          disabled
+        />
+      </div>
+
+      <div class="input-group">
+        <label>颜色 (默认白色)</label>
+        <input
+          type="color"
+          id="modelColor"
+          value="#ffffff"
+          onchange="updateColorStyle()"
+          disabled
+        />
+      </div>
+
+      <div class="input-group">
+        <label>预设颜色</label>
+        <div style="display: flex; gap: 5px; flex-wrap: wrap">
+          <button
+            class="btn btn-secondary"
+            style="width: auto; flex: 1; padding: 4px 8px"
+            onclick="setPresetColor('#ffffff')"
+          >
+            白
+          </button>
+          <button
+            class="btn btn-secondary"
+            style="width: auto; flex: 1; padding: 4px 8px"
+            onclick="setPresetColor('#ff6b6b')"
+          >
+            红
+          </button>
+          <button
+            class="btn btn-secondary"
+            style="width: auto; flex: 1; padding: 4px 8px"
+            onclick="setPresetColor('#4ecdc4')"
+          >
+            青
+          </button>
+          <button
+            class="btn btn-secondary"
+            style="width: auto; flex: 1; padding: 4px 8px"
+            onclick="setPresetColor('#ffe66d')"
+          >
+            黄
+          </button>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" onclick="locateToModel()">
+        定位到模型
+      </button>
+      <button class="btn btn-secondary" onclick="applyModelPosition()">
+        应用位置偏移
+      </button>
+      <button class="btn btn-warning" onclick="resetModelTransform()">
+        重置模型变换
+      </button>
+
+      <div class="divider"></div>
+
+      <div class="section-title">快捷定位</div>
+      <button class="btn btn-primary" onclick="locateToZhengzhou()">
+        定位郑州高新区
+      </button>
+      <button class="btn btn-secondary" onclick="flyToModel()">
+        飞行到模型
+      </button>
+    </div>
+
+    <script>
+      // 配置参数
+      const CONFIG = {
+        tdtToken: "cf128e0b51efeb7df5f1720de282678e",
+        tilesUrl:
+          "https://192.168.110.6:9443/ktd-pgdata/3dtiles/gis_buildings_aaaaa/tileset.json",
+      };
+
+      // 禁用 Cesium Ion 请求
+      Cesium.Ion.defaultAccessToken = "";
+      if (Cesium.Ion._endpointUrl !== undefined) {
+        Cesium.Ion._endpointUrl = "";
+      }
+
+      // 初始化场景
+      const viewer = new Cesium.Viewer("cesiumContainer", {
+        animation: false,
+        timeline: false,
+        baseLayerPicker: false,
+        geocoder: false,
+        homeButton: true,
+        sceneModePicker: true,
+        navigationHelpButton: false,
+        fullscreenButton: false,
+        vrButton: false,
+        infoBox: false,
+        selectionIndicator: false,
+        shadows: false,
+        shouldAnimate: false,
+        imageryProvider: false,
+        terrainProvider: undefined,
+      });
+
+      // 清除默认图层
+      viewer.imageryLayers.removeAll();
+      viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
+
+      // 比例尺更新
+      function updateScaleBar() {
+        const distance = viewer.camera.positionCartographic.height;
+        const scaleText = document.getElementById("scaleText");
+        const scaleBarGraphic = document.querySelector(".scale-bar-graphic");
+
+        const metersPerPixel =
+          distance *
+          Math.cos(viewer.camera.positionCartographic.latitude) *
+          0.001;
+
+        let scaleValue;
+        if (metersPerPixel < 10) scaleValue = 10;
+        else if (metersPerPixel < 50) scaleValue = 50;
+        else if (metersPerPixel < 100) scaleValue = 100;
+        else if (metersPerPixel < 500) scaleValue = 500;
+        else if (metersPerPixel < 1000) scaleValue = 1000;
+        else if (metersPerPixel < 5000) scaleValue = 5000;
+        else if (metersPerPixel < 10000) scaleValue = 10000;
+        else if (metersPerPixel < 50000) scaleValue = 50000;
+        else scaleValue = 100000;
+
+        if (scaleValue >= 1000) {
+          scaleText.textContent = scaleValue / 1000 + " km";
+        } else {
+          scaleText.textContent = scaleValue + " m";
+        }
+
+        const scaleWidth = Math.min(
+          150,
+          Math.max(50, scaleValue / metersPerPixel),
+        );
+        scaleBarGraphic.style.width = scaleWidth + "px";
+      }
+
+      viewer.scene.postRender.addEventListener(updateScaleBar);
+
+      // 天地图图层配置
+      const tdtKey = CONFIG.tdtToken;
+
+      const tdtProviders = {
+        // 影像图
+        image: new Cesium.WebMapTileServiceImageryProvider({
+          url:
+            "https://t{s}.tianditu.gov.cn/img_w/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=img&style=default&format=tiles&TileMatrixSet=w&tk=" +
+            tdtKey,
+          layer: "img",
+          style: "default",
+          format: "image/png",
+          tileMatrixSetID: "w",
+          subdomains: ["0", "1", "2", "3", "4", "5", "6", "7"],
+          maximumLevel: 18,
+          minimumLevel: 1,
+          credit: "天地图",
+        }),
+        // 影像注记
+        imageLabel: new Cesium.WebMapTileServiceImageryProvider({
+          url:
+            "https://t{s}.tianditu.gov.cn/cia_w/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=cia&style=default&format=tiles&TileMatrixSet=w&tk=" +
+            tdtKey,
+          layer: "cia",
+          style: "default",
+          format: "image/png",
+          tileMatrixSetID: "w",
+          subdomains: ["0", "1", "2", "3", "4", "5", "6", "7"],
+          maximumLevel: 18,
+          minimumLevel: 1,
+          credit: "天地图",
+        }),
+        // 电子地图（矢量）
+        vector: new Cesium.WebMapTileServiceImageryProvider({
+          url:
+            "https://t{s}.tianditu.gov.cn/vec_w/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=vec&style=default&format=tiles&TileMatrixSet=w&tk=" +
+            tdtKey,
+          layer: "vec",
+          style: "default",
+          format: "image/png",
+          tileMatrixSetID: "w",
+          subdomains: ["0", "1", "2", "3", "4", "5", "6", "7"],
+          maximumLevel: 18,
+          minimumLevel: 1,
+          credit: "天地图",
+        }),
+        // 电子地图注记
+        vectorLabel: new Cesium.WebMapTileServiceImageryProvider({
+          url:
+            "https://t{s}.tianditu.gov.cn/cva_w/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=cva&style=default&format=tiles&TileMatrixSet=w&tk=" +
+            tdtKey,
+          layer: "cva",
+          style: "default",
+          format: "image/png",
+          tileMatrixSetID: "w",
+          subdomains: ["0", "1", "2", "3", "4", "5", "6", "7"],
+          maximumLevel: 18,
+          minimumLevel: 1,
+          credit: "天地图",
+        }),
+      };
+
+      // 初始加载影像图和影像注记
+      const imageLayer = viewer.imageryLayers.addImageryProvider(
+        tdtProviders.image,
+      );
+      const imageLabelLayer = viewer.imageryLayers.addImageryProvider(
+        tdtProviders.imageLabel,
+      );
+
+      // 预加载矢量图层（初始隐藏）
+      const vectorLayer = viewer.imageryLayers.addImageryProvider(
+        tdtProviders.vector,
+      );
+      const vectorLabelLayer = viewer.imageryLayers.addImageryProvider(
+        tdtProviders.vectorLabel,
+      );
+      vectorLayer.show = false;
+      vectorLabelLayer.show = false;
+
+      // 保存图层引用
+      let currentTileset = null;
+
+      // UI 工具函数
+      const loadingOverlay = document.getElementById("loadingOverlay");
+
+      function showLoading() {
+        loadingOverlay.classList.remove("hidden");
+      }
+
+      function hideLoading() {
+        loadingOverlay.classList.add("hidden");
+      }
+
+      function showError(message) {
+        const content = loadingOverlay.querySelector(".loading-content");
+        content.innerHTML = `<div class="error-message">错误: ${message}</div>`;
+        loadingOverlay.classList.remove("hidden");
+      }
+
+      // 加载 3DTiles
+      function load3DTiles() {
+        showLoading();
+
+        currentTileset = viewer.scene.primitives.add(
+          new Cesium.Cesium3DTileset({
+            url: CONFIG.tilesUrl,
+            maximumScreenSpaceError: 16,
+            maximumMemoryUsage: 2048,
+            dynamicScreenSpaceError: true,
+            dynamicScreenSpaceErrorDensity: 0.00278,
+            dynamicScreenSpaceErrorFactor: 4.0,
+          }),
+        );
+
+        currentTileset.readyPromise
+          .then(function (t) {
+            // 自动放大5倍
+            t.scale = 5.0;
+            document.getElementById("modelScale").value = 5.0;
+            document.getElementById("scaleValue").textContent = "5.0";
+
+            viewer.zoomTo(
+              t,
+              new Cesium.HeadingPitchRange(
+                Cesium.Math.toRadians(0),
+                Cesium.Math.toRadians(-45),
+                0,
+              ),
+            );
+            console.log("3DTiles 加载成功，初始缩放5倍");
+            console.log("模型边界:", t.boundingSphere);
+            hideLoading();
+          })
+          .catch(function (error) {
+            console.error("3DTiles 加载失败:", error);
+            showError(`无法加载 3D 模型<br>${error.message || error}`);
+          });
+      }
+
+      // ========== 图层显隐控制 ==========
+
+      // 影像图显隐
+      function toggleImageLayer() {
+        const checkbox = document.getElementById("showImage");
+        imageLayer.show = checkbox.checked;
+        console.log("影像图:", checkbox.checked);
+      }
+
+      // 影像注记显隐
+      function toggleImageLabelLayer() {
+        const checkbox = document.getElementById("showImageLabel");
+        imageLabelLayer.show = checkbox.checked;
+        console.log("影像注记:", checkbox.checked);
+      }
+
+      // 电子地图显隐
+      function toggleVectorLayer() {
+        const checkbox = document.getElementById("showVector");
+        vectorLayer.show = checkbox.checked;
+        console.log("电子地图:", checkbox.checked);
+      }
+
+      // 电子地图注记显隐
+      function toggleVectorLabelLayer() {
+        const checkbox = document.getElementById("showVectorLabel");
+        vectorLabelLayer.show = checkbox.checked;
+        console.log("电子地图注记:", checkbox.checked);
+      }
+
+      // 3DTiles显隐
+      function toggle3DTiles() {
+        const checkbox = document.getElementById("show3DTiles");
+        if (currentTileset) {
+          currentTileset.show = checkbox.checked;
+          console.log("3D模型:", checkbox.checked);
+        }
+      }
+
+      // ========== 3DTiles 变换控制 ==========
+
+      // 更新模型缩放比例
+      function updateModelScale() {
+        const scale = parseFloat(document.getElementById("modelScale").value);
+        document.getElementById("scaleValue").textContent = scale.toFixed(1);
+
+        if (currentTileset) {
+          currentTileset.scale = scale;
+          console.log("模型缩放:", scale);
+        }
+      }
+
+      // 应用位置偏移
+      function applyModelPosition() {
+        if (!currentTileset) {
+          alert("模型尚未加载");
+          return;
+        }
+
+        const lon = parseFloat(document.getElementById("modelLon").value);
+        const lat = parseFloat(document.getElementById("modelLat").value);
+        const height = parseFloat(document.getElementById("modelHeight").value);
+
+        // 计算模型中心位置
+        const cartographic = Cesium.Cartographic.fromCartesian(
+          currentTileset.boundingSphere.center,
+        );
+        const currentLon = Cesium.Math.toDegrees(cartographic.longitude);
+        const currentLat = Cesium.Math.toDegrees(cartographic.latitude);
+        const currentHeight = cartographic.height;
+
+        // 计算偏移量
+        const offsetX = lon - currentLon;
+        const offsetY = lat - currentLat;
+        const offsetZ = height;
+
+        // 应用变换
+        const position = Cesium.Cartesian3.fromDegrees(lon, lat, offsetZ);
+        const transform = Cesium.Transforms.eastNorthUpToFixedFrame(position);
+        currentTileset.modelMatrix = transform;
+
+        console.log("模型位置已偏移:", { lon, lat, height });
+
+        // 定位到新位置
+        viewer.zoomTo(currentTileset);
+      }
+
+      // 重置模型变换
+      function resetModelTransform() {
+        if (!currentTileset) {
+          alert("模型尚未加载");
+          return;
+        }
+
+        currentTileset.modelMatrix = Cesium.Matrix4.IDENTITY;
+        currentTileset.scale = 1.0;
+
+        document.getElementById("modelScale").value = 1;
+        document.getElementById("scaleValue").textContent = "1.0";
+        document.getElementById("modelHeight").value = 0;
+
+        console.log("模型变换已重置");
+        viewer.zoomTo(currentTileset);
+      }
+
+      // ========== 颜色渲染控制 ==========
+
+      // 启用/禁用颜色调整
+      function toggleColorStyle() {
+        const enabled = document.getElementById("enableColorStyle").checked;
+        const sliders = ["brightness", "contrast", "alpha", "modelColor"];
+
+        sliders.forEach((id) => {
+          document.getElementById(id).disabled = !enabled;
+        });
+
+        if (!enabled) {
+          // 重置为默认样式
+          if (currentTileset) {
+            currentTileset.style = new Cesium.Cesium3DTileStyle({
+              color: {
+                conditions: [["true", "color('#ffffff')"]],
+              },
+            });
+          }
+        } else {
+          updateColorStyle();
+        }
+        console.log("颜色调整:", enabled ? "启用" : "禁用");
+      }
+
+      // 更新颜色样式
+      function updateColorStyle() {
+        if (!currentTileset) {
+          console.log("模型尚未加载");
+          return;
+        }
+
+        const brightness = parseFloat(
+          document.getElementById("brightness").value,
+        );
+        const contrast = parseFloat(document.getElementById("contrast").value);
+        const alpha = parseFloat(document.getElementById("alpha").value);
+        const colorHex = document.getElementById("modelColor").value;
+
+        document.getElementById("brightnessValue").textContent =
+          brightness.toFixed(1);
+        document.getElementById("contrastValue").textContent =
+          contrast.toFixed(1);
+        document.getElementById("alphaValue").textContent = alpha.toFixed(1);
+
+        // 转换颜色为RGB
+        const r = parseInt(colorHex.substr(1, 2), 16) / 255;
+        const g = parseInt(colorHex.substr(3, 2), 16) / 255;
+        const b = parseInt(colorHex.substr(5, 2), 16) / 255;
+
+        // 应用颜色样式
+        currentTileset.style = new Cesium.Cesium3DTileStyle({
+          color: {
+            conditions: [["true", `color('${colorHex}', ${alpha})`]],
+          },
+          show: true,
+        });
+
+        console.log("颜色样式已更新:", {
+          brightness,
+          contrast,
+          alpha,
+          color: colorHex,
+        });
+      }
+
+      // 设置预设颜色
+      function setPresetColor(color) {
+        document.getElementById("modelColor").value = color;
+
+        // 自动启用颜色调整
+        if (!document.getElementById("enableColorStyle").checked) {
+          document.getElementById("enableColorStyle").checked = true;
+          const sliders = ["brightness", "contrast", "alpha", "modelColor"];
+          sliders.forEach((id) => {
+            document.getElementById(id).disabled = false;
+          });
+        }
+
+        updateColorStyle();
+        console.log("预设颜色:", color);
+      }
+
+      // ========== 定位功能 ==========
+
+      // 定位到模型
+      function locateToModel() {
+        if (!currentTileset) {
+          alert("模型尚未加载");
+          return;
+        }
+        viewer.zoomTo(
+          currentTileset,
+          new Cesium.HeadingPitchRange(
+            Cesium.Math.toRadians(0),
+            Cesium.Math.toRadians(-45),
+            0,
+          ),
+        );
+      }
+
+      // 飞行到模型
+      function flyToModel() {
+        if (!currentTileset) {
+          alert("模型尚未加载");
+          return;
+        }
+        viewer.flyTo(currentTileset, {
+          duration: 2,
+          offset: new Cesium.HeadingPitchRange(
+            Cesium.Math.toRadians(0),
+            Cesium.Math.toRadians(-45),
+            0,
+          ),
+        });
+      }
+
+      // 定位到郑州高新区
+      function locateToZhengzhou() {
+        viewer.camera.setView({
+          destination: Cesium.Cartesian3.fromDegrees(113.51, 34.82, 8000),
+          orientation: {
+            heading: Cesium.Math.toRadians(0),
+            pitch: Cesium.Math.toRadians(-60),
+            roll: 0,
+          },
+        });
+      }
+
+      // 启动加载
+      load3DTiles();
+    </script>
+  </body>
+</html>
