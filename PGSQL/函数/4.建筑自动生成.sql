@@ -8,9 +8,11 @@
 -- 返回：
 --   code           integer  返回码：200成功，400参数错误，500执行异常。
 --   msg            text     详细提示信息。
---   modified_count integer  修改条数，统计函数中 UPDATE 影响的总行数。
+--   modified_count integer  修改条数，只统计函数中 UPDATE 实际影响的行数，不统计 ALTER TABLE 等 DDL。
 -- 依赖：
 --   PostGIS 扩展；目标表至少应包含 geom 字段，height 字段不存在时按默认高度 5 处理。
+-- geom3d 处理规则：
+--   每次执行都会删除旧 geom3d 列并重新创建，确保三维建筑体块按当前 geom/height 全量重算。
 -- id 处理规则：
 --   1. 如果目标表已有 id 字段，则保持原 id 不变。
 --   2. 如果没有 id 但有 gid，则新增与 gid 相同类型的 id，并复制 gid 到 id。
@@ -22,7 +24,7 @@ CREATE OR REPLACE FUNCTION public.gis_generate_building_3d(p_project_id text)
 RETURNS TABLE (
     code           integer,  -- 返回码：200成功，400参数错误，500执行异常。
     msg            text,     -- 详细提示信息。
-    modified_count integer   -- 修改条数：累计 UPDATE 影响的行数。
+    modified_count integer   -- 修改条数：累计 UPDATE 实际影响的行数。
 )
 LANGUAGE plpgsql
 AS $$
@@ -34,8 +36,7 @@ DECLARE
     v_gid_type       text;                                      -- gid 字段的完整类型，例如 integer、bigint、varchar(32)。
     v_srid           int;                                       -- geom 字段当前 SRID，用于判断是否需要投影转换。
     v_row_count      integer := 0;                              -- 最近一条 UPDATE 影响的行数。
-    v_table_count    integer := 0;                              -- 当前建筑表总行数，用于统计 DDL 自动补值影响的行数。
-    v_modified_count integer := 0;                              -- 本次函数累计修改条数。
+    v_modified_count integer := 0;                              -- 本次函数累计 UPDATE 实际影响行数。
     v_has_height     boolean;                                   -- 目标表是否存在 height 字段。
 BEGIN
     -- 0. 参数校验：项目 ID 不能为空，且只能包含字母、数字、下划线。
@@ -63,10 +64,6 @@ BEGIN
             0;
         RETURN;
     END IF;
-
-    -- 记录表总行数；ADD COLUMN SERIAL 和 ALTER COLUMN TYPE 这类 DDL 不会产生 ROW_COUNT，
-    -- 但会对已有记录补值或重写几何字段，因此用表行数辅助累计修改条数。
-    EXECUTE format('SELECT count(*) FROM %I', v_table) INTO v_table_count;
 
     -- 2. 处理 id 列：
     --    已有 id 时保持不变；
@@ -108,8 +105,8 @@ BEGIN
             v_modified_count := v_modified_count + v_row_count;
         ELSE
             -- 没有 gid 可复制时，新增 SERIAL 字段，由 PostgreSQL 自动填充自增值。
+            -- ADD COLUMN SERIAL 属于 DDL，不计入 modified_count；modified_count 只统计 UPDATE 行数。
             EXECUTE format('ALTER TABLE %I ADD COLUMN id SERIAL', v_table);
-            v_modified_count := v_modified_count + v_table_count;
         END IF;
 
         -- 新增 id 后，如果表还没有主键，则把 id 设置为主键；
@@ -142,6 +139,7 @@ BEGIN
     END IF;
 
     -- 4. 将 geom 转为 4326 坐标系，并强制补齐 Z 维度。
+    -- ALTER COLUMN TYPE 属于 DDL，不计入 modified_count。
     IF v_srid != 4326 THEN
         -- 非 4326 数据先做 ST_Transform 投影转换，再通过 ST_Force3D 补 Z。
         EXECUTE format('
@@ -149,7 +147,6 @@ BEGIN
             ALTER COLUMN geom TYPE geometry(MultiPolygonZ, 4326)
             USING ST_Transform(ST_Force3D(geom), 4326);
         ', v_table);
-        v_modified_count := v_modified_count + v_table_count;
     ELSE
         -- 已是 4326 时不再投影转换，只强制为三维 MultiPolygonZ。
         EXECUTE format('
@@ -157,10 +154,9 @@ BEGIN
             ALTER COLUMN geom TYPE geometry(MultiPolygonZ, 4326)
             USING ST_SetSRID(ST_Force3D(geom), 4326);
         ', v_table);
-        v_modified_count := v_modified_count + v_table_count;
     END IF;
 
-    -- 5. 添加 height 列和 geom3d 列；height 不存在时创建并使用默认高度 5。
+    -- 5. 添加 height 列，并重建 geom3d 列；height 不存在时创建并使用默认高度 5。
     SELECT EXISTS (
         SELECT 1 FROM information_schema.columns
         WHERE table_schema = 'public'
@@ -173,29 +169,46 @@ BEGIN
     END IF;
 
     -- geom3d 用于保存真正的建筑体块面集合：底面 + 侧面 + 顶面。
+    -- 每次执行都先删除旧 geom3d，再重新添加，确保高度、几何或生成逻辑变化后能全量重算。
     EXECUTE format('
-        ALTER TABLE %I
-        ADD COLUMN IF NOT EXISTS geom3d geometry(MultiPolygonZ, 4326);
-    ', v_table);
+        ALTER TABLE %I DROP COLUMN IF EXISTS geom3d;
+        ALTER TABLE %I ADD COLUMN geom3d geometry(MultiPolygonZ, 4326);
+    ', v_table, v_table);
+
+    -- 删除 geom3d 后，旧的 geom3d 空间索引会随字段自动删除；
+    -- 这里显式清理同名索引，避免历史异常残留影响后续 CREATE INDEX。
+    IF to_regclass(format('public.%I', 'idx_' || v_table || '_geom3d')) IS NOT NULL THEN
+        EXECUTE format('
+            DROP INDEX %I;
+        ', 'idx_' || v_table || '_geom3d');
+    END IF;
 
     -- 6. 根据 height 拉伸生成建筑体块：
-    --    1. 底面：使用原始面，每个 Polygon 只生成一次。
-    --    2. 顶面：把原始面沿 Z 方向抬升 height，每个 Polygon 只生成一次。
+    --    1. 底面：使用反向原始面，每个 Polygon 只生成一次，法线朝下。
+    --    2. 顶面：把原始面沿 Z 方向抬升 height，每个 Polygon 只生成一次，法线朝上。
     --    3. 侧面：把每个面环拆成线段，每条线段只生成一个四边形墙面。
     --    4. 最终把底面、侧面和顶面合并为 MultiPolygonZ。
     EXECUTE format('
         UPDATE %I AS t
         SET geom3d = (
             WITH
+            -- poly：把 MultiPolygon 拆成单个 Polygon，后续底面、顶面、侧面都以单个 Polygon 为单位生成，
+            -- 避免 MultiPolygon 直接取环时出现重复面或环关系混乱。
             poly AS (
                 SELECT (ST_Dump(t.geom)).geom AS geom
             ),
+            -- rings：提取每个 Polygon 的所有环。
+            -- ST_DumpRings 会返回外环和内洞环对应的 Polygon，ST_Boundary 再把环面转成闭合线。
+            -- 后续侧面按闭合线的相邻点对生成。
             rings AS (
                 SELECT
                     ST_Boundary((ST_DumpRings(poly.geom)).geom) AS geom,
                     COALESCE(t.height, 5) AS h
                 FROM poly
             ),
+            -- wall_faces：每条环边生成一个四边形墙面。
+            -- 点序为：底边起点 -> 底边终点 -> 顶边终点 -> 顶边起点 -> 回到底边起点。
+            -- generate_series 到 ST_NPoints - 1，是因为闭合线最后一个点等于第一个点，避免重复生成首尾边。
             wall_faces AS (
                 SELECT
                     ST_SetSRID(
@@ -213,16 +226,22 @@ BEGIN
                 FROM rings
                 CROSS JOIN LATERAL generate_series(1, ST_NPoints(rings.geom) - 1) AS n
             ),
+            -- bottom_faces：底面只按每个 Polygon 生成一次，并使用 ST_Reverse 反转点序，
+            -- 让底面法线朝下，避免与顶面方向一致导致渲染时看起来像顶部双面。
             bottom_faces AS (
                 SELECT
-                    poly.geom::geometry(PolygonZ, 4326) AS geom
+                    ST_Reverse(poly.geom)::geometry(PolygonZ, 4326) AS geom
                 FROM poly
             ),
+            -- top_faces：顶面只按每个 Polygon 生成一次，通过 Z 方向平移 height 得到。
+            -- 不从 rings 生成顶面，避免外环/内洞环各自生成顶面造成重复。
             top_faces AS (
                 SELECT
                     ST_Translate(poly.geom, 0, 0, COALESCE(t.height, 5))::geometry(PolygonZ, 4326) AS geom
                 FROM poly
             ),
+            -- all_faces：组合底面、侧面、顶面。
+            -- 这里保留 UNION ALL，因为三类面来源互斥；使用 UNION 反而会增加排序/去重成本。
             all_faces AS (
                 SELECT geom FROM bottom_faces
                 UNION ALL
@@ -230,6 +249,9 @@ BEGIN
                 UNION ALL
                 SELECT geom FROM top_faces
             )
+            -- ST_Collect 把所有面收集成 GeometryCollection，
+            -- ST_CollectionExtract(..., 3) 只取 Polygon 面，
+            -- ST_Multi 统一为 pg2b3dm 需要的 MultiPolygonZ。
             SELECT
                 ST_Multi(ST_CollectionExtract(ST_Collect(geom), 3))::geometry(MultiPolygonZ, 4326) AS geom3d
             FROM all_faces
@@ -247,7 +269,7 @@ BEGIN
     -- 所有处理完成后返回统一结果。
     RETURN QUERY SELECT
         200,
-        format('执行成功：建筑三维数据已生成，累计修改 %s 条', v_modified_count),
+        format('执行成功：建筑三维数据已生成，实际更新 %s 条', v_modified_count),
         v_modified_count;
 
 -- 未预料 SQL 异常统一返回 500，便于调用方按 code 判断结果。
@@ -260,7 +282,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_generate_building_3d(text) IS
-'根据项目ID处理建筑表 public.gis_buildings_项目ID：校验表存在，自动补齐 id 字段；如果 id 不存在但 gid 存在，则创建与 gid 相同类型的 id 并复制 gid 内容；如果 id 和 gid 都不存在，则创建 SERIAL 自增 id；随后处理 geom 的 SRID 和三维化，根据 height 生成包含底面、侧面和顶面的 MultiPolygonZ 建筑体块，且底面/顶面按 Polygon 生成一次、侧面按边生成一次，避免重复生成。返回 code、msg、modified_count。';
+'根据项目ID处理建筑表 public.gis_buildings_项目ID：校验表存在，自动补齐 id 字段；如果 id 不存在但 gid 存在，则创建与 gid 相同类型的 id 并复制 gid 内容；如果 id 和 gid 都不存在，则创建 SERIAL 自增 id；随后处理 geom 的 SRID 和三维化；每次执行都会删除旧 geom3d 列并重新创建，再根据 height 生成包含底面、侧面和顶面的 MultiPolygonZ 建筑体块。底面反向生成使法线朝下，顶面按 Polygon 生成一次，侧面按边生成一次，避免顶部重复。返回 code、msg、modified_count，其中 modified_count 只统计 UPDATE 实际影响行数。';
 -- SELECT public.gis_generate_building_3d('aaaaa');
 
 -- DROP TABLE IF EXISTS public.gis_buildings_bbbbb CASCADE;
@@ -481,6 +503,7 @@ BEGIN
     END IF;
 
     -- 8. 删除旧输出目录。
+    -- 注意：v_outdir 由固定根目录和已校验的 project_id 拼接而成，避免 shell 注入风险。
     v_cmd := '/bin/rm -rf ' || v_outdir;
     SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
     IF v_rec.code != 200 THEN
@@ -493,6 +516,7 @@ BEGIN
     END IF;
 
     -- 9. 确保父目录存在，并设置 755 权限。
+    -- /usr/bin/id 和 ls -ld 会输出当前数据库服务进程用户及目录状态，便于排查权限问题。
     v_cmd := '/usr/bin/id; /bin/ls -ld /home/postgres/ktd-pgdata 2>/dev/null; /bin/mkdir -p /home/postgres/ktd-pgdata/3dtiles; /bin/chmod 755 /home/postgres/ktd-pgdata /home/postgres/ktd-pgdata/3dtiles';
     SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
     IF v_rec.code != 200 THEN
@@ -505,6 +529,8 @@ BEGIN
     END IF;
 
     -- 10. 创建当前项目输出目录，并递归设置为 755。
+    -- 使用 find -exec chmod，而不是只 chmod -R，是为了显式覆盖目录下每个文件/目录，
+    -- 防止 pg2b3dm 或系统 umask 生成 700/600 权限后前端服务无法读取。
     v_cmd := format('/bin/mkdir -p %L; /usr/bin/find %L -exec /bin/chmod 755 {} \;', v_outdir, v_outdir);
     SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
     IF v_rec.code != 200 THEN
@@ -517,6 +543,8 @@ BEGIN
     END IF;
 
     -- 11. 调用 pg2b3dm 生成 3D Tiles。
+    -- -t 指定建筑表，-c 指定三维几何列 geom3d，-a 指定需要写入 b3dm batch table 的属性。
+    -- 输出目录是当前项目目录，最终入口文件为 v_outdir/tileset.json。
     v_cmd := format(
         '/usr/local/bin/pg2b3dm '
         || '--connection %L '
@@ -538,6 +566,7 @@ BEGIN
     SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
     IF v_rec.code = 200 THEN
         -- pg2b3dm 生成文件后，再统一修正输出目录及目录下所有文件权限为 755。
+        -- 这一步必须放在 pg2b3dm 之后，因为真正的 tileset.json 和 b3dm 文件是在这里才生成。
         v_cmd := format('/usr/bin/find %L -exec /bin/chmod 755 {} \;', v_outdir);
         SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
         IF v_rec.code != 200 THEN
@@ -583,16 +612,16 @@ GRANT EXECUTE ON FUNCTION public.gis_generate_3dtiles(TEXT) TO zhuoyi;
 -- ============================================================
 
 -- 示例 1：生成项目 aaaaa 的 3D Tiles。
-SELECT * FROM public.gis_generate_3dtiles('aaaaa');
+-- SELECT * FROM public.gis_generate_3dtiles('aaaaa');
 
 -- 示例 2：生成指定项目的 3D Tiles。
-SELECT * FROM public.gis_generate_3dtiles('bbbb');
+-- SELECT * FROM public.gis_generate_3dtiles('bbbb');
 
 -- 示例 3：测试 shell 命令执行函数。
-SELECT * FROM public.exec_shell_cmd_capture('echo "hello"');
+-- SELECT * FROM public.exec_shell_cmd_capture('echo "hello"');
 
 -- 示例 4：测试 PostgreSQL 服务进程用户是否能创建目标目录。 
 
-SELECT * FROM public.exec_shell_cmd_capture('/bin/mkdir -p /home/postgres/ktd-pgdata/3dtiles/gis_buildings_aaaaa');
+-- SELECT * FROM public.exec_shell_cmd_capture('/bin/mkdir -p /home/postgres/ktd-pgdata/3dtiles/gis_buildings_aaaaa');
 
    
