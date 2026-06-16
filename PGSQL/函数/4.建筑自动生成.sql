@@ -2,7 +2,7 @@
 -- 函数：public.gis_generate_building_3d(p_project_id text)
 -- 功能：
 --   按项目 ID 处理建筑空间表 public.gis_buildings_项目ID。
---   主要完成建筑表主键字段补齐、geom 坐标系/三维化处理、geom3d 生成和空间索引创建。
+--   主要完成建筑表主键字段补齐、geom 坐标系/三维化处理、建筑体块拉伸和空间索引创建。
 -- 参数：
 --   p_project_id text  项目 ID；实际处理表名为 public.gis_buildings_项目ID。
 -- 返回：
@@ -36,6 +36,7 @@ DECLARE
     v_row_count      integer := 0;                              -- 最近一条 UPDATE 影响的行数。
     v_table_count    integer := 0;                              -- 当前建筑表总行数，用于统计 DDL 自动补值影响的行数。
     v_modified_count integer := 0;                              -- 本次函数累计修改条数。
+    v_has_height     boolean;                                   -- 目标表是否存在 height 字段。
 BEGIN
     -- 0. 参数校验：项目 ID 不能为空，且只能包含字母、数字、下划线。
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
@@ -159,17 +160,81 @@ BEGIN
         v_modified_count := v_modified_count + v_table_count;
     END IF;
 
-    -- 5. 添加 geom3d 列，用于保存建筑三维几何；字段存在时保持原结构。
+    -- 5. 添加 height 列和 geom3d 列；height 不存在时创建并使用默认高度 5。
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = v_table
+          AND column_name = 'height'
+    ) INTO v_has_height;
+
+    IF NOT v_has_height THEN
+        EXECUTE format('ALTER TABLE %I ADD COLUMN height NUMERIC DEFAULT 5', v_table);
+    END IF;
+
+    -- geom3d 用于保存真正的建筑体块面集合：底面 + 侧面 + 顶面。
     EXECUTE format('
         ALTER TABLE %I
         ADD COLUMN IF NOT EXISTS geom3d geometry(MultiPolygonZ, 4326);
     ', v_table);
 
-    -- 6. 根据 height 生成 geom3d；height 为空时按 5 作为默认高度。
-    -- 注意：此处沿用原逻辑做 Z 方向偏移，不改动 XY 坐标。
+    -- 6. 根据 height 拉伸生成建筑体块：
+    --    1. 底面：使用原始面，每个 Polygon 只生成一次。
+    --    2. 顶面：把原始面沿 Z 方向抬升 height，每个 Polygon 只生成一次。
+    --    3. 侧面：把每个面环拆成线段，每条线段只生成一个四边形墙面。
+    --    4. 最终把底面、侧面和顶面合并为 MultiPolygonZ。
     EXECUTE format('
-        UPDATE %I
-        SET geom3d = ST_Translate(geom, 0, 0, COALESCE(height, 5));
+        UPDATE %I AS t
+        SET geom3d = (
+            WITH
+            poly AS (
+                SELECT (ST_Dump(t.geom)).geom AS geom
+            ),
+            rings AS (
+                SELECT
+                    ST_Boundary((ST_DumpRings(poly.geom)).geom) AS geom,
+                    COALESCE(t.height, 5) AS h
+                FROM poly
+            ),
+            wall_faces AS (
+                SELECT
+                    ST_SetSRID(
+                        ST_MakePolygon(
+                            ST_MakeLine(ARRAY[
+                                ST_PointN(rings.geom, n),
+                                ST_PointN(rings.geom, n + 1),
+                                ST_Translate(ST_PointN(rings.geom, n + 1), 0, 0, rings.h),
+                                ST_Translate(ST_PointN(rings.geom, n), 0, 0, rings.h),
+                                ST_PointN(rings.geom, n)
+                            ])
+                        ),
+                        4326
+                    )::geometry(PolygonZ, 4326) AS geom
+                FROM rings
+                CROSS JOIN LATERAL generate_series(1, ST_NPoints(rings.geom) - 1) AS n
+            ),
+            bottom_faces AS (
+                SELECT
+                    poly.geom::geometry(PolygonZ, 4326) AS geom
+                FROM poly
+            ),
+            top_faces AS (
+                SELECT
+                    ST_Translate(poly.geom, 0, 0, COALESCE(t.height, 5))::geometry(PolygonZ, 4326) AS geom
+                FROM poly
+            ),
+            all_faces AS (
+                SELECT geom FROM bottom_faces
+                UNION ALL
+                SELECT geom FROM wall_faces
+                UNION ALL
+                SELECT geom FROM top_faces
+            )
+            SELECT
+                ST_Multi(ST_CollectionExtract(ST_Collect(geom), 3))::geometry(MultiPolygonZ, 4326) AS geom3d
+            FROM all_faces
+        )
+        WHERE t.geom IS NOT NULL;
     ', v_table);
     GET DIAGNOSTICS v_row_count = ROW_COUNT;
     v_modified_count := v_modified_count + v_row_count;
@@ -195,11 +260,11 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_generate_building_3d(text) IS
-'根据项目ID处理建筑表 public.gis_buildings_项目ID ';
+'根据项目ID处理建筑表 public.gis_buildings_项目ID：校验表存在，自动补齐 id 字段；如果 id 不存在但 gid 存在，则创建与 gid 相同类型的 id 并复制 gid 内容；如果 id 和 gid 都不存在，则创建 SERIAL 自增 id；随后处理 geom 的 SRID 和三维化，根据 height 生成包含底面、侧面和顶面的 MultiPolygonZ 建筑体块，且底面/顶面按 Polygon 生成一次、侧面按边生成一次，避免重复生成。返回 code、msg、modified_count。';
 -- SELECT public.gis_generate_building_3d('aaaaa');
 
 -- DROP TABLE IF EXISTS public.gis_buildings_bbbbb CASCADE;
-  SELECT public.gis_generate_building_3d('bbbb');
+--   SELECT public.gis_generate_building_3d('bbbb');
  
 
 -- ============================================================
@@ -256,11 +321,12 @@ BEGIN
 
     -- 组装实际执行命令：
     --   1. mktemp 创建临时文件保存 stdout/stderr。
-    --   2. 执行传入 cmd，并记录原始退出码。
-    --   3. tr -d '\r' 清理 pg2b3dm 进度输出里的回车符。
-    --   4. 输出 __EXIT_CODE 标记，供 PL/pgSQL 解析真实退出码。
+    --   2. 设置 umask 022，确保新建文件默认不会是 600/700。
+    --   3. 执行传入 cmd，并记录原始退出码。
+    --   4. tr -d '\r' 清理 pg2b3dm 进度输出里的回车符。
+    --   5. 输出 __EXIT_CODE 标记，供 PL/pgSQL 解析真实退出码。
     v_program :=
-        'tmp=$(/bin/mktemp /tmp/pgcmd.XXXXXX); (' || cmd || E') >"$tmp" 2>&1; rc=$?; '
+        'tmp=$(/bin/mktemp /tmp/pgcmd.XXXXXX); (umask 022; ' || cmd || E') >"$tmp" 2>&1; rc=$?; '
         || E'/usr/bin/tr -d ''\\r'' < "$tmp"; /bin/rm -f "$tmp"; '
         || E'printf ''\\n__EXIT_CODE:%s\\n'' "$rc"';
 
@@ -323,7 +389,7 @@ RETURNS TABLE (
     code               integer,  -- 返回码：200成功，400参数错误，500执行异常
     msg                text,     -- 详细提示信息
     file_relative_path text,     -- 文件相对路径，例如 3dtiles/gis_buildings_xxx/tileset.json
-    file_absolute_path text      -- 文件绝对路径，例如 /home/postgres/pgdata/3dtiles/gis_buildings_xxx/tileset.json
+    file_absolute_path text      -- 文件绝对路径，例如 /home/postgres/ktd-pgdata/3dtiles/gis_buildings_xxx/tileset.json
 )
 LANGUAGE plpgsql
 AS $$
@@ -426,25 +492,25 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 9. 确保父目录存在。
-    v_cmd := '/usr/bin/id; /bin/ls -ld /home/postgres/pgdata 2>/dev/null; /bin/mkdir -p /home/postgres/pgdata/3dtiles';
+    -- 9. 确保父目录存在，并设置 755 权限。
+    v_cmd := '/usr/bin/id; /bin/ls -ld /home/postgres/ktd-pgdata 2>/dev/null; /bin/mkdir -p /home/postgres/ktd-pgdata/3dtiles; /bin/chmod 755 /home/postgres/ktd-pgdata /home/postgres/ktd-pgdata/3dtiles';
     SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
     IF v_rec.code != 200 THEN
         RETURN QUERY SELECT
             500,
-            '创建父目录 /home/postgres/pgdata/3dtiles 失败：' || v_rec.msg,
+            '创建父目录 /home/postgres/ktd-pgdata/3dtiles 或设置权限失败：' || v_rec.msg,
             v_file_relative_path,
             v_file_absolute_path;
         RETURN;
     END IF;
 
-    -- 10. 创建当前项目输出目录。
-    v_cmd := format('/bin/mkdir -p %L', v_outdir);
+    -- 10. 创建当前项目输出目录，并递归设置为 755。
+    v_cmd := format('/bin/mkdir -p %L; /usr/bin/find %L -exec /bin/chmod 755 {} \;', v_outdir, v_outdir);
     SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
     IF v_rec.code != 200 THEN
         RETURN QUERY SELECT
             500,
-            format('创建目录 %s 失败：%s', v_outdir, v_rec.msg),
+            format('创建目录 %s 或设置权限失败：%s', v_outdir, v_rec.msg),
             v_file_relative_path,
             v_file_absolute_path;
         RETURN;
@@ -471,6 +537,18 @@ BEGIN
 
     SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
     IF v_rec.code = 200 THEN
+        -- pg2b3dm 生成文件后，再统一修正输出目录及目录下所有文件权限为 755。
+        v_cmd := format('/usr/bin/find %L -exec /bin/chmod 755 {} \;', v_outdir);
+        SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
+        IF v_rec.code != 200 THEN
+            RETURN QUERY SELECT
+                500,
+                '3D Tiles 已生成，但设置输出文件权限失败：' || v_rec.msg,
+                v_file_relative_path,
+                v_file_absolute_path;
+            RETURN;
+        END IF;
+
         RETURN QUERY SELECT
             200,
             '执行成功：3D Tiles 已生成',
