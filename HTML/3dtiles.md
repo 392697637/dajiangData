@@ -748,7 +748,7 @@ mkdir -p "$FINAL_OUTPUT_DIR"
 #   效果: 
 #     - 用于版本管理和缓存控制
 #     - 前端可通过 version 判断是否需要更新
-#   示例: --tileset_version "1.0.0"
+#   示例: --tileset_version "1.1"
 #   建议: 
 #     - 使用语义化版本号（如 1.0.0, 1.1.0）
 #     - 数据更新后修改版本号
