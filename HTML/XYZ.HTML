@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cesium 加载3DTiles</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+      }
+      html,
+      body,
+      #cesiumContainer {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+      .control-panel {
+        position: absolute;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 12px 15px;
+        border-radius: 8px;
+        z-index: 100;
+        color: #fff;
+        font-size: 13px;
+        font-family: Arial, sans-serif;
+        width: 220px;
+      }
+      #layerPanel {
+        bottom: 10px;
+        right: 10px;
+      }
+      #locationPanel {
+        top: 10px;
+        right: 10px;
+      }
+      #customPanel {
+        top: 10px;
+        left: 10px;
+        width: 800px;
+      }
+      #infoPanel {
+        bottom: 10px;
+        left: 10px;
+        width: 280px;
+      }
+      #infoPanel .info-value {
+        color: #4caf50;
+        font-weight: bold;
+      }
+      #infoPanel .info-row {
+        display: flex;
+        justify-content: space-between;
+        margin: 5px 0;
+        font-size: 12px;
+      }
+      #infoPanel .info-row .label {
+        color: #aaa;
+      }
+      .control-panel .panel-title {
+        font-weight: bold;
+        margin-bottom: 10px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+        color: #4caf50;
+      }
+      .control-panel .section-title {
+        font-weight: bold;
+        margin: 10px 0 5px 0;
+        color: #aaa;
+        font-size: 12px;
+      }
+      .control-panel .control-item {
+        display: flex;
+        align-items: center;
+        margin: 5px 0;
+      }
+      .control-panel .control-item label {
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        width: 100%;
+      }
+      .control-panel .control-item input[type="checkbox"] {
+        margin-right: 8px;
+        cursor: pointer;
+      }
+      .control-panel .btn {
+        padding: 6px 12px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+        margin-top: 5px;
+        width: 100%;
+        transition: background 0.2s;
+      }
+      .control-panel .btn-primary {
+        background: #4caf50;
+        color: white;
+      }
+      .control-panel .btn-primary:hover {
+        background: #45a049;
+      }
+      .control-panel .divider {
+        height: 1px;
+        background: rgba(255, 255, 255, 0.2);
+        margin: 10px 0;
+      }
+      .control-panel .section-title {
+        font-size: 12px;
+        font-weight: bold;
+        color: #fff;
+        margin-top: 8px;
+        margin-bottom: 8px;
+      }
+      .control-panel .input-group {
+        margin: 8px 0;
+      }
+      .control-panel .input-group label {
+        display: block;
+        font-size: 11px;
+        color: #aaa;
+        margin-bottom: 3px;
+      }
+      .control-panel .input-group input {
+        width: 100%;
+        padding: 5px 8px;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.1);
+        color: #fff;
+        font-size: 12px;
+        box-sizing: border-box;
+      }
+      .control-panel .input-group input:focus {
+        outline: none;
+        border-color: #4caf50;
+      }
+      .control-panel .input-group select {
+        width: 100%;
+        padding: 5px 8px;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.1);
+        color: #fff;
+        font-size: 12px;
+        box-sizing: border-box;
+        cursor: pointer;
+      }
+      .control-panel .input-group select:focus {
+        outline: none;
+        border-color: #4caf50;
+      }
+      .control-panel .input-group select option {
+        background: #333;
+        color: #fff;
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+    <script>
+      window.CESIUM_DISABLE_DEFAULT_LAYERS = true;
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/cesium@1.92/Build/Cesium/Cesium.js"></script>
+    <link
+      href="https://cdn.jsdelivr.net/npm/cesium@1.92/Build/Cesium/Widgets/widgets.css"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="cesiumContainer"></div>
+
+    <div id="customPanel" class="control-panel">
+      <div class="panel-title">自定义地图</div>
+      <div class="input-group">
+        <label>类型</label>
+        <select id="mapType" onchange="toggleMapInputs()">
+          <option value="urlTemplate">URL模板</option>
+          <option value="wmts">WMTS服务</option>
+          <option value="wms">WMS服务</option>
+          <option value="singleImage">单张图片</option>
+        </select>
+      </div>
+
+      <div id="urlTemplateInputs">
+        <div class="input-group">
+          <label>地址</label>
+          <input type="text" id="tileUrlPrefix" placeholder="http://localhost:8080/tiles" />
+        </div>
+        <div class="input-group">
+          <label>瓦片模板</label>
+          <input type="text" id="tileUrlTemplate" placeholder="/{z}/{x}/{y}.png" />
+        </div>
+      </div>
+
+      <div id="wmtsInputs" class="hidden">
+        <div class="input-group">
+          <label>URL地址</label>
+          <input type="text" id="wmtsUrl" placeholder="http://localhost:8080/wmts" />
+        </div>
+        <div class="input-group">
+          <label>图层名称</label>
+          <input type="text" id="wmtsLayer" placeholder="layer_name" />
+        </div>
+      </div>
+
+      <div id="wmsInputs" class="hidden">
+        <div class="input-group">
+          <label>URL地址</label>
+          <input type="text" id="wmsUrl" placeholder="http://localhost:8080/wms" />
+        </div>
+        <div class="input-group">
+          <label>图层名称</label>
+          <input type="text" id="wmsLayer" placeholder="layer_name" />
+        </div>
+      </div>
+
+      <div id="singleImageInputs" class="hidden">
+        <div class="input-group">
+          <label>图片地址</label>
+          <input type="text" id="imageUrl" placeholder="http://localhost:8080/map.png" />
+        </div>
+        <div class="input-group">
+          <label>经度1</label>
+          <input type="number" id="rectLon1" step="0.0001" placeholder="110.0" />
+        </div>
+        <div class="input-group">
+          <label>纬度1</label>
+          <input type="number" id="rectLat1" step="0.0001" placeholder="30.0" />
+        </div>
+        <div class="input-group">
+          <label>经度2</label>
+          <input type="number" id="rectLon2" step="0.0001" placeholder="120.0" />
+        </div>
+        <div class="input-group">
+          <label>纬度2</label>
+          <input type="number" id="rectLat2" step="0.0001" placeholder="40.0" />
+        </div>
+      </div>
+
+      <button class="btn btn-primary" onclick="loadCustomTile()">
+        加载
+      </button>
+    </div>
+
+    <div id="infoPanel" class="control-panel">
+      <div class="panel-title">视野信息</div>
+      <div class="section-title">当前视野范围</div>
+      <div class="info-row">
+        <span class="label">西经:</span>
+        <span class="info-value" id="viewWest">0.0000</span>
+      </div>
+      <div class="info-row">
+        <span class="label">东经:</span>
+        <span class="info-value" id="viewEast">0.0000</span>
+      </div>
+      <div class="info-row">
+        <span class="label">南纬:</span>
+        <span class="info-value" id="viewSouth">0.0000</span>
+      </div>
+      <div class="info-row">
+        <span class="label">北纬:</span>
+        <span class="info-value" id="viewNorth">0.0000</span>
+      </div>
+
+      <div class="divider"></div>
+      <div class="section-title">自定义地图级别</div>
+      <div class="info-row">
+        <span class="label">最小级别:</span>
+        <span class="info-value" id="minLevel">-</span>
+      </div>
+      <div class="info-row">
+        <span class="label">最大级别:</span>
+        <span class="info-value" id="maxLevel">-</span>
+      </div>
+      <div class="info-row">
+        <span class="label">当前级别:</span>
+        <span class="info-value" id="currentLevel">-</span>
+      </div>
+    </div>
+
+    <div id="locationPanel" class="control-panel">
+      <div class="panel-title">坐标定位</div>
+      <div class="input-group">
+        <label>经度</label>
+        <input type="number" id="lonInput" step="0.0001" value="113.51" placeholder="请输入经度" />
+      </div>
+      <div class="input-group">
+        <label>纬度</label>
+        <input type="number" id="latInput" step="0.0001" value="34.82" placeholder="请输入纬度" />
+      </div>
+      <div class="input-group">
+        <label>高度(m)</label>
+        <input type="number" id="heightInput" step="100" value="8000" placeholder="请输入高度" />
+      </div>
+      <button class="btn btn-primary" onclick="locateToCoord()">
+        定位
+      </button>
+    </div>
+
+    <div id="layerPanel" class="control-panel">
+      <div class="panel-title">图层控制</div>
+      <div class="section-title">底图图层</div>
+      <div class="control-item">
+        <label>
+          <input
+            type="checkbox"
+            id="showImage"
+            checked
+            onchange="toggleImageLayer()"
+          />
+          <span>影像图</span>
+        </label>
+      </div>
+      <div class="control-item">
+        <label>
+          <input
+            type="checkbox"
+            id="showImageLabel"
+            checked
+            onchange="toggleImageLabelLayer()"
+          />
+          <span>影像注记</span>
+        </label>
+      </div>
+      <div class="control-item">
+        <label>
+          <input
+            type="checkbox"
+            id="showVector"
+            onchange="toggleVectorLayer()"
+          />
+          <span>电子地图</span>
+        </label>
+      </div>
+      <div class="control-item">
+        <label>
+          <input
+            type="checkbox"
+            id="showVectorLabel"
+            onchange="toggleVectorLabelLayer()"
+          />
+          <span>电子地图注记</span>
+        </label>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="section-title">缩放控制</div>
+      <div class="input-group">
+        <label>当前级别: <span id="zoomLevel" style="color: #4caf50;">0</span></label>
+        <input type="range" id="zoomSlider" min="1" max="20" value="10" step="1" onchange="changeZoomLevel()" style="width: 100%;" />
+      </div>
+      <div style="display: flex; gap: 5px;">
+        <button class="btn btn-primary" onclick="zoomIn()" style="flex: 1;">放大</button>
+        <button class="btn btn-primary" onclick="zoomOut()" style="flex: 1;">缩小</button>
+      </div>
+    </div>
+
+    <script>
+      const CONFIG = {
+        tdtToken: "cf128e0b51efeb7df5f1720de282678e",
+      };
+
+      Cesium.Ion.defaultAccessToken = "";
+      if (Cesium.Ion._endpointUrl !== undefined) {
+        Cesium.Ion._endpointUrl = "";
+      }
+
+      const viewer = new Cesium.Viewer("cesiumContainer", {
+        animation: false,
+        timeline: false,
+        baseLayerPicker: false,
+        geocoder: false,
+        homeButton: true,
+        sceneModePicker: true,
+        navigationHelpButton: false,
+        fullscreenButton: false,
+        vrButton: false,
+        infoBox: false,
+        selectionIndicator: false,
+        shadows: false,
+        shouldAnimate: false,
+        imageryProvider: false,
+        terrainProvider: undefined,
+      });
+
+      viewer.imageryLayers.removeAll();
+      viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
+
+      const tdtKey = CONFIG.tdtToken;
+
+      const tdtProviders = {
+        image: new Cesium.WebMapTileServiceImageryProvider({
+          url:
+            "https://t{s}.tianditu.gov.cn/img_w/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=img&style=default&format=tiles&TileMatrixSet=w&tk=" +
+            tdtKey,
+          layer: "img",
+          style: "default",
+          format: "image/png",
+          tileMatrixSetID: "w",
+          subdomains: ["0", "1", "2", "3", "4", "5", "6", "7"],
+          maximumLevel: 18,
+          minimumLevel: 1,
+          credit: "天地图",
+        }),
+        imageLabel: new Cesium.WebMapTileServiceImageryProvider({
+          url:
+            "https://t{s}.tianditu.gov.cn/cia_w/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=cia&style=default&format=tiles&TileMatrixSet=w&tk=" +
+            tdtKey,
+          layer: "cia",
+          style: "default",
+          format: "image/png",
+          tileMatrixSetID: "w",
+          subdomains: ["0", "1", "2", "3", "4", "5", "6", "7"],
+          maximumLevel: 18,
+          minimumLevel: 1,
+          credit: "天地图",
+        }),
+        vector: new Cesium.WebMapTileServiceImageryProvider({
+          url:
+            "https://t{s}.tianditu.gov.cn/vec_w/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=vec&style=default&format=tiles&TileMatrixSet=w&tk=" +
+            tdtKey,
+          layer: "vec",
+          style: "default",
+          format: "image/png",
+          tileMatrixSetID: "w",
+          subdomains: ["0", "1", "2", "3", "4", "5", "6", "7"],
+          maximumLevel: 18,
+          minimumLevel: 1,
+          credit: "天地图",
+        }),
+        vectorLabel: new Cesium.WebMapTileServiceImageryProvider({
+          url:
+            "https://t{s}.tianditu.gov.cn/cva_w/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=cva&style=default&format=tiles&TileMatrixSet=w&tk=" +
+            tdtKey,
+          layer: "cva",
+          style: "default",
+          format: "image/png",
+          tileMatrixSetID: "w",
+          subdomains: ["0", "1", "2", "3", "4", "5", "6", "7"],
+          maximumLevel: 18,
+          minimumLevel: 1,
+          credit: "天地图",
+        }),
+      };
+
+      const imageLayer = viewer.imageryLayers.addImageryProvider(
+        tdtProviders.image,
+      );
+      const imageLabelLayer = viewer.imageryLayers.addImageryProvider(
+        tdtProviders.imageLabel,
+      );
+      const vectorLayer = viewer.imageryLayers.addImageryProvider(
+        tdtProviders.vector,
+      );
+      const vectorLabelLayer = viewer.imageryLayers.addImageryProvider(
+        tdtProviders.vectorLabel,
+      );
+      vectorLayer.show = false;
+      vectorLabelLayer.show = false;
+
+      viewer.camera.setView({
+        destination: Cesium.Cartesian3.fromDegrees(113.51, 34.82, 8000),
+        orientation: {
+          heading: Cesium.Math.toRadians(0),
+          pitch: Cesium.Math.toRadians(-60),
+          roll: 0,
+        },
+      });
+
+      let customMapLevels = { min: null, max: null };
+
+      function updateViewBounds() {
+        const rectangle = viewer.camera.computeViewRectangle();
+        if (rectangle) {
+          document.getElementById("viewWest").textContent = Cesium.Math.toDegrees(rectangle.west).toFixed(4);
+          document.getElementById("viewEast").textContent = Cesium.Math.toDegrees(rectangle.east).toFixed(4);
+          document.getElementById("viewSouth").textContent = Cesium.Math.toDegrees(rectangle.south).toFixed(4);
+          document.getElementById("viewNorth").textContent = Cesium.Math.toDegrees(rectangle.north).toFixed(4);
+        }
+
+        const cartographic = viewer.camera.positionCartographic;
+        const zoomLevel = Math.round(Math.log2(40075016.686 / (2 * Math.PI * cartographic.height)));
+        document.getElementById("currentLevel").textContent = Math.max(1, Math.min(20, zoomLevel));
+      }
+
+      viewer.scene.postRender.addEventListener(updateViewBounds);
+
+      function toggleImageLayer() {
+        const checkbox = document.getElementById("showImage");
+        imageLayer.show = checkbox.checked;
+      }
+
+      function toggleImageLabelLayer() {
+        const checkbox = document.getElementById("showImageLabel");
+        imageLabelLayer.show = checkbox.checked;
+      }
+
+      function toggleVectorLayer() {
+        const checkbox = document.getElementById("showVector");
+        vectorLayer.show = checkbox.checked;
+      }
+
+      function toggleVectorLabelLayer() {
+        const checkbox = document.getElementById("showVectorLabel");
+        vectorLabelLayer.show = checkbox.checked;
+      }
+
+      function updateZoomLevel() {
+        const cartographic = viewer.camera.positionCartographic;
+        const zoomLevel = Math.round(Math.log2(40075016.686 / (2 * Math.PI * cartographic.height)));
+        document.getElementById("zoomLevel").textContent = Math.max(1, Math.min(20, zoomLevel));
+      }
+
+      function changeZoomLevel() {
+        const targetLevel = parseInt(document.getElementById("zoomSlider").value);
+        const currentHeight = viewer.camera.positionCartographic.height;
+        const targetHeight = 40075016.686 / (2 * Math.PI * Math.pow(2, targetLevel));
+        
+        viewer.camera.flyTo({
+          destination: Cesium.Cartesian3.fromRadians(
+            viewer.camera.positionCartographic.longitude,
+            viewer.camera.positionCartographic.latitude,
+            targetHeight
+          ),
+          duration: 0.3
+        });
+      }
+
+      function zoomIn() {
+        const currentLevel = parseInt(document.getElementById("zoomLevel").textContent);
+        const newLevel = Math.min(20, currentLevel + 1);
+        document.getElementById("zoomSlider").value = newLevel;
+        changeZoomLevel();
+      }
+
+      function zoomOut() {
+        const currentLevel = parseInt(document.getElementById("zoomLevel").textContent);
+        const newLevel = Math.max(1, currentLevel - 1);
+        document.getElementById("zoomSlider").value = newLevel;
+        changeZoomLevel();
+      }
+
+      viewer.scene.postRender.addEventListener(updateZoomLevel);
+
+      function locateToCoord() {
+        const lon = parseFloat(document.getElementById("lonInput").value);
+        const lat = parseFloat(document.getElementById("latInput").value);
+        const height = parseFloat(document.getElementById("heightInput").value);
+
+        if (isNaN(lon) || isNaN(lat)) {
+          alert("请输入有效的经纬度坐标");
+          return;
+        }
+
+        viewer.camera.setView({
+          destination: Cesium.Cartesian3.fromDegrees(lon, lat, height || 8000),
+          orientation: {
+            heading: Cesium.Math.toRadians(0),
+            pitch: Cesium.Math.toRadians(-60),
+            roll: 0,
+          },
+        });
+      }
+
+      let customTileLayer = null;
+
+      function toggleMapInputs() {
+        const mapType = document.getElementById("mapType").value;
+        document.getElementById("urlTemplateInputs").classList.add("hidden");
+        document.getElementById("wmtsInputs").classList.add("hidden");
+        document.getElementById("wmsInputs").classList.add("hidden");
+        document.getElementById("singleImageInputs").classList.add("hidden");
+
+        if (mapType === "urlTemplate") {
+          document.getElementById("urlTemplateInputs").classList.remove("hidden");
+        } else if (mapType === "wmts") {
+          document.getElementById("wmtsInputs").classList.remove("hidden");
+        } else if (mapType === "wms") {
+          document.getElementById("wmsInputs").classList.remove("hidden");
+        } else if (mapType === "singleImage") {
+          document.getElementById("singleImageInputs").classList.remove("hidden");
+        }
+      }
+
+      function loadCustomTile() {
+        const mapType = document.getElementById("mapType").value;
+
+        if (customTileLayer) {
+          viewer.imageryLayers.remove(customTileLayer);
+          customTileLayer = null;
+        }
+
+        let provider;
+
+        if (mapType === "urlTemplate") {
+          const urlPrefix = document.getElementById("tileUrlPrefix").value.trim();
+          const urlTemplate = document.getElementById("tileUrlTemplate").value.trim();
+
+          if (!urlPrefix) {
+            alert("请输入地址");
+            return;
+          }
+
+          const tileUrl = urlPrefix + (urlTemplate || "/{z}/{x}/{y}.png");
+          provider = new Cesium.UrlTemplateImageryProvider({
+            url: tileUrl,
+          });
+          console.log("加载URL模板地图:", tileUrl);
+
+        } else if (mapType === "wmts") {
+          const wmtsUrl = document.getElementById("wmtsUrl").value.trim();
+          const wmtsLayer = document.getElementById("wmtsLayer").value.trim();
+
+          if (!wmtsUrl) {
+            alert("请输入WMTS地址");
+            return;
+          }
+
+          provider = new Cesium.WebMapTileServiceImageryProvider({
+            url: wmtsUrl + "?service=WMTS&request=GetTile&version=1.0.0&layer=" + (wmtsLayer || "default") + "&style=default&format=image/png&TileMatrixSet=w",
+            layer: wmtsLayer || "default",
+            style: "default",
+            format: "image/png",
+            tileMatrixSetID: "w",
+          });
+          console.log("加载WMTS地图:", wmtsUrl);
+
+        } else if (mapType === "wms") {
+          const wmsUrl = document.getElementById("wmsUrl").value.trim();
+          const wmsLayer = document.getElementById("wmsLayer").value.trim();
+
+          if (!wmsUrl) {
+            alert("请输入WMS地址");
+            return;
+          }
+
+          provider = new Cesium.WebMapServiceImageryProvider({
+            url: wmsUrl,
+            layers: wmsLayer || "default",
+            parameters: {
+              service: "WMS",
+              format: "image/png",
+            },
+          });
+          console.log("加载WMS地图:", wmsUrl);
+
+        } else if (mapType === "singleImage") {
+          const imageUrl = document.getElementById("imageUrl").value.trim();
+          const lon1 = parseFloat(document.getElementById("rectLon1").value);
+          const lat1 = parseFloat(document.getElementById("rectLat1").value);
+          const lon2 = parseFloat(document.getElementById("rectLon2").value);
+          const lat2 = parseFloat(document.getElementById("rectLat2").value);
+
+          if (!imageUrl) {
+            alert("请输入图片地址");
+            return;
+          }
+
+          let rectangle;
+          if (!isNaN(lon1) && !isNaN(lat1) && !isNaN(lon2) && !isNaN(lat2)) {
+            rectangle = Cesium.Rectangle.fromDegrees(lon1, lat1, lon2, lat2);
+          } else {
+            rectangle = Cesium.Rectangle.fromDegrees(110, 30, 120, 40);
+          }
+
+          provider = new Cesium.SingleTileImageryProvider({
+            url: imageUrl,
+            rectangle: rectangle,
+          });
+          console.log("加载单张图片:", imageUrl);
+        }
+
+        if (provider) {
+          customTileLayer = viewer.imageryLayers.addImageryProvider(provider);
+          customTileLayer.alpha = 1.0;
+
+          customMapLevels.min = provider.minimumLevel || 1;
+          customMapLevels.max = provider.maximumLevel || 20;
+          document.getElementById("minLevel").textContent = customMapLevels.min;
+          document.getElementById("maxLevel").textContent = customMapLevels.max;
+
+          console.log("地图加载成功，最小级别:", customMapLevels.min, "最大级别:", customMapLevels.max);
+        }
+      }
+    </script>
+  </body>
+</html>

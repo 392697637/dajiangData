@@ -111,7 +111,7 @@
         color: #fff;
         font-size: 13px;
         font-family: Arial, sans-serif;
-        width: 220px;
+        width: 430px;
         max-height: 90vh;
         overflow-y: auto;
       }
@@ -124,9 +124,73 @@
       }
       #controlPanel .section-title {
         font-weight: bold;
-        margin: 10px 0 5px 0;
-        color: #aaa;
+        margin: 0 0 8px 0;
+        color: #4caf50;
         font-size: 12px;
+        letter-spacing: 0;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #controlPanel .section-title::before {
+        content: "";
+        width: 3px;
+        height: 12px;
+        border-radius: 2px;
+        background: #4caf50;
+      }
+      #controlPanel .panel-layout {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 10px;
+        align-items: start;
+      }
+      #controlPanel .panel-tabs {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #controlPanel .panel-tab {
+        width: 100%;
+        min-height: 30px;
+        padding: 7px 8px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 5px;
+        background: rgba(255, 255, 255, 0.08);
+        color: #ddd;
+        cursor: pointer;
+        font-size: 12px;
+        text-align: left;
+        transition:
+          background 0.2s,
+          border-color 0.2s,
+          color 0.2s;
+      }
+      #controlPanel .panel-tab:hover {
+        background: rgba(255, 255, 255, 0.14);
+        color: #fff;
+      }
+      #controlPanel .panel-tab.active {
+        background: rgba(76, 175, 80, 0.22);
+        border-color: rgba(76, 175, 80, 0.75);
+        color: #fff;
+      }
+      #controlPanel .panel-content {
+        min-height: 280px;
+        padding: 0;
+        border-radius: 6px;
+      }
+      #controlPanel .panel-section {
+        padding: 10px;
+        margin: 0;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(76, 175, 80, 0.45);
+        border-left: 3px solid rgba(76, 175, 80, 0.9);
+        border-radius: 6px;
+        display: none;
+      }
+      #controlPanel .panel-section.active {
+        display: block;
       }
       #controlPanel .control-item {
         display: flex;
@@ -215,10 +279,30 @@
         color: #4caf50;
         font-weight: bold;
       }
+      #controlPanel .subsection-title {
+        margin: 12px 0 6px;
+        color: #bbb;
+        font-size: 11px;
+        font-weight: bold;
+      }
       #controlPanel .divider {
         height: 1px;
         background: rgba(255, 255, 255, 0.2);
-        margin: 10px 0;
+        margin: 12px 0;
+        display: none;
+      }
+      @media (max-width: 560px) {
+        #controlPanel {
+          left: 10px;
+          right: 10px;
+          width: auto;
+        }
+        #controlPanel .panel-layout {
+          grid-template-columns: 104px 1fr;
+        }
+        #controlPanel .panel-tab {
+          padding: 7px 6px;
+        }
       }
     </style>
     <!-- 必须在加载 Cesium 之前禁用默认图层 -->
@@ -251,241 +335,418 @@
     <div id="controlPanel">
       <div class="panel-title">图层控制</div>
 
-      <div class="section-title">底图图层</div>
-      <div class="control-item">
-        <label>
-          <input
-            type="checkbox"
-            id="showImage"
-            checked
-            onchange="toggleImageLayer()"
-          />
-          <span>影像图</span>
-        </label>
-      </div>
-      <div class="control-item">
-        <label>
-          <input
-            type="checkbox"
-            id="showImageLabel"
-            checked
-            onchange="toggleImageLabelLayer()"
-          />
-          <span>影像注记</span>
-        </label>
-      </div>
-      <div class="control-item">
-        <label>
-          <input
-            type="checkbox"
-            id="showVector"
-            onchange="toggleVectorLayer()"
-          />
-          <span>电子地图</span>
-        </label>
-      </div>
-      <div class="control-item">
-        <label>
-          <input
-            type="checkbox"
-            id="showVectorLabel"
-            onchange="toggleVectorLabelLayer()"
-          />
-          <span>电子地图注记</span>
-        </label>
-      </div>
-
-      <div class="divider"></div>
-
-      <div class="section-title">3D模型控制</div>
-      <div class="control-item">
-        <label>
-          <input
-            type="checkbox"
-            id="show3DTiles"
-            checked
-            onchange="toggle3DTiles()"
-          />
-          <span>3D模型显示</span>
-        </label>
-      </div>
-
-      <div class="slider-group">
-        <label>
-          <span>模型缩放比例</span>
-          <span class="slider-value" id="scaleValue">5.0</span>
-        </label>
-        <input
-          type="range"
-          id="modelScale"
-          min="0.1"
-          max="20"
-          step="0.1"
-          value="5"
-          onchange="updateModelScale()"
-        />
-      </div>
-
-      <div class="input-group">
-        <label>经度</label>
-        <input
-          type="number"
-          id="modelLon"
-          step="0.0001"
-          value="113.51"
-          placeholder="经度"
-        />
-      </div>
-      <div class="input-group">
-        <label>纬度</label>
-        <input
-          type="number"
-          id="modelLat"
-          step="0.0001"
-          value="34.82"
-          placeholder="纬度"
-        />
-      </div>
-      <div class="input-group">
-        <label>高度(m)</label>
-        <input
-          type="number"
-          id="modelHeight"
-          step="1"
-          value="0"
-          placeholder="高度"
-        />
-      </div>
-
-      <div class="divider"></div>
-
-      <div class="section-title">颜色渲染</div>
-      <div class="control-item">
-        <label>
-          <input
-            type="checkbox"
-            id="enableColorStyle"
-            onchange="toggleColorStyle()"
-          />
-          <span>启用颜色调整</span>
-        </label>
-      </div>
-
-      <div class="slider-group">
-        <label>
-          <span>亮度</span>
-          <span class="slider-value" id="brightnessValue">1.0</span>
-        </label>
-        <input
-          type="range"
-          id="brightness"
-          min="0.1"
-          max="3"
-          step="0.1"
-          value="1"
-          onchange="updateColorStyle()"
-          disabled
-        />
-      </div>
-
-      <div class="slider-group">
-        <label>
-          <span>对比度</span>
-          <span class="slider-value" id="contrastValue">1.0</span>
-        </label>
-        <input
-          type="range"
-          id="contrast"
-          min="0.1"
-          max="3"
-          step="0.1"
-          value="1"
-          onchange="updateColorStyle()"
-          disabled
-        />
-      </div>
-
-      <div class="slider-group">
-        <label>
-          <span>透明度</span>
-          <span class="slider-value" id="alphaValue">1.0</span>
-        </label>
-        <input
-          type="range"
-          id="alpha"
-          min="0"
-          max="1"
-          step="0.1"
-          value="1"
-          onchange="updateColorStyle()"
-          disabled
-        />
-      </div>
-
-      <div class="input-group">
-        <label>颜色 (默认白色)</label>
-        <input
-          type="color"
-          id="modelColor"
-          value="#ffffff"
-          onchange="updateColorStyle()"
-          disabled
-        />
-      </div>
-
-      <div class="input-group">
-        <label>预设颜色</label>
-        <div style="display: flex; gap: 5px; flex-wrap: wrap">
+      <div class="panel-layout">
+        <div class="panel-tabs">
           <button
-            class="btn btn-secondary"
-            style="width: auto; flex: 1; padding: 4px 8px"
-            onclick="setPresetColor('#ffffff')"
+            class="panel-tab active"
+            data-target="base"
+            onclick="showControlPanel('base')"
           >
-            白
+            底图图层
           </button>
           <button
-            class="btn btn-secondary"
-            style="width: auto; flex: 1; padding: 4px 8px"
-            onclick="setPresetColor('#ff6b6b')"
+            class="panel-tab"
+            data-target="model"
+            onclick="showControlPanel('model')"
           >
-            红
+            模型显示
           </button>
           <button
-            class="btn btn-secondary"
-            style="width: auto; flex: 1; padding: 4px 8px"
-            onclick="setPresetColor('#4ecdc4')"
+            class="panel-tab"
+            data-target="color"
+            onclick="showControlPanel('color')"
           >
-            青
+            颜色渲染
           </button>
           <button
-            class="btn btn-secondary"
-            style="width: auto; flex: 1; padding: 4px 8px"
-            onclick="setPresetColor('#ffe66d')"
+            class="panel-tab"
+            data-target="location"
+            onclick="showControlPanel('location')"
           >
-            黄
+            快捷定位
           </button>
         </div>
+
+        <div class="panel-content">
+          <div class="panel-section active" data-panel="base">
+            <div class="section-title">底图图层</div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="showImage"
+                  checked
+                  onchange="toggleImageLayer()"
+                />
+                <span>影像图</span>
+              </label>
+            </div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="showImageLabel"
+                  checked
+                  onchange="toggleImageLabelLayer()"
+                />
+                <span>影像注记</span>
+              </label>
+            </div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="showVector"
+                  onchange="toggleVectorLayer()"
+                />
+                <span>电子地图</span>
+              </label>
+            </div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="showVectorLabel"
+                  onchange="toggleVectorLabelLayer()"
+                />
+                <span>电子地图注记</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="panel-section" data-panel="model">
+            <div class="section-title">模型显示</div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="show3DTiles"
+                  checked
+                  onchange="toggle3DTiles()"
+                />
+                <span>3D模型显示</span>
+              </label>
+            </div>
+
+            <div class="slider-group">
+              <label>
+                <span>模型缩放比例</span>
+                <span class="slider-value" id="scaleValue">5.0</span>
+              </label>
+              <input
+                type="range"
+                id="modelScale"
+                min="0.1"
+                max="20"
+                step="0.1"
+                value="5"
+                onchange="updateModelScale()"
+              />
+            </div>
+
+            <div class="slider-group">
+              <label>
+                <span>3DTiles显示级别</span>
+                <span class="slider-value" id="tilesLevelValue">16</span>
+              </label>
+              <input
+                type="range"
+                id="tilesLevel"
+                min="1"
+                max="32"
+                step="1"
+                value="16"
+                onchange="updateTilesLevel()"
+                oninput="updateTilesLevel()"
+              />
+            </div>
+
+            <div class="slider-group">
+              <label>
+                <span>模型高度升高(m)</span>
+                <span class="slider-value" id="modelLiftHeightValue">0</span>
+              </label>
+              <input
+                type="range"
+                id="modelLiftHeight"
+                min="-100"
+                max="500"
+                step="1"
+                value="0"
+                onchange="updateModelLiftHeight()"
+                oninput="updateModelLiftHeight()"
+              />
+            </div>
+
+            <div class="subsection-title">光照与阴影</div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="enableShadows"
+                  onchange="updateSceneLighting()"
+                />
+                <span>开启阴影</span>
+              </label>
+            </div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="enableTimeShadow"
+                  onchange="updateSceneLighting()"
+                />
+                <span>按时间控制阴影</span>
+              </label>
+            </div>
+            <div class="input-group">
+              <label>阴影时间</label>
+              <input
+                type="datetime-local"
+                id="shadowDateTime"
+                onchange="updateSceneLighting()"
+              />
+            </div>
+            <div class="input-group">
+              <label>光颜色</label>
+              <input
+                type="color"
+                id="lightColor"
+                value="#ffffff"
+                onchange="updateSceneLighting()"
+              />
+            </div>
+            <div class="slider-group">
+              <label>
+                <span>光强度</span>
+                <span class="slider-value" id="lightIntensityValue">2.0</span>
+              </label>
+              <input
+                type="range"
+                id="lightIntensity"
+                min="0"
+                max="8"
+                step="0.1"
+                value="2"
+                onchange="updateSceneLighting()"
+                oninput="updateSceneLighting()"
+              />
+            </div>
+
+            <div class="subsection-title">3DTiles调试</div>
+            <div class="slider-group">
+              <label>
+                <span>最大内存(MB)</span>
+                <span class="slider-value" id="tilesMemoryValue">2048</span>
+              </label>
+              <input
+                type="range"
+                id="tilesMemory"
+                min="128"
+                max="4096"
+                step="128"
+                value="2048"
+                onchange="updateTilesDebugSettings()"
+                oninput="updateTilesDebugSettings()"
+              />
+            </div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="enableDynamicSSE"
+                  checked
+                  onchange="updateTilesDebugSettings()"
+                />
+                <span>动态屏幕误差</span>
+              </label>
+            </div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="debugWireframe"
+                  onchange="updateTilesDebugSettings()"
+                />
+                <span>线框调试</span>
+              </label>
+            </div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="debugBoundingVolume"
+                  onchange="updateTilesDebugSettings()"
+                />
+                <span>包围盒调试</span>
+              </label>
+            </div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="debugColorizeTiles"
+                  onchange="updateTilesDebugSettings()"
+                />
+                <span>瓦片随机色</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="panel-section" data-panel="color">
+            <div class="section-title">颜色渲染</div>
+            <div class="control-item">
+              <label>
+                <input
+                  type="checkbox"
+                  id="enableColorStyle"
+                  checked
+                  onchange="toggleColorStyle()"
+                />
+                <span>启用颜色调整</span>
+              </label>
+            </div>
+
+            <div class="slider-group">
+              <label>
+                <span>亮度</span>
+                <span class="slider-value" id="brightnessValue">1.0</span>
+              </label>
+              <input
+                type="range"
+                id="brightness"
+                min="0.1"
+                max="3"
+                step="0.1"
+                value="1"
+                onchange="updateColorStyle()"
+              />
+            </div>
+
+            <div class="slider-group">
+              <label>
+                <span>对比度</span>
+                <span class="slider-value" id="contrastValue">1.0</span>
+              </label>
+              <input
+                type="range"
+                id="contrast"
+                min="0.1"
+                max="3"
+                step="0.1"
+                value="1"
+                onchange="updateColorStyle()"
+              />
+            </div>
+
+            <div class="slider-group">
+              <label>
+                <span>透明度</span>
+                <span class="slider-value" id="alphaValue">1.0</span>
+              </label>
+              <input
+                type="range"
+                id="alpha"
+                min="0"
+                max="1"
+                step="0.1"
+                value="1"
+                onchange="updateColorStyle()"
+              />
+            </div>
+
+            <div class="input-group">
+              <label>整体颜色回退</label>
+              <input
+                type="color"
+                id="modelColor"
+                value="#ffffff"
+                onchange="updateColorStyle()"
+              />
+            </div>
+
+            <div class="input-group">
+              <label>顶部颜色</label>
+              <input
+                type="color"
+                id="topColor"
+                value="#ff0000"
+                onchange="updateColorStyle()"
+              />
+            </div>
+
+            <div class="input-group">
+              <label>侧面颜色</label>
+              <input
+                type="color"
+                id="sideColor"
+                value="#ffffff"
+                onchange="updateColorStyle()"
+              />
+            </div>
+
+            <div class="input-group">
+              <label>底部颜色</label>
+              <input
+                type="color"
+                id="bottomColor"
+                value="#0000ff"
+                onchange="updateColorStyle()"
+              />
+            </div>
+
+            <div class="input-group">
+              <label>预设颜色</label>
+              <div style="display: flex; gap: 5px; flex-wrap: wrap">
+                <button
+                  class="btn btn-secondary"
+                  style="width: auto; flex: 1; padding: 4px 8px"
+                  onclick="setPresetColor('#ffffff')"
+                >
+                  白
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  style="width: auto; flex: 1; padding: 4px 8px"
+                  onclick="setPresetColor('#ff6b6b')"
+                >
+                  红
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  style="width: auto; flex: 1; padding: 4px 8px"
+                  onclick="setPresetColor('#4ecdc4')"
+                >
+                  青
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  style="width: auto; flex: 1; padding: 4px 8px"
+                  onclick="setPresetColor('#ffe66d')"
+                >
+                  黄
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="panel-section" data-panel="location">
+            <div class="section-title">快捷定位</div>
+            <button class="btn btn-primary" onclick="locateToZhengzhou()">
+              定位郑州高新区
+            </button>
+            <button class="btn btn-secondary" onclick="flyToModel()">
+              飞行到模型
+            </button>
+          </div>
+        </div>
       </div>
-
-      <button class="btn btn-primary" onclick="locateToModel()">
-        定位到模型
-      </button>
-      <button class="btn btn-secondary" onclick="applyModelPosition()">
-        应用位置偏移
-      </button>
-      <button class="btn btn-warning" onclick="resetModelTransform()">
-        重置模型变换
-      </button>
-
-      <div class="divider"></div>
-
-      <div class="section-title">快捷定位</div>
-      <button class="btn btn-primary" onclick="locateToZhengzhou()">
-        定位郑州高新区
-      </button>
-      <button class="btn btn-secondary" onclick="flyToModel()">
-        飞行到模型
-      </button>
     </div>
 
     <script>
@@ -494,6 +755,8 @@
         tdtToken: "cf128e0b51efeb7df5f1720de282678e",
         tilesUrl:
           "https://192.168.110.6:9443/ktd-pgdata/3dtiles/gis_buildings_bbbb/tileset.json",
+        tilesMaximumScreenSpaceError: 16,
+        tilesMaximumMemoryUsage: 2048,
       };
 
       // 禁用 Cesium Ion 请求
@@ -524,6 +787,15 @@
       // 清除默认图层
       viewer.imageryLayers.removeAll();
       viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
+      viewer.scene.globe.enableLighting = true;
+      viewer.scene.light = new Cesium.DirectionalLight({
+        direction: Cesium.Cartesian3.normalize(
+          new Cesium.Cartesian3(1.0, 1.0, -1.0),
+          new Cesium.Cartesian3(),
+        ),
+        color: Cesium.Color.WHITE,
+        intensity: 2.0,
+      });
 
       // 比例尺更新
       function updateScaleBar() {
@@ -644,6 +916,7 @@
 
       // 保存图层引用
       let currentTileset = null;
+      let originalTilesetCenter = null;
 
       // UI 工具函数
       const loadingOverlay = document.getElementById("loadingOverlay");
@@ -662,27 +935,75 @@
         loadingOverlay.classList.remove("hidden");
       }
 
+      function showControlPanel(panelName) {
+        document.querySelectorAll("#controlPanel .panel-tab").forEach((tab) => {
+          tab.classList.toggle("active", tab.dataset.target === panelName);
+        });
+
+        document
+          .querySelectorAll("#controlPanel .panel-section")
+          .forEach((section) => {
+            section.classList.toggle(
+              "active",
+              section.dataset.panel === panelName,
+            );
+          });
+      }
+
+      function formatDateTimeLocal(date) {
+        const pad = (value) => String(value).padStart(2, "0");
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+          date.getDate(),
+        )}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+      }
+
+      function initShadowDateTime() {
+        document.getElementById("shadowDateTime").value = formatDateTimeLocal(
+          new Date(),
+        );
+      }
+
       // 加载 3DTiles
       function load3DTiles() {
         showLoading();
 
-        currentTileset = viewer.scene.primitives.add(
-          new Cesium.Cesium3DTileset({
-            url: CONFIG.tilesUrl,
-            maximumScreenSpaceError: 16,
-            maximumMemoryUsage: 2048,
-            dynamicScreenSpaceError: true,
-            dynamicScreenSpaceErrorDensity: 0.00278,
-            dynamicScreenSpaceErrorFactor: 4.0,
-          }),
-        );
+        try {
+          currentTileset = viewer.scene.primitives.add(
+            new Cesium.Cesium3DTileset({
+              url: CONFIG.tilesUrl,
+              maximumScreenSpaceError: CONFIG.tilesMaximumScreenSpaceError,
+              maximumMemoryUsage: CONFIG.tilesMaximumMemoryUsage,
+              dynamicScreenSpaceError: true,
+              dynamicScreenSpaceErrorDensity: 0.00278,
+              dynamicScreenSpaceErrorFactor: 4.0,
+            }),
+          );
+        } catch (error) {
+          console.error("3DTiles 创建失败:", error);
+          showError(`无法创建 3D 模型<br>${error.message || error}`);
+          return;
+        }
 
         currentTileset.readyPromise
           .then(function (t) {
+            originalTilesetCenter = Cesium.Cartesian3.clone(
+              t.boundingSphere.center,
+            );
             // 自动放大5倍
             t.scale = 5.0;
             document.getElementById("modelScale").value = 5.0;
             document.getElementById("scaleValue").textContent = "5.0";
+            document.getElementById("tilesLevel").value =
+              t.maximumScreenSpaceError;
+            document.getElementById("tilesLevelValue").textContent =
+              t.maximumScreenSpaceError;
+            document.getElementById("modelLiftHeight").value = 0;
+            document.getElementById("modelLiftHeightValue").textContent = "0";
+            document.getElementById("tilesMemory").value = t.maximumMemoryUsage;
+            document.getElementById("tilesMemoryValue").textContent =
+              t.maximumMemoryUsage;
+            updateSceneLighting();
+            updateTilesDebugSettings();
 
             viewer.zoomTo(
               t,
@@ -694,6 +1015,9 @@
             );
             console.log("3DTiles 加载成功，初始缩放5倍");
             console.log("模型边界:", t.boundingSphere);
+            if (document.getElementById("enableColorStyle").checked) {
+              updateColorStyle();
+            }
             hideLoading();
           })
           .catch(function (error) {
@@ -754,6 +1078,138 @@
         }
       }
 
+      // 更新3DTiles显示级别（值越小越精细）
+      function updateTilesLevel() {
+        const level = parseFloat(document.getElementById("tilesLevel").value);
+        document.getElementById("tilesLevelValue").textContent = level;
+
+        if (currentTileset) {
+          currentTileset.maximumScreenSpaceError = level;
+          viewer.scene.requestRender();
+          console.log("3DTiles显示级别:", level);
+        }
+      }
+
+      // 更新模型高度升高
+      function updateModelLiftHeight() {
+        const height = parseFloat(
+          document.getElementById("modelLiftHeight").value,
+        );
+        document.getElementById("modelLiftHeightValue").textContent = height;
+
+        if (!currentTileset || !originalTilesetCenter) {
+          return;
+        }
+
+        const normal = Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(
+          originalTilesetCenter,
+          new Cesium.Cartesian3(),
+        );
+        const translation = Cesium.Cartesian3.multiplyByScalar(
+          normal,
+          height,
+          new Cesium.Cartesian3(),
+        );
+
+        currentTileset.modelMatrix =
+          Cesium.Matrix4.fromTranslation(translation);
+        viewer.scene.requestRender();
+        console.log("模型高度升高:", height);
+      }
+
+      function hexToCesiumColor(colorHex, alpha = 1) {
+        const r = parseInt(colorHex.substr(1, 2), 16) / 255;
+        const g = parseInt(colorHex.substr(3, 2), 16) / 255;
+        const b = parseInt(colorHex.substr(5, 2), 16) / 255;
+        return new Cesium.Color(r, g, b, alpha);
+      }
+
+      function updateSceneLighting() {
+        const enableShadows = document.getElementById("enableShadows").checked;
+        const enableTimeShadow =
+          document.getElementById("enableTimeShadow").checked;
+        const shadowDateTime = document.getElementById("shadowDateTime").value;
+        const lightColor = document.getElementById("lightColor").value;
+        const lightIntensity = parseFloat(
+          document.getElementById("lightIntensity").value,
+        );
+
+        document.getElementById("lightIntensityValue").textContent =
+          lightIntensity.toFixed(1);
+
+        viewer.shadows = enableShadows;
+        viewer.scene.shadowMap.enabled = enableShadows;
+
+        if (enableTimeShadow && shadowDateTime) {
+          const localDate = new Date(shadowDateTime);
+          viewer.clock.currentTime = Cesium.JulianDate.fromDate(localDate);
+          viewer.clock.shouldAnimate = false;
+          viewer.scene.globe.enableLighting = true;
+          if (Cesium.SunLight) {
+            viewer.scene.light = new Cesium.SunLight({
+              color: hexToCesiumColor(lightColor),
+            });
+          }
+        } else {
+          viewer.scene.light = new Cesium.DirectionalLight({
+            direction: Cesium.Cartesian3.normalize(
+              new Cesium.Cartesian3(1.0, 1.0, -1.0),
+              new Cesium.Cartesian3(),
+            ),
+            color: hexToCesiumColor(lightColor),
+            intensity: lightIntensity,
+          });
+        }
+
+        if (viewer.scene.light) {
+          viewer.scene.light.color = hexToCesiumColor(lightColor);
+          if ("intensity" in viewer.scene.light) {
+            viewer.scene.light.intensity = lightIntensity;
+          }
+        }
+
+        if (currentTileset) {
+          currentTileset.shadows = enableShadows
+            ? Cesium.ShadowMode.ENABLED
+            : Cesium.ShadowMode.DISABLED;
+        }
+
+        viewer.scene.requestRender();
+        console.log("光照与阴影设置:", {
+          enableShadows,
+          enableTimeShadow,
+          shadowDateTime,
+          lightColor,
+          lightIntensity,
+        });
+      }
+
+      function updateTilesDebugSettings() {
+        const memory = parseFloat(document.getElementById("tilesMemory").value);
+        const enableDynamicSSE =
+          document.getElementById("enableDynamicSSE").checked;
+
+        document.getElementById("tilesMemoryValue").textContent = memory;
+
+        if (currentTileset) {
+          currentTileset.maximumMemoryUsage = memory;
+          currentTileset.dynamicScreenSpaceError = enableDynamicSSE;
+          currentTileset.debugWireframe =
+            document.getElementById("debugWireframe").checked;
+          currentTileset.debugShowBoundingVolume = document.getElementById(
+            "debugBoundingVolume",
+          ).checked;
+          currentTileset.debugColorizeTiles =
+            document.getElementById("debugColorizeTiles").checked;
+        }
+
+        viewer.scene.requestRender();
+        console.log("3DTiles调试设置:", {
+          memory,
+          enableDynamicSSE,
+        });
+      }
+
       // 应用位置偏移
       function applyModelPosition() {
         if (!currentTileset) {
@@ -801,7 +1257,8 @@
 
         document.getElementById("modelScale").value = 1;
         document.getElementById("scaleValue").textContent = "1.0";
-        document.getElementById("modelHeight").value = 0;
+        document.getElementById("modelLiftHeight").value = 0;
+        document.getElementById("modelLiftHeightValue").textContent = "0";
 
         console.log("模型变换已重置");
         viewer.zoomTo(currentTileset);
@@ -812,7 +1269,15 @@
       // 启用/禁用颜色调整
       function toggleColorStyle() {
         const enabled = document.getElementById("enableColorStyle").checked;
-        const sliders = ["brightness", "contrast", "alpha", "modelColor"];
+        const sliders = [
+          "brightness",
+          "contrast",
+          "alpha",
+          "modelColor",
+          "topColor",
+          "sideColor",
+          "bottomColor",
+        ];
 
         sliders.forEach((id) => {
           document.getElementById(id).disabled = !enabled;
@@ -821,11 +1286,14 @@
         if (!enabled) {
           // 重置为默认样式
           if (currentTileset) {
-            currentTileset.style = new Cesium.Cesium3DTileStyle({
-              color: {
-                conditions: [["true", "color('#ffffff')"]],
-              },
-            });
+            applyTopSideBottomColorShader(
+              "#ffffff",
+              "#ffffff",
+              "#ffffff",
+              1,
+              1,
+              1,
+            );
           }
         } else {
           updateColorStyle();
@@ -834,6 +1302,76 @@
       }
 
       // 更新颜色样式
+      function hexToCartesian4(colorHex, alpha) {
+        const r = parseInt(colorHex.substr(1, 2), 16) / 255;
+        const g = parseInt(colorHex.substr(3, 2), 16) / 255;
+        const b = parseInt(colorHex.substr(5, 2), 16) / 255;
+        return new Cesium.Cartesian4(r, g, b, alpha);
+      }
+
+      function colorToVec4(colorHex, alpha) {
+        const r = parseInt(colorHex.substr(1, 2), 16) / 255;
+        const g = parseInt(colorHex.substr(3, 2), 16) / 255;
+        const b = parseInt(colorHex.substr(5, 2), 16) / 255;
+        return `vec4(${r.toFixed(4)}, ${g.toFixed(4)}, ${b.toFixed(4)}, ${alpha.toFixed(4)})`;
+      }
+
+      function applyFallbackColor(colorHex, alpha) {
+        currentTileset.customShader = undefined;
+        currentTileset.style = new Cesium.Cesium3DTileStyle({
+          color: {
+            conditions: [["true", `color('${colorHex}', ${alpha})`]],
+          },
+          show: true,
+        });
+      }
+
+      function applyTopSideBottomColorShader(
+        topColor,
+        sideColor,
+        bottomColor,
+        alpha,
+        brightness,
+        contrast,
+      ) {
+        if (!Cesium.CustomShader || !Cesium.CustomShaderMode) {
+          applyFallbackColor(topColor, alpha);
+          viewer.scene.requestRender();
+          return;
+        }
+
+        try {
+          currentTileset.style = undefined;
+          currentTileset.customShader = new Cesium.CustomShader({
+            mode: Cesium.CustomShaderMode.MODIFY_MATERIAL,
+            fragmentShaderText: `
+              void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material)
+              {
+                vec3 normal = normalize(fsInput.attributes.normalMC);
+                vec4 topColor = ${colorToVec4(topColor, alpha)};
+                vec4 sideColor = ${colorToVec4(sideColor, alpha)};
+                vec4 bottomColor = ${colorToVec4(bottomColor, alpha)};
+                vec4 surfaceColor = sideColor;
+                if (normal.z > 0.45) {
+                  surfaceColor = topColor;
+                } else if (normal.z < -0.45) {
+                  surfaceColor = bottomColor;
+                }
+                surfaceColor.rgb = (surfaceColor.rgb - 0.5) * ${contrast.toFixed(4)} + 0.5;
+                surfaceColor.rgb *= ${brightness.toFixed(4)};
+                material.diffuse = clamp(surfaceColor.rgb, vec3(0.0), vec3(1.0));
+                material.alpha = surfaceColor.a;
+              }
+            `,
+          });
+        } catch (error) {
+          console.warn("分面颜色渲染失败，使用整体颜色回退:", error);
+          applyFallbackColor(topColor, alpha);
+        }
+
+        viewer.scene.requestRender();
+      }
+
       function updateColorStyle() {
         if (!currentTileset) {
           console.log("模型尚未加载");
@@ -846,6 +1384,9 @@
         const contrast = parseFloat(document.getElementById("contrast").value);
         const alpha = parseFloat(document.getElementById("alpha").value);
         const colorHex = document.getElementById("modelColor").value;
+        const topColor = document.getElementById("topColor").value;
+        const sideColor = document.getElementById("sideColor").value;
+        const bottomColor = document.getElementById("bottomColor").value;
 
         document.getElementById("brightnessValue").textContent =
           brightness.toFixed(1);
@@ -854,34 +1395,43 @@
         document.getElementById("alphaValue").textContent = alpha.toFixed(1);
 
         // 转换颜色为RGB
-        const r = parseInt(colorHex.substr(1, 2), 16) / 255;
-        const g = parseInt(colorHex.substr(3, 2), 16) / 255;
-        const b = parseInt(colorHex.substr(5, 2), 16) / 255;
-
-        // 应用颜色样式
-        currentTileset.style = new Cesium.Cesium3DTileStyle({
-          color: {
-            conditions: [["true", `color('${colorHex}', ${alpha})`]],
-          },
-          show: true,
-        });
+        applyTopSideBottomColorShader(
+          topColor || colorHex,
+          sideColor || colorHex,
+          bottomColor || colorHex,
+          alpha,
+          brightness,
+          contrast,
+        );
 
         console.log("颜色样式已更新:", {
           brightness,
           contrast,
           alpha,
           color: colorHex,
+          topColor,
+          sideColor,
+          bottomColor,
         });
       }
 
       // 设置预设颜色
       function setPresetColor(color) {
         document.getElementById("modelColor").value = color;
+        document.getElementById("topColor").value = color;
 
         // 自动启用颜色调整
         if (!document.getElementById("enableColorStyle").checked) {
           document.getElementById("enableColorStyle").checked = true;
-          const sliders = ["brightness", "contrast", "alpha", "modelColor"];
+          const sliders = [
+            "brightness",
+            "contrast",
+            "alpha",
+            "modelColor",
+            "topColor",
+            "sideColor",
+            "bottomColor",
+          ];
           sliders.forEach((id) => {
             document.getElementById(id).disabled = false;
           });
@@ -938,6 +1488,7 @@
       }
 
       // 启动加载
+      initShadowDateTime();
       load3DTiles();
     </script>
   </body>
