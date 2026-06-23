@@ -2,7 +2,7 @@
 -- POI 查询函数：public.gis_query_poi
 -- ============================================================
 -- 功能：
---   按项目 ID 查询项目专属 POI 表，统一返回高德(gd)、天地(td)或全部(all)来源的数据。
+--   按项目 ID 查询项目专属 POI 表，统一返回高德(gd)或天地(td)来源的数据。
 --
 -- 表名规则：
 --   高德 POI：public.gis_poi_gd_项目ID
@@ -11,25 +11,21 @@
 -- 查询规则：
 --   1. p_name 必填，按 name LIKE '%关键词%' 模糊匹配。
 --   2. p_lng_lat 为空时，只按名称查询。
---   3. p_lng_lat 非空时，必须同时传 p_radius_km > 0，按圆心半径过滤。
+--   3. p_lng_lat 非空时，按圆心半径过滤；p_radius_km 为空时默认 5 公里。
 --   4. p_lng_lat 支持两种格式：
 --      - 对象：{'lon':113.531770706177,'lat':34.818162918091}
 --      - 数组：[113.531770706177,34.818162918091]，顺序为 [经度,纬度]
 --      对象格式也兼容标准 JSON 双引号：
 --      {"lon":113.531770706177,"lat":34.818162918091}
---   5. p_radius_km 单位为公里，内部换算为米后用 geography 计算距离。
---   6. p_page_size 为每页条数；NULL 或 0 表示不限制。
---   7. p_page_no 为页码，从 1 开始；传条数但不传页码时默认第 1 页。
---   8. p_source 支持 gd、td、all；为空默认 gd。
+--   5. p_radius_km 单位为公里，默认 5；内部换算为米后用 geography 计算距离。
+--   6. p_source 支持 gd、td；为空默认 gd。
 --
 -- 参数：
 --   p_project_id   text              项目 ID，必填；只能包含字母、数字、下划线。
 --   p_name         text              POI 名称关键词，必填。
 --   p_lng_lat      text              经纬度字符串；NULL/空字符串表示不做空间过滤。
---   p_radius_km    double precision  半径，单位公里；传经纬度时必填且必须 > 0。
---   p_page_size    integer           每页条数；NULL 或 0 表示不限制。
---   p_page_no      integer           页码，从 1 开始；传条数但不传页码时默认第 1 页。
---   p_source       text              数据来源：gd=高德，td=天地，all=全部；默认 gd。
+--   p_radius_km    double precision  半径，单位公里；传经纬度时为空默认 5，传入时必须 > 0。
+--   p_source       text              数据来源：gd=高德，td=天地；默认 gd。
 --
 -- 返回字段：
 --   source_platform text              数据来源：gd 或 td。
@@ -44,8 +40,8 @@
 --   district        text              区县。
 --   lng             double precision  经度。
 --   lat             double precision  纬度。
---   geom            jsonb             点 GeoJSON，例如 {"type":"Point","coordinates":[经度,纬度]}。
---   distance_km     double precision  到传入圆心的距离；未传经纬度时为 NULL。
+--   geom            geometry(Point,4326) 数据库原始空间字段，不做 GeoJSON 转换。
+--   distance_km     double precision  到传入圆心的距离；未传经纬度时默认为 0。
 --   raw_data        jsonb             原始行 JSON，已去除原始 geom 字段。
 --
 -- 依赖：
@@ -73,9 +69,7 @@ CREATE OR REPLACE FUNCTION public.gis_query_poi(
     p_project_id text,
     p_name text,
     p_lng_lat text DEFAULT NULL,
-    p_radius_km double precision DEFAULT NULL,
-    p_page_size integer DEFAULT NULL,
-    p_page_no integer DEFAULT NULL,
+    p_radius_km double precision DEFAULT 5,
     p_source text DEFAULT 'gd'
 )
 RETURNS TABLE (
@@ -91,7 +85,7 @@ RETURNS TABLE (
     district text,
     lng double precision,
     lat double precision,
-    geom jsonb,
+    geom geometry(Point, 4326),
     distance_km double precision,
     raw_data jsonb
 )
@@ -101,9 +95,6 @@ DECLARE
     v_project_id text := btrim(p_project_id);
     v_name text := btrim(p_name);
     v_source text := lower(coalesce(nullif(btrim(p_source), ''), 'gd'));
-    v_page_size integer := coalesce(p_page_size, 0);
-    v_page_no integer := coalesce(p_page_no, 1);
-    v_offset integer := 0;
 
     v_gd_table text := 'gis_poi_gd_' || btrim(p_project_id);
     v_td_table text := 'gis_poi_td_' || btrim(p_project_id);
@@ -131,16 +122,8 @@ BEGIN
         RAISE EXCEPTION '参数错误：名称不能为空';
     END IF;
 
-    IF v_source NOT IN ('gd', 'td', 'all') THEN
-        RAISE EXCEPTION '参数错误：数据来源只能是 gd、td、all，当前值为 %', p_source;
-    END IF;
-
-    IF v_page_size < 0 THEN
-        RAISE EXCEPTION '参数错误：每页条数不能小于 0，当前值为 %', p_page_size;
-    END IF;
-
-    IF v_page_no < 1 THEN
-        RAISE EXCEPTION '参数错误：页码必须大于等于 1，当前值为 %', p_page_no;
+    IF v_source NOT IN ('gd', 'td') THEN
+        RAISE EXCEPTION '参数错误：数据来源只能是 gd、td，当前值为 %', p_source;
     END IF;
 
     -- 2. 解析经纬度和半径；未传经纬度时跳过空间过滤。
@@ -187,16 +170,16 @@ BEGIN
             RAISE EXCEPTION '参数错误：纬度必须在 -90 到 90 之间，当前值为 %', v_lat;
         END IF;
 
-        IF p_radius_km IS NULL OR p_radius_km <= 0 THEN
+        IF coalesce(p_radius_km, 5) <= 0 THEN
             RAISE EXCEPTION '参数错误：传入经纬度时，半径必须大于 0 公里，当前值为 %', p_radius_km;
         END IF;
 
-        v_radius_m := p_radius_km * 1000.0;
+        v_radius_m := coalesce(p_radius_km, 5) * 1000.0;
         v_center_geom := ST_SetSRID(ST_MakePoint(v_lng, v_lat), 4326);
     END IF;
 
     -- 3. 按来源拼接查询 SQL。不同来源字段名不同，在这里统一映射返回结构。
-    IF v_source IN ('gd', 'all') THEN
+    IF v_source = 'gd' THEN
         IF to_regclass(format('%I.%I', 'public', v_gd_table)) IS NULL THEN
             IF v_source = 'gd' THEN
                 RAISE EXCEPTION '参数错误：表 public.% 不存在', v_gd_table;
@@ -216,7 +199,7 @@ BEGIN
                     p.adname::text AS district,
                     ST_X(p.geom)::double precision AS lng,
                     ST_Y(p.geom)::double precision AS lat,
-                    ST_AsGeoJSON(p.geom)::jsonb AS geom,
+                    p.geom::geometry(Point,4326) AS geom,
                     round((ST_Distance(p.geom::geography, $2::geography) / 1000.0)::numeric, 6)::double precision AS distance_km,
                     (to_jsonb(p) - 'geom') AS raw_data
                 FROM public.%I p
@@ -239,8 +222,8 @@ BEGIN
                     p.adname::text AS district,
                     CASE WHEN p.geom IS NULL THEN NULL ELSE ST_X(p.geom)::double precision END AS lng,
                     CASE WHEN p.geom IS NULL THEN NULL ELSE ST_Y(p.geom)::double precision END AS lat,
-                    CASE WHEN p.geom IS NULL THEN NULL ELSE ST_AsGeoJSON(p.geom)::jsonb END AS geom,
-                    NULL::double precision AS distance_km,
+                    p.geom::geometry(Point,4326) AS geom,
+                    0::double precision AS distance_km,
                     (to_jsonb(p) - 'geom') AS raw_data
                 FROM public.%I p
                 WHERE p.name LIKE ('%%' || $1 || '%%')
@@ -248,7 +231,7 @@ BEGIN
         END IF;
     END IF;
 
-    IF v_source IN ('td', 'all') THEN
+    IF v_source = 'td' THEN
         IF to_regclass(format('%I.%I', 'public', v_td_table)) IS NULL THEN
             IF v_source = 'td' THEN
                 RAISE EXCEPTION '参数错误：表 public.% 不存在', v_td_table;
@@ -268,7 +251,7 @@ BEGIN
                     p.district::text AS district,
                     coalesce(p.lng, ST_X(p.geom))::double precision AS lng,
                     coalesce(p.lat, ST_Y(p.geom))::double precision AS lat,
-                    ST_AsGeoJSON(p.geom)::jsonb AS geom,
+                    p.geom::geometry(Point,4326) AS geom,
                     round((ST_Distance(p.geom::geography, $2::geography) / 1000.0)::numeric, 6)::double precision AS distance_km,
                     (to_jsonb(p) - 'geom') AS raw_data
                 FROM public.%I p
@@ -291,8 +274,8 @@ BEGIN
                     p.district::text AS district,
                     coalesce(p.lng, ST_X(p.geom))::double precision AS lng,
                     coalesce(p.lat, ST_Y(p.geom))::double precision AS lat,
-                    CASE WHEN p.geom IS NULL THEN NULL ELSE ST_AsGeoJSON(p.geom)::jsonb END AS geom,
-                    NULL::double precision AS distance_km,
+                    p.geom::geometry(Point,4326) AS geom,
+                    0::double precision AS distance_km,
                     (to_jsonb(p) - 'geom') AS raw_data
                 FROM public.%I p
                 WHERE p.name LIKE ('%%' || $1 || '%%')
@@ -304,7 +287,7 @@ BEGIN
         RAISE EXCEPTION '参数错误：项目 % 未找到可查询的 POI 表', v_project_id;
     END IF;
 
-    -- 4. 合并来源、排序、限制返回条数并执行。
+    -- 4. 生成最终 SQL、排序并执行。
     v_sql := array_to_string(v_sql_parts, E'\nUNION ALL\n');
 
     IF v_radius_m > 0 THEN
@@ -319,11 +302,6 @@ BEGIN
         );
     END IF;
 
-    IF v_page_size > 0 THEN
-        v_offset := (v_page_no - 1) * v_page_size;
-        v_sql := v_sql || format(' LIMIT %s OFFSET %s', v_page_size, v_offset);
-    END IF;
-
     IF v_radius_m > 0 THEN
         RETURN QUERY EXECUTE v_sql USING v_name, v_center_geom, v_radius_m;
     ELSE
@@ -332,8 +310,8 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_query_poi(text, text, text, double precision, integer, integer, text) IS
-'按项目ID查询高德/天地POI';
+COMMENT ON FUNCTION public.gis_query_poi(text, text, text, double precision, text) IS
+'按项目ID查询高德/天地POI；第三个参数为空时按名称模糊查询；第三个参数传 {''lon'':经度,''lat'':纬度} 或 [经度,纬度] 且第四个参数传半径公里时，按圆心半径查询；第五个参数为数据来源(gd/td，默认gd)。';
 
 -- ============================================================
 -- 调用示例
@@ -351,8 +329,6 @@ SELECT * FROM public.gis_query_poi(
     '天健湖公园',
     NULL,
     NULL,
-    NULL,
-    NULL,
     'gd'
 );
 
@@ -362,20 +338,16 @@ SELECT * FROM public.gis_query_poi(
     '天健湖公园',
     NULL,
     NULL,
-    NULL,
-    NULL,
     'td'
 );
 
--- 示例 4：查询全部来源，按名称模糊查询。
+-- 示例 4：查询天地，只传经纬度，不传半径，默认 5 公里。
 SELECT * FROM public.gis_query_poi(
     '2c95908e958f3b75019593551f520126',
     '天健湖公园',
+    '[113.531770706177,34.818162918091]',
     NULL,
-    NULL,
-    NULL,
-    NULL,
-    'all'
+    'td'
 );
 
 -- 示例 5：按经纬度对象查询高德 1 公里内的 POI。
@@ -384,8 +356,6 @@ SELECT * FROM public.gis_query_poi(
     '天健湖公园',
     '{''lon'':113.531770706177,''lat'':34.818162918091}',
     1,
-    NULL,
-    NULL,
     'gd'
 );
 
@@ -395,34 +365,26 @@ SELECT * FROM public.gis_query_poi(
     '天健湖公园',
     '[113.531770706177,34.818162918091]',
     2,
-    NULL,
-    NULL,
     'td'
 );
 
--- 示例 7：查询全部来源，半径 3 公里。
+-- 示例 7：只传经纬度，不传半径，默认查询 5 公里内的高德 POI。
+SELECT * FROM public.gis_query_poi(
+    '2c95908e958f3b75019593551f520126',
+    '天健湖公园',
+    '{''lon'':113.531770706177,''lat'':34.818162918091}'
+);
+
+-- 示例 8：查询高德，半径 3 公里。
 SELECT * FROM public.gis_query_poi(
     '2c95908e958f3b75019593551f520126',
     '天健湖公园',
     '{''lon'':113.531770706177,''lat'':34.818162918091}',
     3,
-    NULL,
-    NULL,
-    'all'
+    'gd'
 );
 
--- 示例 8：每页 20 条，查询第 1 页。
-SELECT * FROM public.gis_query_poi(
-    '2c95908e958f3b75019593551f520126',
-    '天健湖公园',
-    '[113.531770706177,34.818162918091]',
-    5,
-    20,
-    1,
-    'all'
-);
-
--- 示例 9：每页 20 条，查询第 2 页，只取接口常用字段。
+-- 示例 9：只取接口常用字段。
 SELECT
     source_platform,
     id,
@@ -438,18 +400,14 @@ FROM public.gis_query_poi(
     '天健湖公园',
     '[113.531770706177,34.818162918091]',
     3,
-    20,
-    2,
-    'all'
+    'td'
 );
 
--- 示例 10：错误示例，来源只能是 gd、td、all。
+-- 示例 10：错误示例，来源只能是 gd、td。
 -- SELECT * FROM public.gis_query_poi(
 --     '2c95908e958f3b75019593551f520126',
 --     '天健湖公园',
 --     '[113.531770706177,34.818162918091]',
 --     3,
---     NULL,
---     NULL,
 --     'amap'
 -- );
