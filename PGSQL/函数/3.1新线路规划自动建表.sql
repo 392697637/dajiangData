@@ -180,9 +180,7 @@ $$;
 --   - 建表后会自动创建 (x,y,z) 复合索引和 geom 空间索引。
 --   - 支持直接传入GeoJSON面，自动计算外接矩形范围，无需手动指定经纬度。
 -- ==============================================
-DROP FUNCTION IF EXISTS gis_generate_3d_grid(VARCHAR, TEXT, NUMERIC, NUMERIC, INT);
-
-CREATE OR REPLACE FUNCTION gis_generate_3d_grid(
+ CREATE OR REPLACE FUNCTION gis_generate_3d_grid(
     p_project_id VARCHAR,
     p_geojson TEXT,
     p_min_alt NUMERIC,
@@ -199,14 +197,23 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_table TEXT;                          -- 最终生成的网格表名
-    v_cnt  INT := 0;                       -- 插入网格点的总行数
-    step_lon NUMERIC;                      -- 经度方向步长（度）
-    step_lat NUMERIC;                      -- 纬度方向步长（度）
-    step_alt INT;                          -- 高度方向步长（米）
-    v_min_lon NUMERIC;                     -- 从GeoJSON解析出的最小经度
-    v_max_lon NUMERIC;                     -- 从GeoJSON解析出的最大经度
-    v_min_lat NUMERIC;                     -- 从GeoJSON解析出的最小纬度
-    v_max_lat NUMERIC;                     -- 从GeoJSON解析出的最大纬度
+    v_cnt BIGINT := 0;                     -- 插入网格点的总行数
+    v_estimated_count BIGINT := 0;         -- 按外接矩形预估的最大网格点数量
+    v_max_grid_count BIGINT := 30000000;   -- 单次生成上限，防止误操作生成超大表
+    v_table_regclass REGCLASS;             -- 已存在的目标表对象，存在才删除
+    v_lon_max_idx INT;                     -- 经度方向最大网格索引
+    v_lat_max_idx INT;                     -- 纬度方向最大网格索引
+    v_alt_max_idx INT;                     -- 高度方向最大网格索引
+    step_lon DOUBLE PRECISION;             -- 经度方向步长（度）
+    step_lat DOUBLE PRECISION;             -- 纬度方向步长（度）
+    step_alt DOUBLE PRECISION;             -- 高度方向步长（米）
+    v_mid_lat DOUBLE PRECISION;            -- 区域中心纬度，用于修正经度方向步长
+    v_lon_meter DOUBLE PRECISION;          -- 当前纬度下1度经度对应米数
+    v_geom geometry;                       -- 解析后的GeoJSON几何，仅解析一次
+    v_min_lon DOUBLE PRECISION;            -- 从GeoJSON解析出的最小经度
+    v_max_lon DOUBLE PRECISION;            -- 从GeoJSON解析出的最大经度
+    v_min_lat DOUBLE PRECISION;            -- 从GeoJSON解析出的最小纬度
+    v_max_lat DOUBLE PRECISION;            -- 从GeoJSON解析出的最大纬度
 BEGIN
     -- 初始化返回参数，默认成功状态
     code := 200;
@@ -214,14 +221,29 @@ BEGIN
     msg := '';
     count := 0;
 
-    -- ===================== 从GeoJSON字符串自动解析空间范围 =====================
-    -- 解析GeoJSON，自动获取最小/最大经纬度，格式错误则直接返回400
+    -- 提高当前事务内CTAS和索引创建的并行倾向，最终是否并行由PostgreSQL优化器决定
     BEGIN
-        SELECT 
-            ST_XMin(ST_GeomFromGeoJSON(p_geojson))::NUMERIC,
-            ST_XMax(ST_GeomFromGeoJSON(p_geojson))::NUMERIC,
-            ST_YMin(ST_GeomFromGeoJSON(p_geojson))::NUMERIC,
-            ST_YMax(ST_GeomFromGeoJSON(p_geojson))::NUMERIC
+        PERFORM set_config('max_parallel_workers_per_gather', '8', true);
+        PERFORM set_config('max_parallel_workers', '16', true);
+        PERFORM set_config('parallel_setup_cost', '0', true);
+        PERFORM set_config('parallel_tuple_cost', '0', true);
+        PERFORM set_config('min_parallel_table_scan_size', '0', true);
+        PERFORM set_config('min_parallel_index_scan_size', '0', true);
+    EXCEPTION WHEN OTHERS THEN
+        NULL;
+    END;
+
+    -- ===================== 从GeoJSON字符串自动解析空间范围 =====================
+    -- GeoJSON只解析一次，后续复用几何对象和外接矩形范围
+    BEGIN
+        v_geom := ST_SetSRID(ST_GeomFromGeoJSON(p_geojson), 4326);
+        v_geom := ST_MakeValid(v_geom);
+
+        SELECT
+            ST_XMin(v_geom),
+            ST_XMax(v_geom),
+            ST_YMin(v_geom),
+            ST_YMax(v_geom)
         INTO v_min_lon, v_max_lon, v_min_lat, v_max_lat;
     EXCEPTION WHEN OTHERS THEN
         code := 400;
@@ -247,12 +269,43 @@ BEGIN
         RETURN;
     END IF;
 
+    IF GeometryType(v_geom) NOT IN ('POLYGON', 'MULTIPOLYGON') THEN
+        code := 400;
+        msg := '参数错误：GeoJSON必须是Polygon或MultiPolygon面数据';
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
     -- ===================== 计算网格步长 =====================
-    -- 水平分辨率（米）转经纬度度数：1度 ≈ 111000米
-    step_lon := p_resolution / 111000.0;
-    step_lat := p_resolution / 111000.0;
+    -- 纬度方向约1度=111320米；经度方向按区域中心纬度修正
+    v_mid_lat := (v_min_lat + v_max_lat) / 2.0;
+    v_lon_meter := 111320.0 * cos(radians(v_mid_lat));
+
+    IF abs(v_lon_meter) < 1 THEN
+        code := 400;
+        msg := '参数错误：区域纬度过高，无法按经纬度生成稳定网格';
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    step_lat := p_resolution / 111320.0;
+    step_lon := p_resolution / v_lon_meter;
     -- 高度步长直接使用分辨率（米）
     step_alt := p_resolution;
+
+    -- ===================== 预估生成数量，避免低分辨率误生成超大表 =====================
+    v_lon_max_idx := floor((v_max_lon - v_min_lon) / step_lon)::INT;
+    v_lat_max_idx := floor((v_max_lat - v_min_lat) / step_lat)::INT;
+    v_alt_max_idx := floor((p_max_alt::DOUBLE PRECISION - p_min_alt::DOUBLE PRECISION) / step_alt)::INT;
+    v_estimated_count := (v_lon_max_idx::BIGINT + 1) * (v_lat_max_idx::BIGINT + 1) * (v_alt_max_idx::BIGINT + 1);
+
+    IF v_estimated_count > v_max_grid_count THEN
+        code := 400;
+        msg := format('参数错误：预计最多生成 %s 个网格点，超过单次上限 %s，请提高分辨率或缩小范围', v_estimated_count, v_max_grid_count);
+        count := v_estimated_count;
+        RETURN NEXT;
+        RETURN;
+    END IF;
 
     -- ===================== 根据项目ID生成表名 =====================
     -- 项目ID为空使用默认表名，不为空则拼接项目ID，并过滤非法字符防止SQL注入
@@ -263,26 +316,63 @@ BEGIN
     END IF;
     table_name := v_table;
 
-    -- ===================== 删除已存在的旧表 =====================
-    EXECUTE format('DROP TABLE IF EXISTS %I;', v_table);
+    -- ===================== 存在旧表才删除，避免无表场景走DROP异常/通知路径 =====================
+    SELECT to_regclass(format('%I.%I', current_schema(), v_table)) INTO v_table_regclass;
+    IF v_table_regclass IS NOT NULL THEN
+        EXECUTE format('DROP TABLE %s;', v_table_regclass);
+    END IF;
 		
-    -- ===================== 创建三维网格表（UNLOGGED 提升写入速度） =====================
-    -- 关闭autovacuum，避免批量插入时自动清理影响性能
+    -- ===================== 批量生成三维网格点并建表 =====================
+    -- CTAS避免逐行维护SERIAL/主键；先过滤二维面内点，再展开高度层，减少重复空间判断
     EXECUTE format('
-        CREATE UNLOGGED TABLE IF NOT EXISTS %I (
-            id SERIAL PRIMARY KEY,
-            x INT NOT NULL,               -- 网格X轴索引
-            y INT NOT NULL,               -- 网格Y轴索引
-            z INT NOT NULL,               -- 网格Z轴索引
-            lon DOUBLE PRECISION,         -- 经度
-            lat DOUBLE PRECISION,         -- 纬度
-            alt DOUBLE PRECISION,         -- 高度（米）
-            zone_type VARCHAR(20) DEFAULT NULL,  -- 区域类型：禁飞区/管控区/适飞区
-            geom geometry(PointZ,4326)    -- 三维空间点，WGS84坐标系
-        ) WITH (autovacuum_enabled = off);
-    ', v_table);
+        CREATE UNLOGGED TABLE %I
+        WITH (autovacuum_enabled = off) AS
+        WITH xy_grid AS (
+            SELECT
+                s_lon AS x,
+                s_lat AS y,
+                ($1 + s_lon * $4)::DOUBLE PRECISION AS lon,
+                ($2 + s_lat * $5)::DOUBLE PRECISION AS lat
+            FROM
+                generate_series(0, $10) s_lon,
+                generate_series(0, $11) s_lat
+            WHERE ($1 + s_lon * $4) <= $7
+              AND ($2 + s_lat * $5) <= $8
+              AND ST_Covers(
+                    $13::geometry,
+                    ST_SetSRID(ST_MakePoint($1 + s_lon * $4, $2 + s_lat * $5), 4326)
+                  )
+        ),
+        z_grid AS (
+            SELECT
+                s_alt AS z,
+                ($3 + s_alt * $6)::DOUBLE PRECISION AS alt
+            FROM generate_series(0, $12) s_alt
+            WHERE ($3 + s_alt * $6) <= $9
+        )
+        SELECT
+            ((z.z::BIGINT * ($11::BIGINT + 1) + xy.y::BIGINT) * ($10::BIGINT + 1) + xy.x::BIGINT + 1) AS id,
+            xy.x::INT,
+            xy.y::INT,
+            z.z::INT,
+            xy.lon,
+            xy.lat,
+            z.alt,
+            NULL::VARCHAR(20) AS zone_type,
+            ST_SetSRID(ST_MakePoint(xy.lon, xy.lat, z.alt), 4326)::geometry(PointZ,4326) AS geom
+        FROM xy_grid xy
+        CROSS JOIN z_grid z;
+    ', v_table)
+    USING v_min_lon, v_min_lat, p_min_alt,
+          step_lon, step_lat, step_alt,
+          v_max_lon, v_max_lat, p_max_alt,
+          v_lon_max_idx, v_lat_max_idx, v_alt_max_idx,
+          v_geom;
 
-    -- ===================== 给表和字段添加注释 =====================
+    -- ===================== 补充主键、注释和索引 =====================
+    EXECUTE format('ALTER TABLE %I ALTER COLUMN id SET NOT NULL;', v_table);
+    EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I PRIMARY KEY (id);', v_table, v_table || '_pkey');
+
     EXECUTE format('COMMENT ON TABLE %I IS ''三维网格节点表'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.id IS ''自增主键'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.x IS ''网格X索引'';', v_table);
@@ -294,40 +384,10 @@ BEGIN
     EXECUTE format('COMMENT ON COLUMN %I.zone_type IS ''区域类型（禁飞区/管控区/适飞区）'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.geom IS ''空间几何（三维点，WGS84坐标系）'';', v_table);
 
-    -- ===================== 清空表数据（防止残留） =====================
-    EXECUTE format('TRUNCATE TABLE %I;', v_table);
-
-    -- ===================== 批量生成三维网格点并插入表中 =====================
-    -- 使用generate_series生成x/y/z三个维度的序列，计算坐标与三维几何点
-    EXECUTE format('
-        INSERT INTO %I (x, y, z, lon, lat, alt, geom)
-        SELECT
-            s_lon, s_lat, s_alt,
-            $1 + s_lon * $4,
-            $2 + s_lat * $5,
-            $3 + s_alt * $6,
-            ST_SetSRID(ST_MakePoint($1 + s_lon * $4, $2 + s_lat * $5, $3 + s_alt * $6), 4326)
-        FROM
-            generate_series(0, CEIL(($7 - $1) / $4)::INT) s_lon,
-            generate_series(0, CEIL(($8 - $2) / $5)::INT) s_lat,
-            generate_series(0, CEIL(($9 - $3) / $6)::INT) s_alt
-        WHERE
-            $1 + s_lon * $4 <= $7
-            AND $2 + s_lat * $5 <= $8
-            AND $3 + s_alt * $6 <= $9;
-    ', v_table)
-    USING v_min_lon, v_min_lat, p_min_alt,
-          step_lon, step_lat, step_alt,
-          v_max_lon, v_max_lat, p_max_alt;
-
-    -- ===================== 获取插入的网格点总数 =====================
-    GET DIAGNOSTICS v_cnt = ROW_COUNT;
+    EXECUTE format('SELECT count(*)::BIGINT FROM %I;', v_table) INTO v_cnt;
     count := v_cnt;
 
-    -- ===================== 创建索引，加速查询 =====================
-    -- 创建x,y,z复合索引
-    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (x, y, z);', 'idx_xyz_'||v_table, v_table);
-    -- 创建空间索引，支持GIS空间查询
+    EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS %I ON %I (x, y, z);', 'idx_xyz_'||v_table, v_table);
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST(geom);', 'idx_geom_'||v_table, v_table);
 
     -- ===================== 恢复autovacuum并更新表统计信息 =====================
@@ -354,13 +414,7 @@ SELECT * FROM gis_generate_3d_grid(
     300,
     100
 );
-SELECT * FROM gis_generate_3d_grid(
-    '2c95908e958f3b75019593551f520126',
-    ' ',
-    50,
-    300,
-    100
-);
+ 
 -- ========================================== gis_mark_electric_fence  更新三维网格表============================================================
 -- ===================== 删除可能存在的同名函数（保证幂等性） =====================
 DO $$
