@@ -1,4 +1,31 @@
+-- =============================================================================
+-- 计算 LineStringZ 的近似米制三维长度：经纬度近似换算为米，高度差按 Z 值米计算
+-- =============================================================================
+DROP FUNCTION IF EXISTS gis_linestring_length_m(geometry);
 
+CREATE OR REPLACE FUNCTION gis_linestring_length_m(p_line geometry)
+RETURNS DOUBLE PRECISION AS $$
+    WITH pts AS (
+        SELECT (dp).path[1] AS idx, (dp).geom AS geom
+        FROM ST_DumpPoints(p_line) AS dp
+    ),
+    segs AS (
+        SELECT
+            a.geom AS geom_a,
+            b.geom AS geom_b,
+            RADIANS((ST_Y(a.geom) + ST_Y(b.geom)) / 2.0) AS avg_lat_rad
+        FROM pts a
+        JOIN pts b ON b.idx = a.idx + 1
+    )
+    SELECT COALESCE(SUM(
+        SQRT(
+            POWER((ST_X(geom_b) - ST_X(geom_a)) * 111000.0 * COS(avg_lat_rad), 2)
+            + POWER((ST_Y(geom_b) - ST_Y(geom_a)) * 111000.0, 2)
+            + POWER(COALESCE(ST_Z(geom_b), 0) - COALESCE(ST_Z(geom_a), 0), 2)
+        )
+    ), 0)::DOUBLE PRECISION
+    FROM segs;
+$$ LANGUAGE SQL IMMUTABLE STRICT;
 
 -- ==================================================================================== gis_astar_3d_flight_plan  空间三维路径规划====================================================================================
 -- ===================== 删除可能存在的同名函数（保证幂等性） =====================
@@ -15,16 +42,6 @@ BEGIN
     END LOOP;
 END;
 $$;
-
--- =============================================================================
--- 删除同名函数 
--- =============================================================================
-
-DROP FUNCTION IF EXISTS gis_astar_3d_flight_plan(
-    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
-    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
-    DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR
-);
 
 
 /**
@@ -276,7 +293,7 @@ BEGIN
             v_final_path,
             v_waypoints, 
             v_smooth_waypoints,
-            ST_3DLength(v_path_line),    -- 计算3D空间距离（米） 
+            gis_linestring_length_m(v_final_path),    -- 计算 smooth_path_line 的米制三维长度
             p_height_mode
         ) RETURNING id INTO v_path_id;    -- 获取插入后的自增主键
 
@@ -488,7 +505,7 @@ BEGIN
             v_start_pt, v_end_pt, p_safe_altitude,
             v_path_line, v_final_path,
             v_waypoints, v_smooth_waypoints,
-            ST_3DLength(v_path_line), p_height_mode
+            gis_linestring_length_m(v_final_path), p_height_mode
         ) RETURNING id INTO v_path_id;
 
         RETURN QUERY SELECT * FROM gis_flight_paths WHERE id = v_path_id;
@@ -540,7 +557,11 @@ BEGIN
         v_blocked BOOLEAN;                       -- 直连线是否穿越禁飞区/管控区
     BEGIN
         WHILE ST_NumPoints(v_path_line) >= 4
-              AND v_simplify_idx <= ST_NumPoints(v_path_line) - 2 LOOP
+              AND v_simplify_idx <= ST_NumPoints(v_path_line) -
+                  CASE
+                      WHEN NOT (p_height_mode > 0 AND p_height_mode < 1) THEN 3
+                      ELSE 2
+                  END LOOP
 
             v_direct_line := ST_MakeLine(
                 ST_PointN(v_path_line, v_simplify_idx),
@@ -573,7 +594,7 @@ BEGIN
     v_final_path := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
     DECLARE
         -- 每段路径之间插值的点数（值越大轨迹越平滑，但点数越多）
-        v_interp_steps INT := 10;
+        v_interp_steps INT := 1;
         -- 原始路径的总段数（点数-1）
         v_seg_cnt INT;
         -- 当前线段的起点和终点几何对象
@@ -679,7 +700,7 @@ BEGIN
         v_start_pt, v_end_pt, p_safe_altitude,
         v_path_line, v_final_path,
         v_waypoints, v_smooth_waypoints,
-        ST_3DLength(v_final_path),  -- 计算平滑后的总飞行距离（米）
+        gis_linestring_length_m(v_final_path),  -- 计算 smooth_path_line 的米制三维长度
         p_height_mode
     ) RETURNING id INTO v_path_id;
      -- 删除临时表，释放资源
@@ -713,7 +734,7 @@ EXCEPTION WHEN OTHERS THEN
         v_start_pt, v_end_pt, p_safe_altitude,
         v_path_line, v_final_path,
         v_waypoints, v_smooth_waypoints,
-        ST_3DLength(v_path_line), p_height_mode
+        gis_linestring_length_m(v_final_path), p_height_mode
     ) RETURNING id INTO v_path_id;
 
     -- 返回兜底航线

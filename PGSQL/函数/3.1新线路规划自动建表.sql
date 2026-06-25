@@ -103,15 +103,15 @@ CREATE TABLE gis_flight_paths (
     end_point geometry(PointZ,4326),            -- 航线终点3D几何，包含经纬度+飞行高度
     safe_altitude double precision,             -- 规划安全飞行高度，单位：米
     path_line geometry(LineStringZ,4326),       -- 原始规划3D路径线（A*算法输出）
-    smooth_path_line geometry(LineStringZ,4326),-- 平滑处理后3D路径线（实际飞行）
+    smooth_path_line geometry(LineStringZ,4326),-- 处理后3D路径线（实际飞行）
     waypoints jsonb,                            -- 原始规划航点JSON数组
-    smooth_waypoints jsonb,                     -- 平滑处理航点JSON数组
-    total_distance double precision,            -- 航线总长度，单位：米
+    smooth_waypoints jsonb,                     -- 处理航点JSON数组
+    total_distance double precision,            -- 处理后航线总长度，单位：米
     smooth_ratio double precision DEFAULT 0     -- 高度平滑比例：0=直升直降，0~1=比例爬升
 );
 
 -- ===================== 表 & 字段注释 =====================
-COMMENT ON TABLE gis_flight_paths IS '无人机3D规划飞行路径记录表：存储路径规划结果与历史轨迹';
+COMMENT ON TABLE gis_flight_paths IS '无人机3D规划飞行路径记录表';
 COMMENT ON COLUMN gis_flight_paths.id IS '自增主键ID';
 COMMENT ON COLUMN gis_flight_paths.project_id IS '项目ID';
 COMMENT ON COLUMN gis_flight_paths.create_user IS '创建者';
@@ -123,10 +123,10 @@ COMMENT ON COLUMN gis_flight_paths.start_point IS '航线起点3D空间坐标（
 COMMENT ON COLUMN gis_flight_paths.end_point IS '航线终点3D空间坐标（经纬度+高度）';
 COMMENT ON COLUMN gis_flight_paths.safe_altitude IS '规划安全飞行高度，单位：米';
 COMMENT ON COLUMN gis_flight_paths.path_line IS '原始规划3D路径线几何';
-COMMENT ON COLUMN gis_flight_paths.smooth_path_line IS '平滑优化后3D路径线几何';
+COMMENT ON COLUMN gis_flight_paths.smooth_path_line IS '处理后3D路径线几何';
 COMMENT ON COLUMN gis_flight_paths.waypoints IS '原始规划航点JSON数组';
-COMMENT ON COLUMN gis_flight_paths.smooth_waypoints IS '平滑处理航点JSON数组';
-COMMENT ON COLUMN gis_flight_paths.total_distance IS '航线总长度，单位：米';
+COMMENT ON COLUMN gis_flight_paths.smooth_waypoints IS '处理后航点JSON数组';
+COMMENT ON COLUMN gis_flight_paths.total_distance IS '处理后航线总长度，单位：米';
 COMMENT ON COLUMN gis_flight_paths.smooth_ratio IS '高度平滑比例：0=直升-平飞-直降，0<ratio<1=爬升-平飞-降落';
 
 -- ===================== 业务索引（高频查询） =====================
