@@ -743,6 +743,244 @@ END;
 $$ LANGUAGE plpgsql;
 
 
+-- =============================================================================
+-- gis_flight_paths_plan
+-- 支持起终点或多点规划。输入点超过 5km 的相邻段会按 5km 自动拆分后逐段规划，
+-- 最后拼接为一条总航线写入 gis_flight_paths。
+--
+-- p_points 支持两种格式：
+--   [{"lon":113.1,"lat":34.1,"alt":50},{"lon":113.2,"lat":34.2,"alt":50}]
+--   [[113.1,34.1,50],[113.2,34.2,50]]
+-- =============================================================================
+DROP FUNCTION IF EXISTS gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR);
+
+CREATE OR REPLACE FUNCTION gis_flight_paths_plan(
+    p_points         JSONB,
+    p_safe_altitude  DOUBLE PRECISION DEFAULT 120,
+    p_force_gen      BOOLEAN DEFAULT FALSE,
+    p_project_id     VARCHAR DEFAULT NULL,
+    p_create_user    VARCHAR DEFAULT NULL
+) RETURNS SETOF gis_flight_paths AS $$
+DECLARE
+    v_input_count INT;
+    v_direct_m DOUBLE PRECISION;
+    v_segment_m DOUBLE PRECISION;
+    v_segment_count INT;
+    v_input_idx INT;
+    v_segment_idx INT;
+    v_ratio1 DOUBLE PRECISION;
+    v_ratio2 DOUBLE PRECISION;
+
+    v_lon1 DOUBLE PRECISION;
+    v_lat1 DOUBLE PRECISION;
+    v_alt1 DOUBLE PRECISION;
+    v_lon2 DOUBLE PRECISION;
+    v_lat2 DOUBLE PRECISION;
+    v_alt2 DOUBLE PRECISION;
+
+    v_seg_start_lon DOUBLE PRECISION;
+    v_seg_start_lat DOUBLE PRECISION;
+    v_seg_start_alt DOUBLE PRECISION;
+    v_seg_end_lon DOUBLE PRECISION;
+    v_seg_end_lat DOUBLE PRECISION;
+    v_seg_end_alt DOUBLE PRECISION;
+
+    v_part gis_flight_paths%ROWTYPE;
+    v_part_ids INT[] := '{}'::INT[];
+    v_path_id INT;
+
+    v_start_pt geometry(PointZ,4326);
+    v_end_pt geometry(PointZ,4326);
+    v_merged_path_line geometry(LineStringZ,4326) := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
+    v_merged_smooth_line geometry(LineStringZ,4326) := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
+    v_waypoints JSONB;
+    v_smooth_waypoints JSONB;
+
+    v_point_idx INT;
+    v_point_count INT;
+    v_append_start INT;
+BEGIN
+    IF p_points IS NULL OR jsonb_typeof(p_points) <> 'array' THEN
+        RAISE EXCEPTION 'p_points 必须是 JSONB 数组';
+    END IF;
+
+    DROP TABLE IF EXISTS tmp_flight_plan_input_points;
+    CREATE TEMP TABLE tmp_flight_plan_input_points ON COMMIT DROP AS
+    SELECT
+        ord::INT AS seq,
+        (
+            CASE
+                WHEN jsonb_typeof(elem) = 'array' THEN elem->>0
+                ELSE elem->>'lon'
+            END
+        )::DOUBLE PRECISION AS lon,
+        (
+            CASE
+                WHEN jsonb_typeof(elem) = 'array' THEN elem->>1
+                ELSE elem->>'lat'
+            END
+        )::DOUBLE PRECISION AS lat,
+        COALESCE(
+            NULLIF(
+                CASE
+                    WHEN jsonb_typeof(elem) = 'array' THEN elem->>2
+                    ELSE elem->>'alt'
+                END,
+                ''
+            )::DOUBLE PRECISION,
+            p_safe_altitude
+        ) AS alt
+    FROM jsonb_array_elements(p_points) WITH ORDINALITY AS t(elem, ord);
+
+    SELECT COUNT(*) INTO v_input_count FROM tmp_flight_plan_input_points;
+    IF v_input_count < 2 THEN
+        RAISE EXCEPTION 'p_points 至少需要包含 2 个坐标点';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM tmp_flight_plan_input_points
+        WHERE lon IS NULL OR lat IS NULL OR alt IS NULL
+    ) THEN
+        RAISE EXCEPTION 'p_points 中存在无效坐标点，必须包含 lon/lat/alt 或 [lon,lat,alt]';
+    END IF;
+
+    SELECT ST_SetSRID(ST_MakePoint(lon, lat, alt), 4326)
+    INTO v_start_pt
+    FROM tmp_flight_plan_input_points
+    WHERE seq = 1;
+
+    SELECT ST_SetSRID(ST_MakePoint(lon, lat, alt), 4326)
+    INTO v_end_pt
+    FROM tmp_flight_plan_input_points
+    WHERE seq = v_input_count;
+
+    -- 只有起终点且不超过 5km 时，直接复用核心规划函数。
+    IF v_input_count = 2 THEN
+        SELECT lon, lat, alt INTO v_lon1, v_lat1, v_alt1
+        FROM tmp_flight_plan_input_points WHERE seq = 1;
+        SELECT lon, lat, alt INTO v_lon2, v_lat2, v_alt2
+        FROM tmp_flight_plan_input_points WHERE seq = 2;
+
+        v_direct_m := SQRT(
+            POWER((v_lon2 - v_lon1) * 111000.0 * COS(RADIANS((v_lat1 + v_lat2) / 2.0)), 2)
+            + POWER((v_lat2 - v_lat1) * 111000.0, 2)
+        );
+
+        IF v_direct_m <= 5000 THEN
+            RETURN QUERY
+            SELECT *
+            FROM gis_astar_3d_flight_plan(
+                v_lon1, v_lat1, v_alt1,
+                v_lon2, v_lat2, v_alt2,
+                p_safe_altitude,
+                0,
+                p_force_gen,
+                p_project_id,
+                p_create_user
+            );
+            RETURN;
+        END IF;
+    END IF;
+
+    -- 多点或长距离：相邻输入点逐段处理，单段超过 5km 则继续拆成若干小段。
+    FOR v_input_idx IN 1..v_input_count - 1 LOOP
+        SELECT lon, lat, alt INTO v_lon1, v_lat1, v_alt1
+        FROM tmp_flight_plan_input_points WHERE seq = v_input_idx;
+
+        SELECT lon, lat, alt INTO v_lon2, v_lat2, v_alt2
+        FROM tmp_flight_plan_input_points WHERE seq = v_input_idx + 1;
+
+        v_segment_m := SQRT(
+            POWER((v_lon2 - v_lon1) * 111000.0 * COS(RADIANS((v_lat1 + v_lat2) / 2.0)), 2)
+            + POWER((v_lat2 - v_lat1) * 111000.0, 2)
+        );
+        v_segment_count := GREATEST(1, CEIL(v_segment_m / 5000.0)::INT);
+
+        FOR v_segment_idx IN 1..v_segment_count LOOP
+            v_ratio1 := (v_segment_idx - 1)::DOUBLE PRECISION / v_segment_count;
+            v_ratio2 := v_segment_idx::DOUBLE PRECISION / v_segment_count;
+
+            v_seg_start_lon := v_lon1 + (v_lon2 - v_lon1) * v_ratio1;
+            v_seg_start_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio1;
+            v_seg_end_lon := v_lon1 + (v_lon2 - v_lon1) * v_ratio2;
+            v_seg_end_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio2;
+
+            v_seg_start_alt := CASE WHEN v_segment_idx = 1 THEN v_alt1 ELSE p_safe_altitude END;
+            v_seg_end_alt := CASE WHEN v_segment_idx = v_segment_count THEN v_alt2 ELSE p_safe_altitude END;
+
+            SELECT * INTO v_part
+            FROM gis_astar_3d_flight_plan(
+                v_seg_start_lon, v_seg_start_lat, v_seg_start_alt,
+                v_seg_end_lon, v_seg_end_lat, v_seg_end_alt,
+                p_safe_altitude,
+                0,
+                TRUE,
+                p_project_id,
+                p_create_user
+            )
+            LIMIT 1;
+
+            IF v_part.id IS NULL THEN
+                RAISE EXCEPTION '分段路径规划失败：input_seq=%, segment=%', v_input_idx, v_segment_idx;
+            END IF;
+
+            v_part_ids := array_append(v_part_ids, v_part.id);
+
+            v_point_count := ST_NumPoints(v_part.path_line);
+            v_append_start := CASE WHEN ST_NumPoints(v_merged_path_line) = 0 THEN 1 ELSE 2 END;
+            FOR v_point_idx IN v_append_start..v_point_count LOOP
+                v_merged_path_line := ST_AddPoint(v_merged_path_line, ST_PointN(v_part.path_line, v_point_idx));
+            END LOOP;
+
+            v_point_count := ST_NumPoints(v_part.smooth_path_line);
+            v_append_start := CASE WHEN ST_NumPoints(v_merged_smooth_line) = 0 THEN 1 ELSE 2 END;
+            FOR v_point_idx IN v_append_start..v_point_count LOOP
+                v_merged_smooth_line := ST_AddPoint(v_merged_smooth_line, ST_PointN(v_part.smooth_path_line, v_point_idx));
+            END LOOP;
+        END LOOP;
+    END LOOP;
+
+    SELECT jsonb_agg(
+        jsonb_build_object('lon', ST_X((dp).geom), 'lat', ST_Y((dp).geom), 'alt', ST_Z((dp).geom))
+        ORDER BY (dp).path[1]
+    )
+    INTO v_waypoints
+    FROM ST_DumpPoints(v_merged_path_line) AS dp;
+
+    SELECT jsonb_agg(
+        jsonb_build_object('lon', ST_X((dp).geom), 'lat', ST_Y((dp).geom), 'alt', ST_Z((dp).geom))
+        ORDER BY (dp).path[1]
+    )
+    INTO v_smooth_waypoints
+    FROM ST_DumpPoints(v_merged_smooth_line) AS dp;
+
+    INSERT INTO gis_flight_paths (
+        project_id, create_user, update_user,
+        start_point, end_point, safe_altitude,
+        path_line, smooth_path_line,
+        waypoints, smooth_waypoints, total_distance, smooth_ratio
+    ) VALUES (
+        p_project_id, p_create_user, p_create_user,
+        v_start_pt, v_end_pt, p_safe_altitude,
+        v_merged_path_line, v_merged_smooth_line,
+        v_waypoints, v_smooth_waypoints,
+        gis_linestring_length_m(v_merged_smooth_line),
+        0
+    ) RETURNING id INTO v_path_id;
+
+    -- 子分段结果只作为计算过程数据，拼接成功后逻辑删除，避免污染业务航线列表。
+    UPDATE gis_flight_paths
+    SET del_flag = true,
+        update_user = p_create_user,
+        update_time = NOW()
+    WHERE id = ANY(v_part_ids);
+
+    RETURN QUERY SELECT * FROM gis_flight_paths WHERE id = v_path_id;
+END;
+$$ LANGUAGE plpgsql;
+
+
 
 SELECT * FROM gis_astar_3d_flight_plan(
     113.64040905110176, 34.744365280882896, 50,
@@ -762,6 +1000,7 @@ SELECT gis_astar_3d_flight_plan (
     );
 
 
+ 
 -- ==================================================================================== gis_generate_smooth_flight_path  Demo测试====================================================================================
 -- ===================== 删除可能存在的同名函数（保证幂等性） =====================
 
