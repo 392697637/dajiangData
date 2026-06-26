@@ -98,8 +98,9 @@ $$;
  * ======================================================================================
  *
  * 【返回值】
- * 返回 gis_flight_paths 表的多行记录（SETOF），实际调用时通常只有一行，
- * 包含原始路径、平滑路径、航点JSON、3D距离等业务字段。
+ * code        integer     返回码：200成功，400参数错误，500执行异常
+ * msg         text        执行结果描述，包含执行时间
+ * 其余字段为 gis_flight_paths 表字段，实际调用时通常只有一行。
  */
 CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan(
     p_start_lon        DOUBLE PRECISION,
@@ -113,8 +114,30 @@ CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan(
     p_force_gen        BOOLEAN DEFAULT FALSE,
     p_project_id       VARCHAR DEFAULT NULL,
     p_create_user      VARCHAR DEFAULT NULL
-) RETURNS SETOF gis_flight_paths AS $$
+) RETURNS TABLE (
+    code integer,
+    msg text,
+    id integer,
+    project_id char(32),
+    create_user varchar(32),
+    create_time timestamp,
+    update_user varchar(32),
+    update_time timestamp,
+    del_flag boolean,
+    start_point geometry(PointZ,4326),
+    end_point geometry(PointZ,4326),
+    safe_altitude double precision,
+    path_line geometry(LineStringZ,4326),
+    smooth_path_line geometry(LineStringZ,4326),
+    waypoints jsonb,
+    smooth_waypoints jsonb,
+    total_distance double precision,
+    smooth_ratio double precision
+) AS $$
 DECLARE
+    v_start_time    timestamptz := clock_timestamp();
+    v_return_msg    TEXT;
+
     -- ====================== 几何相关变量 ======================
     -- 3D起点几何对象（PointZ，WGS84坐标系SRID=4326）
     v_start_pt      geometry(PointZ,4326);
@@ -178,6 +201,32 @@ DECLARE
     -- ====================== 边检查辅助变量 ======================
     v_edge_line     geometry(LineStringZ,4326);   -- 节点间的线段几何
 BEGIN
+    -- ====================== 0. 基础参数校验 ======================
+    IF p_start_lon IS NULL OR p_start_lat IS NULL OR p_start_alt IS NULL
+       OR p_end_lon IS NULL OR p_end_lat IS NULL OR p_end_alt IS NULL THEN
+        code := 400;
+        msg := format('参数错误：起点/终点经纬度和高度不能为空，执行时间 %s 秒',
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
+
+    IF p_safe_altitude IS NULL OR p_safe_altitude <= 0 THEN
+        code := 400;
+        msg := format('参数错误：安全高度必须大于0，执行时间 %s 秒',
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
+
+    IF p_height_mode IS NULL OR p_height_mode < 0 OR p_height_mode >= 1 THEN
+        code := 400;
+        msg := format('参数错误：高度平滑模式必须满足 0 <= p_height_mode < 1，执行时间 %s 秒',
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
+
     -- ====================== 1. 构建3D起点和终点几何对象 ======================
     -- 将输入的经纬度+高度构造成PostGIS 3D点，并指定WGS84坐标系（SRID 4326）
     v_start_pt := ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_start_alt), 4326);
@@ -187,19 +236,21 @@ BEGIN
     -- 未开启强制重算 → 尝试查询完全相同条件的历史航线（避免重复计算）
     IF NOT p_force_gen THEN
         -- 查询条件：未删除 + 同项目 + 同安全高度 + 同平滑模式 + 起止点空间相等
-        SELECT * INTO v_old_path
-        FROM gis_flight_paths
-        WHERE del_flag = false
-          AND project_id IS NOT DISTINCT FROM p_project_id
-          AND safe_altitude = p_safe_altitude
-          AND smooth_ratio = p_height_mode
-          AND ST_Equals(start_point, v_start_pt)
-          AND ST_Equals(end_point, v_end_pt)
+        SELECT fp.* INTO v_old_path
+        FROM gis_flight_paths fp
+        WHERE fp.del_flag = false
+          AND fp.project_id IS NOT DISTINCT FROM p_project_id
+          AND fp.safe_altitude = p_safe_altitude
+          AND fp.smooth_ratio = p_height_mode
+          AND ST_Equals(fp.start_point, v_start_pt)
+          AND ST_Equals(fp.end_point, v_end_pt)
         LIMIT 1;-- 只取一条（通常最多一条）
 
         -- 找到历史航线 → 直接返回并结束函数，极大提升性能
         IF v_old_path IS NOT NULL THEN
-            RETURN NEXT v_old_path;
+            v_return_msg := format('规划成功：复用历史航线，执行时间 %s 秒',
+                                   ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+            RETURN QUERY SELECT 200, v_return_msg, (v_old_path).*;
             RETURN;
         END IF;
     END IF;
@@ -295,10 +346,12 @@ BEGIN
             v_smooth_waypoints,
             gis_linestring_length_m(v_final_path),    -- 计算 smooth_path_line 的米制三维长度
             p_height_mode
-        ) RETURNING id INTO v_path_id;    -- 获取插入后的自增主键
+        ) RETURNING gis_flight_paths.id INTO v_path_id;    -- 获取插入后的自增主键
 
-        -- 返回新生成的航线记录（SETOF 形式）
-        RETURN QUERY SELECT * FROM gis_flight_paths WHERE id = v_path_id;
+        -- 返回新生成的航线记录
+        v_return_msg := format('规划成功：未满足A*条件，已生成直线兜底航线，执行时间 %s 秒',
+                               ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT 200, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
         RETURN; -- 提前结束函数
     END IF;
  -- ====================== 分支2：满足A*条件 → 执行三维路径规划 ======================
@@ -345,17 +398,17 @@ BEGIN
     ', v_grid_table, v_min_x, v_max_x, v_min_y, v_max_y);
 
     -- 在临时表中重新匹配最近的起点/终点网格（确保在搜索范围内）
-    SELECT id INTO v_start_id FROM tmp_grid ORDER BY geom <-> v_start_pt LIMIT 1;
-    SELECT id INTO v_goal_id  FROM tmp_grid ORDER BY geom <-> v_end_pt LIMIT 1;
+    SELECT g.id INTO v_start_id FROM tmp_grid g ORDER BY g.geom <-> v_start_pt LIMIT 1;
+    SELECT g.id INTO v_goal_id  FROM tmp_grid g ORDER BY g.geom <-> v_end_pt LIMIT 1;
 
     -- 初始化起点代价：g_cost = 0（起点到自身代价为0）
     -- h_cost = 起点到终点的3D直线距离（启发函数）
     -- f_cost = g_cost + h_cost
-    UPDATE tmp_grid
+    UPDATE tmp_grid g
     SET g_cost = 0,
-        h_cost = ST_3DDistance(geom, v_end_pt),
+        h_cost = ST_3DDistance(g.geom, v_end_pt),
         f_cost = g_cost + h_cost
-    WHERE id = v_start_id;
+    WHERE g.id = v_start_id;
 
     -- ====================== A* 算法核心循环 ======================
     DECLARE
@@ -385,11 +438,11 @@ BEGIN
         -- 只要开放列表不为空，就继续搜索
         WHILE array_length(v_open, 1) > 0 LOOP
             -- 从开放列表中取出 f_cost 最小的节点作为当前节点
-            SELECT id, x, y, z, geom, g_cost
+            SELECT g.id, g.x, g.y, g.z, g.geom, g.g_cost
             INTO v_curr, v_curr_x, v_curr_y, v_curr_z, v_curr_geom, v_curr_g
-            FROM tmp_grid
-            WHERE id = ANY(v_open)
-            ORDER BY f_cost LIMIT 1;
+            FROM tmp_grid g
+            WHERE g.id = ANY(v_open)
+            ORDER BY g.f_cost LIMIT 1;
 
             -- 如果当前节点就是目标节点，则成功找到路径，退出循环
             IF v_curr = v_goal_id THEN EXIT; END IF;
@@ -400,14 +453,14 @@ BEGIN
 
            -- 遍历当前节点在三维空间中的26个邻域节点（3x3x3范围，排除自身）
             FOR v_nid, v_n_geom, v_n_g, v_n_walk IN
-                SELECT id, geom, g_cost, is_walkable
-                FROM tmp_grid
-                    WHERE ABS(x - v_curr_x) <= 1      -- X方向相邻（经度）
-                  AND ABS(y - v_curr_y) <= 1      -- Y方向相邻（纬度）
-                  AND ABS(z - v_curr_z) <= 1      -- Z方向相邻（高度层）
-                  AND id <> v_curr                -- 排除当前节点自身
-                  AND is_walkable = TRUE          -- 只考虑可通行的网格
-                  AND id <> ALL(v_closed)         -- 排除已经处理过的节点
+                SELECT g.id, g.geom, g.g_cost, g.is_walkable
+                FROM tmp_grid g
+                    WHERE ABS(g.x - v_curr_x) <= 1      -- X方向相邻（经度）
+                  AND ABS(g.y - v_curr_y) <= 1      -- Y方向相邻（纬度）
+                  AND ABS(g.z - v_curr_z) <= 1      -- Z方向相邻（高度层）
+                  AND g.id <> v_curr                -- 排除当前节点自身
+                  AND g.is_walkable = TRUE          -- 只考虑可通行的网格
+                  AND g.id <> ALL(v_closed)         -- 排除已经处理过的节点
             LOOP
                 -- 计算通过当前节点到达邻居节点的新g代价 = 当前g代价 + 当前节点到邻居的3D距离
                 new_g := v_curr_g + ST_3DDistance(v_n_geom, v_curr_geom);
@@ -418,11 +471,11 @@ BEGIN
                 -- 检查线段是否与任何启用的禁飞区相交（二维/三维相交）
                 -- 注意：若禁飞区 geom 为三维体，建议使用 ST_3DIntersects；为二维多边形则使用 ST_Intersects
                 IF EXISTS(
-                    SELECT 1 FROM public.bo_electric_fence
-                    WHERE fence_type IN ('1', '2')   -- 禁飞区+管控区
-                      AND status = '1'
-                      AND del_flag = false
-                      AND ST_Intersects(ST_SetSRID(geom, 4326), v_edge_line)   -- 若需三维精确判断，改为 ST_3DIntersects
+                    SELECT 1 FROM public.bo_electric_fence f
+                    WHERE f.fence_type IN ('1', '2')   -- 禁飞区+管控区
+                      AND f.status = '1'
+                      AND f.del_flag = false
+                      AND ST_Intersects(ST_SetSRID(f.geom, 4326), v_edge_line)   -- 若需三维精确判断，改为 ST_3DIntersects
                 ) THEN
                     CONTINUE;   -- 该边穿越禁飞区，不可通行，跳过此邻居
                 END IF;
@@ -430,12 +483,12 @@ BEGIN
 
                 -- 如果邻居节点不在开放列表中，或者新路径的g代价更小，则更新邻居的代价和父节点
                 IF v_nid <> ALL(v_open) OR new_g < v_n_g THEN
-                    UPDATE tmp_grid
+                    UPDATE tmp_grid g
                     SET g_cost = new_g,
                         h_cost = ST_3DDistance(v_n_geom, v_end_pt),
                         f_cost = new_g + ST_3DDistance(v_n_geom, v_end_pt),
                         parent_id = v_curr
-                    WHERE id = v_nid;
+                    WHERE g.id = v_nid;
 
                     -- 如果邻居节点不在开放列表中，则将其加入开放列表
                     IF v_nid <> ALL(v_open) THEN
@@ -452,7 +505,7 @@ BEGIN
             -- 将节点ID插入数组头部（保证路径从起点到终点的顺序）
             v_path_ids := array_prepend(v_current_id, v_path_ids);
             -- 获取当前节点的父节点ID
-            SELECT parent_id INTO v_current_id FROM tmp_grid WHERE id = v_current_id;
+            SELECT g.parent_id INTO v_current_id FROM tmp_grid g WHERE g.id = v_current_id;
         END LOOP;
         -- 移除首尾虚拟节点（起点ID=-1，终点ID=-2），只保留中间的网格路径节点
         IF array_length(v_path_ids, 1) >= 2 THEN
@@ -469,9 +522,9 @@ BEGIN
             RAISE NOTICE '【A*路径坐标】';
             IF COALESCE(array_length(v_path_ids, 1), 0) > 0 THEN
                 FOR v_node_idx IN 1..array_length(v_path_ids, 1) LOOP
-                    SELECT ST_X(geom), ST_Y(geom), ST_Z(geom)
+                    SELECT ST_X(g.geom), ST_Y(g.geom), ST_Z(g.geom)
                     INTO v_node_lon, v_node_lat, v_node_alt
-                    FROM tmp_grid WHERE id = v_path_ids[v_node_idx];
+                    FROM tmp_grid g WHERE g.id = v_path_ids[v_node_idx];
                     RAISE NOTICE '节点%: (经度=%, 纬度=%, 高度=%)',
                         v_node_idx, v_node_lon, v_node_lat, v_node_alt;
                 END LOOP;
@@ -505,9 +558,11 @@ BEGIN
             v_path_line, v_final_path,
             v_waypoints, v_smooth_waypoints,
             gis_linestring_length_m(v_final_path), p_height_mode
-        ) RETURNING id INTO v_path_id;
+        ) RETURNING gis_flight_paths.id INTO v_path_id;
 
-        RETURN QUERY SELECT * FROM gis_flight_paths WHERE id = v_path_id;
+        v_return_msg := format('规划成功：A*未找到有效路径，已生成直线兜底航线，执行时间 %s 秒',
+                               ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT 200, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
         RETURN;
     END IF;
 
@@ -528,8 +583,8 @@ BEGIN
     FOR i IN 1..array_length(v_path_ids, 1) LOOP
         v_path_line := ST_AddPoint(v_path_line,
             ST_SetSRID(ST_MakePoint(
-                ST_X((SELECT geom FROM tmp_grid WHERE id = v_path_ids[i])),
-                ST_Y((SELECT geom FROM tmp_grid WHERE id = v_path_ids[i])),
+                ST_X((SELECT g.geom FROM tmp_grid g WHERE g.id = v_path_ids[i])),
+                ST_Y((SELECT g.geom FROM tmp_grid g WHERE g.id = v_path_ids[i])),
                 p_safe_altitude), 4326)
         );
     END LOOP;
@@ -701,12 +756,14 @@ BEGIN
         v_waypoints, v_smooth_waypoints,
         gis_linestring_length_m(v_final_path),  -- 计算 smooth_path_line 的米制三维长度
         p_height_mode
-    ) RETURNING id INTO v_path_id;
+    ) RETURNING gis_flight_paths.id INTO v_path_id;
      -- 删除临时表，释放资源
     DROP TABLE IF EXISTS tmp_grid;
 
     -- 返回最终生成的航线记录
-    RETURN QUERY SELECT * FROM gis_flight_paths WHERE id = v_path_id;
+    v_return_msg := format('规划成功：A*路径规划完成，执行时间 %s 秒',
+                           ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    RETURN QUERY SELECT 200, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
 
 -- ====================== 全局异常捕获：任何错误都返回直线航线（保证服务不崩溃） ======================
 EXCEPTION WHEN OTHERS THEN
@@ -734,10 +791,13 @@ EXCEPTION WHEN OTHERS THEN
         v_path_line, v_final_path,
         v_waypoints, v_smooth_waypoints,
         gis_linestring_length_m(v_final_path), p_height_mode
-    ) RETURNING id INTO v_path_id;
+    ) RETURNING gis_flight_paths.id INTO v_path_id;
 
     -- 返回兜底航线
-    RETURN QUERY SELECT * FROM gis_flight_paths WHERE id = v_path_id;
+    v_return_msg := format('执行异常：%s，已返回直线兜底航线，执行时间 %s 秒',
+                           SQLERRM,
+                           ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    RETURN QUERY SELECT 500, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -759,8 +819,30 @@ CREATE OR REPLACE FUNCTION gis_flight_paths_plan(
     p_force_gen      BOOLEAN DEFAULT FALSE,
     p_project_id     VARCHAR DEFAULT NULL,
     p_create_user    VARCHAR DEFAULT NULL
-) RETURNS SETOF gis_flight_paths AS $$
+) RETURNS TABLE (
+    code integer,
+    msg text,
+    id integer,
+    project_id char(32),
+    create_user varchar(32),
+    create_time timestamp,
+    update_user varchar(32),
+    update_time timestamp,
+    del_flag boolean,
+    start_point geometry(PointZ,4326),
+    end_point geometry(PointZ,4326),
+    safe_altitude double precision,
+    path_line geometry(LineStringZ,4326),
+    smooth_path_line geometry(LineStringZ,4326),
+    waypoints jsonb,
+    smooth_waypoints jsonb,
+    total_distance double precision,
+    smooth_ratio double precision
+) AS $$
 DECLARE
+    v_start_time timestamptz := clock_timestamp();
+    v_return_msg TEXT;
+
     v_input_count INT;
     v_direct_m DOUBLE PRECISION;
     v_segment_m DOUBLE PRECISION;
@@ -800,7 +882,19 @@ DECLARE
     v_append_start INT;
 BEGIN
     IF p_points IS NULL OR jsonb_typeof(p_points) <> 'array' THEN
-        RAISE EXCEPTION 'p_points 必须是 JSONB 数组';
+        code := 400;
+        msg := format('参数错误：p_points 必须是 JSONB 数组，执行时间 %s 秒',
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
+
+    IF p_safe_altitude IS NULL OR p_safe_altitude <= 0 THEN
+        code := 400;
+        msg := format('参数错误：安全高度必须大于0，执行时间 %s 秒',
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
     END IF;
 
     DROP TABLE IF EXISTS tmp_flight_plan_input_points;
@@ -833,7 +927,11 @@ BEGIN
 
     SELECT COUNT(*) INTO v_input_count FROM tmp_flight_plan_input_points;
     IF v_input_count < 2 THEN
-        RAISE EXCEPTION 'p_points 至少需要包含 2 个坐标点';
+        code := 400;
+        msg := format('参数错误：p_points 至少需要包含 2 个坐标点，执行时间 %s 秒',
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
     END IF;
 
     IF EXISTS (
@@ -841,7 +939,11 @@ BEGIN
         FROM tmp_flight_plan_input_points
         WHERE lon IS NULL OR lat IS NULL OR alt IS NULL
     ) THEN
-        RAISE EXCEPTION 'p_points 中存在无效坐标点，必须包含 lon/lat/alt 或 [lon,lat,alt]';
+        code := 400;
+        msg := format('参数错误：p_points 中存在无效坐标点，必须包含 lon/lat/alt 或 [lon,lat,alt]，执行时间 %s 秒',
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
     END IF;
 
     SELECT ST_SetSRID(ST_MakePoint(lon, lat, alt), 4326)
@@ -908,7 +1010,14 @@ BEGIN
             v_seg_start_alt := CASE WHEN v_segment_idx = 1 THEN v_alt1 ELSE p_safe_altitude END;
             v_seg_end_alt := CASE WHEN v_segment_idx = v_segment_count THEN v_alt2 ELSE p_safe_altitude END;
 
-            SELECT * INTO v_part
+            SELECT
+                r.id, r.project_id, r.create_user, r.create_time,
+                r.update_user, r.update_time, r.del_flag,
+                r.start_point, r.end_point, r.safe_altitude,
+                r.path_line, r.smooth_path_line,
+                r.waypoints, r.smooth_waypoints,
+                r.total_distance, r.smooth_ratio
+            INTO v_part
             FROM gis_astar_3d_flight_plan(
                 v_seg_start_lon, v_seg_start_lat, v_seg_start_alt,
                 v_seg_end_lon, v_seg_end_lat, v_seg_end_alt,
@@ -917,7 +1026,7 @@ BEGIN
                 TRUE,
                 p_project_id,
                 p_create_user
-            )
+            ) r
             LIMIT 1;
 
             IF v_part.id IS NULL THEN
@@ -966,16 +1075,26 @@ BEGIN
         v_waypoints, v_smooth_waypoints,
         gis_linestring_length_m(v_merged_smooth_line),
         0
-    ) RETURNING id INTO v_path_id;
+    ) RETURNING gis_flight_paths.id INTO v_path_id;
 
     -- 子分段结果只作为计算过程数据，拼接成功后逻辑删除，避免污染业务航线列表。
-    UPDATE gis_flight_paths
+    UPDATE gis_flight_paths fp
     SET del_flag = true,
         update_user = p_create_user,
         update_time = NOW()
-    WHERE id = ANY(v_part_ids);
+    WHERE fp.id = ANY(v_part_ids);
 
-    RETURN QUERY SELECT * FROM gis_flight_paths WHERE id = v_path_id;
+    v_return_msg := format('规划成功：多点/长距离分段规划完成，共生成 %s 个分段，执行时间 %s 秒',
+                           COALESCE(array_length(v_part_ids, 1), 0),
+                           ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    RETURN QUERY SELECT 200, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
+
+EXCEPTION WHEN OTHERS THEN
+    code := 500;
+    msg := format('执行异常：%s，执行时间 %s 秒',
+                  SQLERRM,
+                  ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1056,10 +1175,49 @@ CREATE OR REPLACE FUNCTION gis_generate_smooth_flight_path(
 DECLARE
     v_result_record gis_flight_paths%ROWTYPE;  -- 存储核心函数返回的航线记录
     v_result_json   JSONB;                     -- 最终返回的JSON结果
+    v_result_code   integer;
+    v_result_msg    text;
 BEGIN
     -- 调用核心三维路径规划函数（类型转换：numeric → double precision）
-    -- 注意：gis_astar_3d_flight_plan 返回 SETOF gis_flight_paths，这里只取第一条记录
-    SELECT * INTO v_result_record
+    -- 注意：gis_astar_3d_flight_plan 返回 code/msg + gis_flight_paths 字段，这里只取第一条记录
+    SELECT
+        r.code,
+        r.msg,
+        r.id,
+        r.project_id,
+        r.create_user,
+        r.create_time,
+        r.update_user,
+        r.update_time,
+        r.del_flag,
+        r.start_point,
+        r.end_point,
+        r.safe_altitude,
+        r.path_line,
+        r.smooth_path_line,
+        r.waypoints,
+        r.smooth_waypoints,
+        r.total_distance,
+        r.smooth_ratio
+    INTO
+        v_result_code,
+        v_result_msg,
+        v_result_record.id,
+        v_result_record.project_id,
+        v_result_record.create_user,
+        v_result_record.create_time,
+        v_result_record.update_user,
+        v_result_record.update_time,
+        v_result_record.del_flag,
+        v_result_record.start_point,
+        v_result_record.end_point,
+        v_result_record.safe_altitude,
+        v_result_record.path_line,
+        v_result_record.smooth_path_line,
+        v_result_record.waypoints,
+        v_result_record.smooth_waypoints,
+        v_result_record.total_distance,
+        v_result_record.smooth_ratio
     FROM gis_astar_3d_flight_plan(
         p_start_lon::double precision,
         p_start_lat::double precision,
@@ -1072,14 +1230,15 @@ BEGIN
         p_force_gen,
         p_project_id,
         p_create_user
-    )
+    ) r
     LIMIT 1;  -- 确保只取一条记录（正常情况下只返回一行）
 
     -- 检查是否成功获取到航线记录
-    IF v_result_record.id IS NULL THEN
+    IF v_result_code IS DISTINCT FROM 200 OR v_result_record.id IS NULL THEN
         RETURN jsonb_build_object(
             'success', false,
-            'message', '路径规划失败：未返回有效航线记录',
+            'code', COALESCE(v_result_code, 500),
+            'message', COALESCE(v_result_msg, '路径规划失败：未返回有效航线记录'),
             'pathId', NULL
         );
     END IF;
@@ -1087,7 +1246,8 @@ BEGIN
     -- 构建详细的 JSON 返回对象，包含航线所有关键信息
     v_result_json := jsonb_build_object(
         'success', true,
-        'message', '路径规划成功',
+        'code', v_result_code,
+        'message', v_result_msg,
         'pathId', v_result_record.id,
         'totalDistance', ROUND(v_result_record.total_distance::numeric, 2),
         'safeAltitude', v_result_record.safe_altitude,
