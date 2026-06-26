@@ -936,7 +936,10 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION gis_mark_buildings(p_project_id VARCHAR)
+CREATE OR REPLACE FUNCTION gis_mark_buildings(
+    p_project_id VARCHAR,
+    p_building_buffer DOUBLE PRECISION DEFAULT 0
+)
 RETURNS TABLE (code integer, table_name text, msg text, count bigint)
 LANGUAGE plpgsql
 AS $$
@@ -949,6 +952,8 @@ DECLARE
     v_updated_rows BIGINT := 0;
     v_cleared_rows BIGINT := 0;
     v_idx_prefix TEXT;
+    v_building_idx_prefix TEXT;
+    v_extent box3d;
 BEGIN
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         code := 400;
@@ -963,6 +968,7 @@ BEGIN
     v_building_table := 'gis_buildings_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
     table_name := v_grid_table;
     v_idx_prefix := 'idx_' || substr(md5(v_grid_table), 1, 12);
+    v_building_idx_prefix := 'idx_' || substr(md5(v_building_table), 1, 12);
 
     SELECT to_regclass(format('%I.%I', current_schema(), v_grid_table)) INTO v_grid_reg;
     SELECT to_regclass(format('%I.%I', current_schema(), v_building_table)) INTO v_building_reg;
@@ -1001,48 +1007,92 @@ BEGIN
     );
 
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST (geom gist_geometry_ops_2d);',
-                   'idx_' || substr(md5(v_building_table), 1, 12) || '_geom',
+                   v_building_idx_prefix || '_geom',
                    v_building_table);
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (id);',
-                   'idx_' || substr(md5(v_building_table), 1, 12) || '_id',
+                   v_building_idx_prefix || '_id',
                    v_building_table);
+
+    DROP TABLE IF EXISTS tmp_mark_building;
+    EXECUTE format('
+        CREATE TEMP TABLE tmp_mark_building ON COMMIT DROP AS
+        SELECT
+            COALESCE(id::text, gid::text) AS building_id,
+            CASE WHEN COALESCE(height, 0) > 0 THEN height::double precision ELSE 5::double precision END AS max_height,
+            CASE
+                WHEN $1 > 0 THEN ST_Buffer(ST_SetSRID(ST_Force2D(geom), 4326)::geography, $1)::geometry(Geometry,4326)
+                ELSE ST_SetSRID(ST_Force2D(geom), 4326)::geometry(Geometry,4326)
+            END AS geom2d
+        FROM %I
+        WHERE geom IS NOT NULL
+    ', v_building_table)
+    USING GREATEST(COALESCE(p_building_buffer, 0), 0);
+
+    CREATE INDEX IF NOT EXISTS idx_tmp_mark_building_geom ON tmp_mark_building USING GIST (geom2d);
+    CREATE INDEX IF NOT EXISTS idx_tmp_mark_building_height ON tmp_mark_building (max_height);
+    ANALYZE tmp_mark_building;
+
+    SELECT ST_Extent(geom2d) INTO v_extent FROM tmp_mark_building;
+
+    IF v_extent IS NULL THEN
+        EXECUTE format('
+            UPDATE %I n
+            SET
+                block_mask = COALESCE(n.block_mask, 0) & ~2,
+                is_flyable = ((COALESCE(n.block_mask, 0) & ~2) = 0)
+            WHERE (COALESCE(n.block_mask, 0) & 2) <> 0
+        ', v_grid_table);
+        GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
+
+        count := v_cleared_rows;
+        code := 200;
+        msg := format('无有效建筑数据，已清空 %s 条建筑标记', v_cleared_rows);
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    DROP TABLE IF EXISTS tmp_mark_building_scope_xy;
+    EXECUTE format('
+        CREATE TEMP TABLE tmp_mark_building_scope_xy ON COMMIT DROP AS
+        SELECT DISTINCT x, y, %I AS geom2d
+        FROM %I
+        WHERE z = 0
+          AND %I && ST_MakeEnvelope($1, $2, $3, $4, 4326)
+    ', v_geom_col, v_grid_table, v_geom_col)
+    USING ST_XMin(v_extent), ST_YMin(v_extent), ST_XMax(v_extent), ST_YMax(v_extent);
+
+    CREATE INDEX IF NOT EXISTS idx_tmp_mark_building_scope_xy ON tmp_mark_building_scope_xy (x, y);
+    CREATE INDEX IF NOT EXISTS idx_tmp_mark_building_scope_geom ON tmp_mark_building_scope_xy USING GIST (geom2d);
+    ANALYZE tmp_mark_building_scope_xy;
+
+    DROP TABLE IF EXISTS tmp_mark_building_xy;
+    CREATE TEMP TABLE tmp_mark_building_xy ON COMMIT DROP AS
+    SELECT DISTINCT ON (n.x, n.y)
+        n.x,
+        n.y,
+        b.building_id,
+        b.max_height
+    FROM tmp_mark_building_scope_xy n
+    JOIN tmp_mark_building b
+      ON n.geom2d && b.geom2d
+     AND ST_Intersects(n.geom2d, b.geom2d)
+    ORDER BY n.x, n.y, b.max_height DESC, b.building_id;
+
+    CREATE INDEX IF NOT EXISTS idx_tmp_mark_building_xy ON tmp_mark_building_xy (x, y);
+    ANALYZE tmp_mark_building_xy;
 
     DROP TABLE IF EXISTS tmp_mark_building_hit;
     EXECUTE format('
         CREATE TEMP TABLE tmp_mark_building_hit ON COMMIT DROP AS
-        WITH buildings AS MATERIALIZED (
-            SELECT
-                COALESCE(id::text, gid::text) AS building_id,
-                CASE WHEN COALESCE(height, 0) > 0 THEN height::double precision ELSE 5::double precision END AS max_height,
-                ST_SetSRID(ST_Force2D(geom), 4326) AS geom2d
-            FROM %I
-            WHERE geom IS NOT NULL
-        ),
-        xy_match AS MATERIALIZED (
-            SELECT DISTINCT ON (n.x, n.y)
-                n.x,
-                n.y,
-                b.building_id,
-                b.max_height
-            FROM (
-                SELECT DISTINCT x, y, %I AS geom2d
-                FROM %I
-                WHERE z = 0
-            ) n
-            JOIN buildings b
-              ON n.geom2d && b.geom2d
-             AND ST_Intersects(n.geom2d, b.geom2d)
-            ORDER BY n.x, n.y, b.max_height DESC, b.building_id
-        )
         SELECT
             n.id,
             xy.building_id
         FROM %I n
-        JOIN xy_match xy
+        JOIN tmp_mark_building_xy xy
           ON n.x = xy.x
          AND n.y = xy.y
         WHERE n.alt <= xy.max_height
-    ', v_building_table, v_geom_col, v_grid_table, v_grid_table);
+    ', v_grid_table);
 
     CREATE INDEX IF NOT EXISTS idx_tmp_mark_building_hit_id ON tmp_mark_building_hit(id);
     ANALYZE tmp_mark_building_hit;
