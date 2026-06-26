@@ -13,128 +13,6 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 -- 提供拓扑结构分析、空间数据校验能力（可选增强扩展）
 CREATE EXTENSION IF NOT EXISTS postgis_topology;
 
-
--- -- ==================================================================================== 电子围栏信息表 bo_electric_fence ====================================================================================
--- -- 业务用途：存储无人机禁飞区、限飞区、电子围栏区域的空间与属性信息
--- -- 数据结构：支持2D面/多边形几何，WGS84经纬度坐标系
--- DROP TABLE IF EXISTS "public"."bo_electric_fence";
--- 
--- CREATE TABLE "public"."bo_electric_fence" (
---   "id" varchar(32) COLLATE "pg_catalog"."default" NOT NULL,  -- 主键ID，业务唯一标识，通常使用UUID
---   "create_time" timestamp(6) NOT NULL DEFAULT now(),         -- 记录创建时间，精确到毫秒，默认当前系统时间
---   "create_user" varchar(32) COLLATE "pg_catalog"."default",  -- 创建人ID，关联系统用户表
---   "del_flag" bool NOT NULL DEFAULT false,                    -- 逻辑删除标识：false=数据有效，true=已删除（软删除）
---   "remark" varchar(1000) COLLATE "pg_catalog"."default",    -- 备注说明，用于记录围栏额外描述信息
---   "update_time" timestamp(6) NOT NULL DEFAULT now(),         -- 记录最后更新时间，精确到毫秒，默认当前系统时间
---   "update_user" varchar(32) COLLATE "pg_catalog"."default",  -- 最后更新人ID，关联系统用户表
---   "project_id" varchar(32) COLLATE "pg_catalog"."default",   -- 所属项目ID，用于多项目隔离
---   "code" varchar(255) COLLATE "pg_catalog"."default",        -- 围栏编号，自定义编码规则，便于管理
---   "status" varchar(32) COLLATE "pg_catalog"."default",       -- 围栏状态：如启用/禁用/过期/维护中
---   "name" varchar(200) COLLATE "pg_catalog"."default",        -- 围栏名称，用于界面展示与快速检索
---   "type" varchar(32) COLLATE "pg_catalog"."default",         -- 围栏类型：如禁飞区、限高区、限飞区、警示区
---   "frequency" varchar(32) COLLATE "pg_catalog"."default",    -- 执行频率：用于定时生效类围栏（单次/每日/每周）
---   "area" varchar(255) COLLATE "pg_catalog"."default",        -- 围栏面积，单位：平方米，存储计算结果
---   "week" varchar(255) COLLATE "pg_catalog"."default",        -- 周设置：存储周几生效，格式如 1,3,5（周一三五）
---   "day" varchar(255) COLLATE "pg_catalog"."default",         -- 日设置：存储日期范围，用于按自然日控制生效
---   "start_time" varchar(32) COLLATE "pg_catalog"."default",   -- 生效开始时间，字符串格式，灵活适配业务时间规则
---   "end_time" varchar(32) COLLATE "pg_catalog"."default",     -- 生效结束时间，字符串格式
---   "draw_method" varchar(32) COLLATE "pg_catalog"."default", -- 绘制方式：如手动绘制、导入坐标、圆形绘制、矩形绘制
---   "height" float8,                                            -- 围栏限制高度，单位：米，无人机垂直方向限制
---   "fence_type" varchar(20) COLLATE "pg_catalog"."default",    -- 围栏分类：用于业务维度区分（如机场围栏、楼宇围栏）
---   "geom" geometry(GEOMETRY,4326),                             -- 空间几何字段，WGS84坐标系，支持点/线/面等任意几何类型
---   "time_plan" varchar(4000) COLLATE "pg_catalog"."default",   -- 时间计划配置，存储复杂时间策略JSON字符串
---   CONSTRAINT "bo_electric_fence_pkey" PRIMARY KEY ("id")      -- 主键约束，保证ID唯一性
--- );
--- 
--- -- ===================== 电子围栏表索引 =====================
--- -- 先删除旧索引，避免重复创建报错
--- DROP INDEX IF EXISTS "idx_bef_del_name";
--- DROP INDEX IF EXISTS "idx_bo_electric_fence_geom";
--- 
--- -- 普通B树索引：针对【删除标识+围栏名称】组合查询优化，提升列表查询速度
--- CREATE INDEX "idx_bef_del_name" ON "public"."bo_electric_fence" USING btree ("del_flag","name");
--- -- 空间GIST索引：针对空间几何字段geom优化，加速空间包含、相交、距离计算等查询
--- CREATE INDEX "idx_bo_electric_fence_geom" ON "public"."bo_electric_fence" USING gist ("geom");
--- 
--- -- ===================== 电子围栏表 注释 =====================
--- COMMENT ON TABLE "public"."bo_electric_fence" IS '电子围栏信息表：存储无人机禁飞/限飞区域的空间与业务属性信息';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."id" IS '主键ID，业务唯一标识';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."create_time" IS '记录创建时间';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."create_user" IS '创建人ID';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."del_flag" IS '逻辑删除标识：false=正常，true=已删除';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."remark" IS '备注说明信息';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."update_time" IS '记录最后更新时间';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."update_user" IS '最后更新人ID';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."project_id" IS '所属项目ID，项目级数据隔离';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."code" IS '围栏自定义编号';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."status" IS '围栏状态：启用/禁用/过期';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."name" IS '围栏名称，界面展示用';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."type" IS '围栏类型：禁飞区/限高区/警示区';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."frequency" IS '生效执行频率：单次/每日/每周';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."area" IS '围栏面积，单位：平方米';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."week" IS '周生效规则：1-7代表周一到周日，逗号分隔';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."day" IS '日生效规则：存储日期范围';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."start_time" IS '生效开始时间';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."end_time" IS '生效结束时间';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."draw_method" IS '围栏绘制方式：手动/导入/圆形/矩形';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."height" IS '围栏限制高度，单位：米';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."fence_type" IS '围栏业务分类';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."geom" IS '空间几何对象，WGS84经纬度坐标系';
--- COMMENT ON COLUMN "public"."bo_electric_fence"."time_plan" IS '复杂时间计划配置字符串';
-
-
-
-
-
--- ===================== 飞行路径记录表 gis_flight_paths =====================
--- 业务用途：持久化存储无人机路径规划结果，包含原始路径、平滑路径、航点信息
--- 数据结构：3D线几何 + JSON航点，支持轨迹回放与历史查询
-DROP TABLE IF EXISTS gis_flight_paths;
-
-CREATE TABLE gis_flight_paths (
-    id SERIAL PRIMARY KEY,                      -- 自增主键ID，唯一标识一条飞行路径记录
-    project_id char(32) DEFAULT NULL,           -- 项目ID
-    create_user varchar(32) DEFAULT NULL,       -- 创建者
-    create_time timestamp NOT NULL DEFAULT NOW(), -- 创建时间
-    update_user varchar(32) DEFAULT NULL,       -- 更新者
-    update_time timestamp NOT NULL DEFAULT NOW(), -- 更新时间
-    del_flag boolean DEFAULT false NOT NULL,    -- 是否删除：true=删除，false=未删除
-    start_point geometry(PointZ,4326),          -- 航线起点3D几何，包含经纬度+飞行高度
-    end_point geometry(PointZ,4326),            -- 航线终点3D几何，包含经纬度+飞行高度
-    safe_altitude double precision,             -- 规划安全飞行高度，单位：米
-    path_line geometry(LineStringZ,4326),       -- 原始规划3D路径线（A*算法输出）
-    smooth_path_line geometry(LineStringZ,4326),-- 处理后3D路径线（实际飞行）
-    waypoints jsonb,                            -- 原始规划航点JSON数组
-    smooth_waypoints jsonb,                     -- 处理航点JSON数组
-    total_distance double precision,            -- 处理后航线总长度，单位：米
-    smooth_ratio double precision DEFAULT 0     -- 高度平滑比例：0=直升直降，0~1=比例爬升
-);
-
--- ===================== 表 & 字段注释 =====================
-COMMENT ON TABLE gis_flight_paths IS '无人机3D规划飞行路径记录表';
-COMMENT ON COLUMN gis_flight_paths.id IS '自增主键ID';
-COMMENT ON COLUMN gis_flight_paths.project_id IS '项目ID';
-COMMENT ON COLUMN gis_flight_paths.create_user IS '创建者';
-COMMENT ON COLUMN gis_flight_paths.create_time IS '创建时间';
-COMMENT ON COLUMN gis_flight_paths.update_user IS '更新者';
-COMMENT ON COLUMN gis_flight_paths.update_time IS '更新时间';
-COMMENT ON COLUMN gis_flight_paths.del_flag IS '是否删除：true=删除，false=未删除';
-COMMENT ON COLUMN gis_flight_paths.start_point IS '航线起点3D空间坐标（经纬度+高度）';
-COMMENT ON COLUMN gis_flight_paths.end_point IS '航线终点3D空间坐标（经纬度+高度）';
-COMMENT ON COLUMN gis_flight_paths.safe_altitude IS '规划安全飞行高度，单位：米';
-COMMENT ON COLUMN gis_flight_paths.path_line IS '原始规划3D路径线几何';
-COMMENT ON COLUMN gis_flight_paths.smooth_path_line IS '处理后3D路径线几何';
-COMMENT ON COLUMN gis_flight_paths.waypoints IS '原始规划航点JSON数组';
-COMMENT ON COLUMN gis_flight_paths.smooth_waypoints IS '处理后航点JSON数组';
-COMMENT ON COLUMN gis_flight_paths.total_distance IS '处理后航线总长度，单位：米';
-COMMENT ON COLUMN gis_flight_paths.smooth_ratio IS '高度平滑比例：0=直升-平飞-直降，0<ratio<1=爬升-平飞-降落';
-
--- ===================== 业务索引（高频查询） =====================
-CREATE INDEX idx_gis_flight_paths_project_id ON gis_flight_paths (project_id);
-CREATE INDEX idx_gis_flight_paths_del_flag ON gis_flight_paths (del_flag);
-CREATE INDEX idx_gis_flight_paths_project_del ON gis_flight_paths (project_id, del_flag);
-
-
 -- ==================================================================================== 会话级性能加速设置 ====================================================================================
 -- 以下设置仅对当前会话生效，可在生成大规模网格数据时提升性能
 SET work_mem = '256MB';                        -- 提高排序和哈希操作的内存
@@ -197,6 +75,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_table TEXT;                          -- 最终生成的网格表名
+    v_idx_prefix TEXT;                     -- 动态索引名前缀，避免项目ID过长导致索引名截断冲突
     v_cnt BIGINT := 0;                     -- 插入网格点的总行数
     v_estimated_count BIGINT := 0;         -- 按外接矩形预估的最大网格点数量
     v_max_grid_count BIGINT := 30000000;   -- 单次生成上限，防止误操作生成超大表
@@ -308,18 +187,19 @@ BEGIN
     END IF;
 
     -- ===================== 根据项目ID生成表名 =====================
-    -- 项目ID为空使用默认表名，不为空则拼接项目ID，并过滤非法字符防止SQL注入
+    -- 项目ID为空使用默认项目表名，不为空则拼接项目ID，并过滤非法字符防止SQL注入
     IF p_project_id IS NULL OR p_project_id = '' THEN
-        v_table := 'gis_grid_nodes';
+        v_table := 'gis_grid_nodes_default';
     ELSE
         v_table := 'gis_grid_nodes_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
     END IF;
     table_name := v_table;
+    v_idx_prefix := 'idx_' || substr(md5(v_table), 1, 12);
 
     -- ===================== 存在旧表才删除，避免无表场景走DROP异常/通知路径 =====================
     SELECT to_regclass(format('%I.%I', current_schema(), v_table)) INTO v_table_regclass;
     IF v_table_regclass IS NOT NULL THEN
-        EXECUTE format('DROP TABLE %s;', v_table_regclass);
+        EXECUTE format('DROP TABLE %s CASCADE;', v_table_regclass);
     END IF;
 		
     -- ===================== 批量生成三维网格点并建表 =====================
@@ -332,16 +212,17 @@ BEGIN
                 s_lon AS x,
                 s_lat AS y,
                 ($1 + s_lon * $4)::DOUBLE PRECISION AS lon,
-                ($2 + s_lat * $5)::DOUBLE PRECISION AS lat
+                ($2 + s_lat * $5)::DOUBLE PRECISION AS lat,
+                ST_SetSRID(
+                    ST_MakePoint($1 + s_lon * $4, $2 + s_lat * $5),
+                    4326
+                )::geometry(Point,4326) AS geom2d
             FROM
                 generate_series(0, $10) s_lon,
                 generate_series(0, $11) s_lat
             WHERE ($1 + s_lon * $4) <= $7
               AND ($2 + s_lat * $5) <= $8
-              AND ST_Covers(
-                    $13::geometry,
-                    ST_SetSRID(ST_MakePoint($1 + s_lon * $4, $2 + s_lat * $5), 4326)
-                  )
+              AND ST_Covers($13::geometry, ST_SetSRID(ST_MakePoint($1 + s_lon * $4, $2 + s_lat * $5), 4326))
         ),
         z_grid AS (
             SELECT
@@ -358,7 +239,16 @@ BEGIN
             xy.lon,
             xy.lat,
             z.alt,
+            0::DOUBLE PRECISION AS ground_alt,
+            z.alt::DOUBLE PRECISION AS relative_alt,
+            true::BOOLEAN AS is_flyable,
+            0::SMALLINT AS risk_level,
             NULL::VARCHAR(20) AS zone_type,
+            0::INT AS block_mask,
+            NULL::VARCHAR(30) AS obstacle_type,
+            NULL::VARCHAR(64) AS obstacle_id,
+            ''{}''::JSONB AS source_flags,
+            xy.geom2d,
             ST_SetSRID(ST_MakePoint(xy.lon, xy.lat, z.alt), 4326)::geometry(PointZ,4326) AS geom
         FROM xy_grid xy
         CROSS JOIN z_grid z;
@@ -373,22 +263,36 @@ BEGIN
     EXECUTE format('ALTER TABLE %I ALTER COLUMN id SET NOT NULL;', v_table);
     EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I PRIMARY KEY (id);', v_table, v_table || '_pkey');
 
-    EXECUTE format('COMMENT ON TABLE %I IS ''三维网格节点表'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.id IS ''自增主键'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.x IS ''网格X索引'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.y IS ''网格Y索引'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.z IS ''网格Z索引'';', v_table);
+    EXECUTE format('COMMENT ON TABLE %I IS ''项目三维网格节点表：用于电子围栏、建筑、地形、倾斜摄影、DEM等多源打标'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.id IS ''网格节点主键ID，按x/y/z计算生成'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.x IS ''网格X索引，经度方向'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.y IS ''网格Y索引，纬度方向'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.z IS ''网格Z索引，高度方向'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.lon IS ''经度'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.lat IS ''纬度'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.alt IS ''高度'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.zone_type IS ''区域类型（禁飞区/管控区/适飞区）'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.geom IS ''空间几何（三维点，WGS84坐标系）'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.alt IS ''绝对高度或当前系统统一高度基准，单位：米'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.ground_alt IS ''地面高程，来自DEM/地形数据，单位：米'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.relative_alt IS ''相对地面高度：alt - ground_alt，单位：米'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.is_flyable IS ''是否可飞：true=可参与路径规划，false=不可通行'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.risk_level IS ''综合风险等级：0安全，1低，2中，3高，9不可飞'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.zone_type IS ''电子围栏区域类型：禁飞区/管控区/适飞区'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.block_mask IS ''阻塞位标记：1电子围栏，2建筑，4地形，8倾斜摄影，16 DEM'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.obstacle_type IS ''障碍类型：建筑/地形/倾斜模型/DEM等'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.obstacle_id IS ''命中的障碍对象ID'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.source_flags IS ''多源数据命中详情，用于调试和溯源'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.geom2d IS ''二维空间点，WGS84经纬度坐标系'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.geom IS ''三维空间点，WGS84经纬度坐标系 + 高度'';', v_table);
 
     EXECUTE format('SELECT count(*)::BIGINT FROM %I;', v_table) INTO v_cnt;
     count := v_cnt;
 
-    EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS %I ON %I (x, y, z);', 'idx_xyz_'||v_table, v_table);
-    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST(geom);', 'idx_geom_'||v_table, v_table);
+    EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS %I ON %I (x, y, z);', v_idx_prefix || '_xyz', v_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (x, y, z) WHERE is_flyable = true;', v_idx_prefix || '_fly_xyz', v_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (x, y) WHERE is_flyable = true;', v_idx_prefix || '_fly_xy', v_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (zone_type);', v_idx_prefix || '_zone', v_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (block_mask);', v_idx_prefix || '_mask', v_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST(geom2d);', v_idx_prefix || '_geom2d', v_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST(geom);', v_idx_prefix || '_geom', v_table);
 
     -- ===================== 恢复autovacuum并更新表统计信息 =====================
     EXECUTE format('ALTER TABLE %I SET (autovacuum_enabled = on); ANALYZE %I;', v_table, v_table);
