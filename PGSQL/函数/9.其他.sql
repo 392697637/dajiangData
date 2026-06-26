@@ -39,3 +39,20 @@ BEGIN
     END IF;
 END;
 $$;
+
+
+--使用 DO 块自动执行（立即生效）
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN (SELECT schemaname, tablename
+              FROM pg_tables
+              WHERE tablename LIKE 'gis_electric_fence_%'
+                AND schemaname NOT IN ('pg_catalog', 'information_schema'))
+    LOOP
+        EXECUTE format('ANALYZE %I.%I', r.schemaname, r.tablename);
+        RAISE NOTICE '已分析: %.%', r.schemaname, r.tablename;
+    END LOOP;
+END;
+$$;
