@@ -108,6 +108,7 @@ BEGIN
         PERFORM set_config('parallel_tuple_cost', '0', true);
         PERFORM set_config('min_parallel_table_scan_size', '0', true);
         PERFORM set_config('min_parallel_index_scan_size', '0', true);
+        PERFORM set_config('jit', 'off', true);
     EXCEPTION WHEN OTHERS THEN
         NULL;
     END;
@@ -207,26 +208,34 @@ BEGIN
     EXECUTE format('
         CREATE UNLOGGED TABLE %I
         WITH (autovacuum_enabled = off) AS
-        WITH xy_grid AS (
+        WITH lon_series AS (
             SELECT
-                s_lon AS x,
-                s_lat AS y,
-                ($1 + s_lon * $4)::DOUBLE PRECISION AS lon,
-                ($2 + s_lat * $5)::DOUBLE PRECISION AS lat,
-                ST_SetSRID(
-                    ST_MakePoint($1 + s_lon * $4, $2 + s_lat * $5),
-                    4326
-                )::geometry(Point,4326) AS geom2d
-            FROM
-                generate_series(0, $10) s_lon,
-                generate_series(0, $11) s_lat
+                s_lon::INT AS x,
+                ($1 + s_lon * $4)::DOUBLE PRECISION AS lon
+            FROM generate_series(0, $10) s_lon
             WHERE ($1 + s_lon * $4) <= $7
-              AND ($2 + s_lat * $5) <= $8
-              AND ST_Covers($13::geometry, ST_SetSRID(ST_MakePoint($1 + s_lon * $4, $2 + s_lat * $5), 4326))
         ),
-        z_grid AS (
+        lat_series AS (
             SELECT
-                s_alt AS z,
+                s_lat::INT AS y,
+                ($2 + s_lat * $5)::DOUBLE PRECISION AS lat
+            FROM generate_series(0, $11) s_lat
+            WHERE ($2 + s_lat * $5) <= $8
+        ),
+        xy_grid AS MATERIALIZED (
+            SELECT
+                x.x,
+                y.y,
+                x.lon,
+                y.lat,
+                ST_SetSRID(ST_MakePoint(x.lon, y.lat), 4326)::geometry(Point,4326) AS geom2d
+            FROM lon_series x
+            CROSS JOIN lat_series y
+            WHERE ST_Covers($13::geometry, ST_SetSRID(ST_MakePoint(x.lon, y.lat), 4326))
+        ),
+        z_grid AS MATERIALIZED (
+            SELECT
+                s_alt::INT AS z,
                 ($3 + s_alt * $6)::DOUBLE PRECISION AS alt
             FROM generate_series(0, $12) s_alt
             WHERE ($3 + s_alt * $6) <= $9
@@ -239,15 +248,9 @@ BEGIN
             xy.lon,
             xy.lat,
             z.alt,
-            0::DOUBLE PRECISION AS ground_alt,
-            z.alt::DOUBLE PRECISION AS relative_alt,
             true::BOOLEAN AS is_flyable,
-            0::SMALLINT AS risk_level,
             NULL::VARCHAR(20) AS zone_type,
             0::INT AS block_mask,
-            NULL::VARCHAR(30) AS obstacle_type,
-            NULL::VARCHAR(64) AS obstacle_id,
-            ''{}''::JSONB AS source_flags,
             xy.geom2d,
             ST_SetSRID(ST_MakePoint(xy.lon, xy.lat, z.alt), 4326)::geometry(PointZ,4326) AS geom
         FROM xy_grid xy
@@ -258,6 +261,7 @@ BEGIN
           v_max_lon, v_max_lat, p_max_alt,
           v_lon_max_idx, v_lat_max_idx, v_alt_max_idx,
           v_geom;
+    GET DIAGNOSTICS v_cnt = ROW_COUNT;
 
     -- ===================== 补充主键、注释和索引 =====================
     EXECUTE format('ALTER TABLE %I ALTER COLUMN id SET NOT NULL;', v_table);
@@ -271,28 +275,19 @@ BEGIN
     EXECUTE format('COMMENT ON COLUMN %I.lon IS ''经度'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.lat IS ''纬度'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.alt IS ''绝对高度或当前系统统一高度基准，单位：米'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.ground_alt IS ''地面高程，来自DEM/地形数据，单位：米'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.relative_alt IS ''相对地面高度：alt - ground_alt，单位：米'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.is_flyable IS ''是否可飞：true=可参与路径规划，false=不可通行'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.risk_level IS ''综合风险等级：0安全，1低，2中，3高，9不可飞'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.zone_type IS ''电子围栏区域类型：禁飞区/管控区/适飞区'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.block_mask IS ''阻塞位标记：1电子围栏，2建筑，4地形，8倾斜摄影，16 DEM'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.obstacle_type IS ''障碍类型：建筑/地形/倾斜模型/DEM等'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.obstacle_id IS ''命中的障碍对象ID'';', v_table);
-    EXECUTE format('COMMENT ON COLUMN %I.source_flags IS ''多源数据命中详情，用于调试和溯源'';', v_table);
+    EXECUTE format('COMMENT ON COLUMN %I.block_mask IS ''阻塞位标记：1电子围栏，2建筑，4地形，8倾斜摄影，16 DEM，32国家空域规则'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.geom2d IS ''二维空间点，WGS84经纬度坐标系'';', v_table);
     EXECUTE format('COMMENT ON COLUMN %I.geom IS ''三维空间点，WGS84经纬度坐标系 + 高度'';', v_table);
 
-    EXECUTE format('SELECT count(*)::BIGINT FROM %I;', v_table) INTO v_cnt;
     count := v_cnt;
 
     EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS %I ON %I (x, y, z);', v_idx_prefix || '_xyz', v_table);
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (x, y, z) WHERE is_flyable = true;', v_idx_prefix || '_fly_xyz', v_table);
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (x, y) WHERE is_flyable = true;', v_idx_prefix || '_fly_xy', v_table);
-    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (zone_type);', v_idx_prefix || '_zone', v_table);
-    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (block_mask);', v_idx_prefix || '_mask', v_table);
-    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST(geom2d);', v_idx_prefix || '_geom2d', v_table);
-    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST(geom);', v_idx_prefix || '_geom', v_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (block_mask) WHERE block_mask <> 0;', v_idx_prefix || '_mask', v_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST(geom2d) WHERE z = 0;', v_idx_prefix || '_geom2d_z0', v_table);
 
     -- ===================== 恢复autovacuum并更新表统计信息 =====================
     EXECUTE format('ALTER TABLE %I SET (autovacuum_enabled = on); ANALYZE %I;', v_table, v_table);
@@ -314,7 +309,7 @@ $$;
 SELECT * FROM gis_generate_3d_grid(
     '2c95908e958f3b75019593551f520126',
     '{"type":"Polygon","coordinates":[[[112.70,34.20],[114.20,34.20],[114.20,35.00],[112.70,35.00],[112.70,34.20]]]}',
-    50,
+    0,
     300,
     100
 );
@@ -362,118 +357,234 @@ RETURNS TABLE (code integer, table_name text, msg text, count bigint)
 LANGUAGE plpgsql AS $$
 DECLARE
     v_table TEXT;
-    v_cnt BIGINT;
-    v_start timestamptz;
+    v_updated_rows BIGINT := 0;
+    v_cleared_rows BIGINT := 0;
+    v_start timestamptz := clock_timestamp();
     v_step_start timestamptz;
-    v_filter_geom geometry;
     v_extent box3d;
     v_col_exists boolean;
+    v_geom_col TEXT;
+    v_project_fence_table TEXT;
+    v_project_fence_regclass REGCLASS;
 BEGIN
-    v_start := clock_timestamp();
-    RAISE NOTICE '[开始] %', v_start;
-
-    -- 步骤1：表名
     v_step_start := clock_timestamp();
     IF p_project_id = '' OR p_project_id IS NULL THEN
         v_table := 'gis_grid_nodes';
+        v_project_fence_table := NULL;
     ELSE
         v_table := 'gis_grid_nodes_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
+        v_project_fence_table := 'gis_electric_fence_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
     END IF;
     table_name := v_table;
-    RAISE NOTICE '[步骤1] 表名: %，耗时: %', v_table, clock_timestamp() - v_step_start;
+    RAISE NOTICE '[gis_mark_electric_fence] table: %, elapsed: %', v_table, clock_timestamp() - v_step_start;
 
-    -- 步骤2：检查 zone_type 列是否存在，使用别名避免歧义
-    v_step_start := clock_timestamp();
-    SELECT EXISTS (
-        SELECT 1 FROM information_schema.columns c
-        WHERE c.table_schema = current_schema() AND c.table_name = v_table AND c.column_name = 'zone_type'
-    ) INTO v_col_exists;
-    IF NOT v_col_exists THEN
-        EXECUTE format('ALTER TABLE %I ADD COLUMN zone_type VARCHAR(20);', v_table);
-        RAISE NOTICE '[步骤2] 已添加 zone_type 列，耗时: %', clock_timestamp() - v_step_start;
-    ELSE
-        RAISE NOTICE '[步骤2] zone_type 列已存在，跳过，耗时: %', clock_timestamp() - v_step_start;
-    END IF;
-
-    -- 步骤3：外包矩形（极速）
-    v_step_start := clock_timestamp();
-    RAISE NOTICE '[步骤3] 计算围栏外包矩形...';
-    EXECUTE format('
-        SELECT ST_Extent(ST_SetSRID(geom, 4326))
-        FROM bo_electric_fence
-        WHERE del_flag = false
-          AND fence_type IN (''1'',''2'',''3'')
-          AND (%L = '''' OR project_id = %L)
-    ', p_project_id, p_project_id) INTO v_extent;
-
-    IF v_extent IS NULL THEN
-        RAISE NOTICE '[步骤3] 无围栏，清空标记';
-        EXECUTE format('UPDATE %I SET zone_type = NULL WHERE zone_type IS NOT NULL', v_table);
-        GET DIAGNOSTICS v_cnt = ROW_COUNT;
-        count := v_cnt;
-        code := 200;
-        msg := '无围栏';
+    IF to_regclass(format('%I.%I', current_schema(), v_table)) IS NULL THEN
+        code := 404;
+        msg := format('网格表不存在：%s', v_table);
+        count := 0;
         RETURN NEXT;
         RETURN;
     END IF;
 
-    v_filter_geom := ST_SetSRID(
-        ST_MakeEnvelope(
-            ST_XMin(v_extent), ST_YMin(v_extent),
-            ST_XMax(v_extent), ST_YMax(v_extent),
-            4326
-        ), 4326
-    );
-    RAISE NOTICE '[步骤3] 外包矩形完成，耗时: %', clock_timestamp() - v_step_start;
-
-    -- 步骤4：核心更新（修复 SRID 问题）
     v_step_start := clock_timestamp();
-    RAISE NOTICE '[步骤4] 开始批量更新...';
-    EXECUTE format('
-        WITH candidates AS (
-            SELECT id, geom
-            FROM %I
-            WHERE geom && %L   -- 外包矩形过滤
-        ),
-        best_zone AS (
-            SELECT 
-                c.id,
-                (
-                    SELECT CASE f.fence_type
+    SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns c
+        WHERE c.table_schema = current_schema()
+          AND c.table_name = v_table
+          AND c.column_name = 'zone_type'
+    ) INTO v_col_exists;
+
+    IF NOT v_col_exists THEN
+        EXECUTE format('ALTER TABLE %I ADD COLUMN zone_type VARCHAR(20);', v_table);
+    END IF;
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS block_mask INT DEFAULT 0;', v_table);
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS is_flyable BOOLEAN DEFAULT true;', v_table);
+
+    SELECT CASE WHEN EXISTS (
+        SELECT 1
+        FROM information_schema.columns c
+        WHERE c.table_schema = current_schema()
+          AND c.table_name = v_table
+          AND c.column_name = 'geom2d'
+    ) THEN 'geom2d' ELSE 'geom' END INTO v_geom_col;
+    EXECUTE format(
+        'CREATE INDEX IF NOT EXISTS %I ON %I USING GIST (%I) WHERE z = 0;',
+        'idx_' || substr(md5(v_table), 1, 12) || '_' || v_geom_col || '_z0',
+        v_table,
+        v_geom_col
+    );
+    RAISE NOTICE '[gis_mark_electric_fence] prepare columns elapsed: %', clock_timestamp() - v_step_start;
+
+    v_step_start := clock_timestamp();
+    DROP TABLE IF EXISTS tmp_mark_electric_fence;
+    CREATE TEMP TABLE tmp_mark_electric_fence (
+        id text,
+        source_table text,
+        priority int,
+        zone_type varchar(20),
+        max_height double precision,
+        geom4326 geometry(Geometry,4326)
+    ) ON COMMIT DROP;
+
+    INSERT INTO tmp_mark_electric_fence (
+        id, source_table, priority, zone_type, max_height, geom4326
+    )
+    SELECT
+        id::text,
+        'bo_electric_fence',
+        CASE fence_type WHEN '1' THEN 10 WHEN '2' THEN 20 WHEN '3' THEN 30 END AS priority,
+        CASE fence_type
+            WHEN '1' THEN '禁飞区'
+            WHEN '2' THEN '管控区'
+            WHEN '3' THEN '适飞区'
+        END::varchar(20) AS zone_type,
+        NULLIF(COALESCE(height, 0), 0)::double precision AS max_height,
+        ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
+    FROM bo_electric_fence
+    WHERE del_flag = false
+      AND status = '1'
+      AND geom IS NOT NULL
+      AND fence_type IN ('1','2','3')
+      AND (COALESCE(p_project_id, '') = '' OR project_id::text = p_project_id::text);
+
+    IF v_project_fence_table IS NOT NULL THEN
+        SELECT to_regclass(format('%I.%I', current_schema(), v_project_fence_table)) INTO v_project_fence_regclass;
+        IF v_project_fence_regclass IS NOT NULL THEN
+            EXECUTE format('
+                INSERT INTO tmp_mark_electric_fence (
+                    id, source_table, priority, zone_type, max_height, geom4326
+                )
+                SELECT
+                    id::text,
+                    %L,
+                    CASE fence_type WHEN ''1'' THEN 10 WHEN ''2'' THEN 20 END AS priority,
+                    CASE fence_type
                         WHEN ''1'' THEN ''禁飞区''
                         WHEN ''2'' THEN ''管控区''
-                        WHEN ''3'' THEN ''适飞区''
-                    END
-                    FROM bo_electric_fence f
-                    WHERE f.del_flag = false
-                      AND f.fence_type IN (''1'',''2'',''3'')
-                      AND (%L = '''' OR f.project_id = %L)
-                      AND ST_Intersects(c.geom, ST_SetSRID(f.geom, 4326))  -- 强制统一 SRID
-                    ORDER BY CASE f.fence_type WHEN ''1'' THEN 1 WHEN ''2'' THEN 2 WHEN ''3'' THEN 3 END
-                    LIMIT 1
-                ) AS zone_type
-            FROM candidates c
+                    END::varchar(20) AS zone_type,
+                    NULL::double precision AS max_height,
+                    ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
+                FROM %s
+                WHERE geom IS NOT NULL
+                  AND fence_type IN (''1'',''2'')
+            ', v_project_fence_table, v_project_fence_regclass);
+        END IF;
+    END IF;
+
+    CREATE INDEX IF NOT EXISTS idx_tmp_mark_electric_fence_geom ON tmp_mark_electric_fence USING GIST (geom4326);
+    ANALYZE tmp_mark_electric_fence;
+
+    SELECT ST_Extent(geom4326) INTO v_extent FROM tmp_mark_electric_fence;
+
+    IF v_extent IS NULL THEN
+        EXECUTE format('
+            UPDATE %I
+            SET
+                zone_type = NULL,
+                block_mask = COALESCE(block_mask, 0) & ~1,
+                is_flyable = ((COALESCE(block_mask, 0) & ~1) = 0)
+            WHERE zone_type IS NOT NULL
+               OR (COALESCE(block_mask, 0) & 1) <> 0
+        ', v_table);
+        GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
+        count := v_cleared_rows;
+        code := 200;
+        msg := format('无有效电子围栏，已清空 %s 条标记', v_cleared_rows);
+        RETURN NEXT;
+        RETURN;
+    END IF;
+    RAISE NOTICE '[gis_mark_electric_fence] materialize fences elapsed: %', clock_timestamp() - v_step_start;
+
+    v_step_start := clock_timestamp();
+    DROP TABLE IF EXISTS tmp_mark_desired_zone;
+    EXECUTE format('
+        CREATE TEMP TABLE tmp_mark_desired_zone ON COMMIT DROP AS
+        WITH xy_match AS MATERIALIZED (
+            SELECT
+                n.x,
+                n.y,
+                f.zone_type,
+                f.max_height,
+                f.priority,
+                f.id AS fence_id
+            FROM (
+                SELECT DISTINCT x, y, %I AS geom2d
+                FROM %I
+                WHERE z = 0
+                  AND %I && ST_MakeEnvelope($1, $2, $3, $4, 4326)
+            ) n
+            JOIN tmp_mark_electric_fence f
+              ON n.geom2d && f.geom4326
+             AND ST_Intersects(n.geom2d, f.geom4326)
         )
+        SELECT DISTINCT ON (n.id)
+            n.id,
+            xy.zone_type
+        FROM %I n
+        JOIN xy_match xy
+          ON n.x = xy.x
+         AND n.y = xy.y
+        WHERE xy.max_height IS NULL
+           OR n.alt <= xy.max_height
+        ORDER BY n.id, xy.priority, xy.fence_id
+    ', v_geom_col, v_table, v_geom_col, v_table)
+    USING ST_XMin(v_extent), ST_YMin(v_extent), ST_XMax(v_extent), ST_YMax(v_extent);
+
+    CREATE INDEX IF NOT EXISTS idx_tmp_mark_desired_zone_id ON tmp_mark_desired_zone(id);
+    ANALYZE tmp_mark_desired_zone;
+
+    EXECUTE format('
         UPDATE %I n
-        SET zone_type = b.zone_type
-        FROM best_zone b
-        WHERE n.id = b.id
-          AND (n.zone_type IS DISTINCT FROM b.zone_type)
-    ', v_table, v_filter_geom, p_project_id, p_project_id, v_table);
+        SET
+            zone_type = t.zone_type,
+            block_mask = CASE
+                WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN COALESCE(n.block_mask, 0) | 1
+                ELSE COALESCE(n.block_mask, 0) & ~1
+            END,
+            is_flyable = CASE
+                WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN false
+                ELSE ((COALESCE(n.block_mask, 0) & ~1) = 0)
+            END
+        FROM tmp_mark_desired_zone t
+        WHERE n.id = t.id
+          AND (
+              n.zone_type IS DISTINCT FROM t.zone_type
+              OR n.block_mask IS DISTINCT FROM CASE
+                    WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN COALESCE(n.block_mask, 0) | 1
+                    ELSE COALESCE(n.block_mask, 0) & ~1
+                 END
+              OR n.is_flyable IS DISTINCT FROM CASE
+                    WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN false
+                    ELSE ((COALESCE(n.block_mask, 0) & ~1) = 0)
+                 END
+          )
+    ', v_table);
+    GET DIAGNOSTICS v_updated_rows = ROW_COUNT;
 
-    GET DIAGNOSTICS v_cnt = ROW_COUNT;
-    count := v_cnt;
-    RAISE NOTICE '[步骤4] 更新完成，耗时: %，影响行数: %', clock_timestamp() - v_step_start, v_cnt;
+    EXECUTE format('
+        UPDATE %I n
+        SET
+            zone_type = NULL,
+            block_mask = COALESCE(n.block_mask, 0) & ~1,
+            is_flyable = ((COALESCE(n.block_mask, 0) & ~1) = 0)
+        WHERE (n.zone_type IS NOT NULL OR (COALESCE(n.block_mask, 0) & 1) <> 0)
+          AND NOT EXISTS (SELECT 1 FROM tmp_mark_desired_zone t WHERE t.id = n.id)
+    ', v_table);
+    GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
 
+    count := v_updated_rows + v_cleared_rows;
     code := 200;
-    msg := format('完成，耗时 %s 秒，更新 %s 行', EXTRACT(epoch FROM clock_timestamp() - v_start)::int, v_cnt);
+    msg := format('电子围栏标记完成，耗时 %s 秒，更新 %s 条，清空 %s 条', EXTRACT(epoch FROM clock_timestamp() - v_start)::int, v_updated_rows, v_cleared_rows);
+    RAISE NOTICE '[gis_mark_electric_fence] update elapsed: %, affected: %', clock_timestamp() - v_step_start, count;
     RETURN NEXT;
+
 EXCEPTION WHEN OTHERS THEN
     code := 500;
     msg := SQLERRM;
     count := 0;
-    table_name := v_table;   -- 确保异常时也有表名
-    RAISE NOTICE '[异常] %', SQLERRM;
+    table_name := v_table;
+    RAISE NOTICE '[gis_mark_electric_fence] error: %', SQLERRM;
     RETURN NEXT;
 END;
 $$;
@@ -508,7 +619,10 @@ $$;
 --   count       bigint      更新记录数
 -- 适用场景：电子围栏数据修改后，快速刷新网格区域标记
 -- ==============================================
-CREATE OR REPLACE FUNCTION gis_refresh_electric_fence(p_project_id VARCHAR DEFAULT '')
+CREATE OR REPLACE FUNCTION gis_refresh_electric_fence(
+    p_project_id VARCHAR DEFAULT '',
+    p_fence_id VARCHAR DEFAULT NULL
+)
 RETURNS TABLE (
     code integer,
     table_name text,
@@ -519,83 +633,276 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_table TEXT;
-    v_updated_match_rows INT := 0;
-    v_cleared_rows INT := 0;
+    v_updated_match_rows BIGINT := 0;
+    v_cleared_rows BIGINT := 0;
+    v_geom_col TEXT;
+    v_project_fence_table TEXT;
+    v_project_fence_regclass REGCLASS;
+    v_scope_extent box3d;
+    v_is_partial boolean := COALESCE(NULLIF(btrim(p_fence_id), ''), '') <> '';
 BEGIN
-    -- 确定网格表名
     IF p_project_id = '' OR p_project_id IS NULL THEN
         v_table := 'gis_grid_nodes';
+        v_project_fence_table := NULL;
     ELSE
         v_table := 'gis_grid_nodes_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
+        v_project_fence_table := 'gis_electric_fence_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
     END IF;
     table_name := v_table;
 
-    -- 兼容旧表结构：确保目标表存在 zone_type 列
-    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS zone_type VARCHAR(20);', v_table);
+    IF to_regclass(format('%I.%I', current_schema(), v_table)) IS NULL THEN
+        code := 404;
+        msg := format('网格表不存在：%s', v_table);
+        count := 0;
+        RETURN NEXT;
+        RETURN;
+    END IF;
 
-    -- 计算应该写入的目标 zone_type，按围栏优先级取最高优先级值
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS zone_type VARCHAR(20);', v_table);
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS block_mask INT DEFAULT 0;', v_table);
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS is_flyable BOOLEAN DEFAULT true;', v_table);
+
+    SELECT CASE WHEN EXISTS (
+        SELECT 1
+        FROM information_schema.columns c
+        WHERE c.table_schema = current_schema()
+          AND c.table_name = v_table
+          AND c.column_name = 'geom2d'
+    ) THEN 'geom2d' ELSE 'geom' END INTO v_geom_col;
+    EXECUTE format(
+        'CREATE INDEX IF NOT EXISTS %I ON %I USING GIST (%I) WHERE z = 0;',
+        'idx_' || substr(md5(v_table), 1, 12) || '_' || v_geom_col || '_z0',
+        v_table,
+        v_geom_col
+    );
+
+    DROP TABLE IF EXISTS tmp_refresh_electric_fence;
+    CREATE TEMP TABLE tmp_refresh_electric_fence (
+        id text,
+        source_table text,
+        priority int,
+        zone_type varchar(20),
+        max_height double precision,
+        geom4326 geometry(Geometry,4326)
+    ) ON COMMIT DROP;
+
+    DROP TABLE IF EXISTS tmp_refresh_scope_fence;
+    CREATE TEMP TABLE tmp_refresh_scope_fence (
+        geom4326 geometry(Geometry,4326)
+    ) ON COMMIT DROP;
+
+    IF v_project_fence_table IS NOT NULL THEN
+        SELECT to_regclass(format('%I.%I', current_schema(), v_project_fence_table)) INTO v_project_fence_regclass;
+    END IF;
+
+    IF v_is_partial THEN
+        INSERT INTO tmp_refresh_scope_fence (geom4326)
+        SELECT ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
+        FROM bo_electric_fence
+        WHERE id::text = p_fence_id::text
+          AND geom IS NOT NULL
+          AND (COALESCE(p_project_id, '') = '' OR project_id::TEXT = p_project_id::TEXT);
+
+        IF v_project_fence_table IS NOT NULL AND v_project_fence_regclass IS NOT NULL THEN
+            EXECUTE format('
+                INSERT INTO tmp_refresh_scope_fence (geom4326)
+                SELECT ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
+                FROM %s
+                WHERE id::text = $1
+                  AND geom IS NOT NULL
+            ', v_project_fence_regclass)
+            USING p_fence_id;
+        END IF;
+
+        SELECT ST_Extent(geom4326) INTO v_scope_extent FROM tmp_refresh_scope_fence;
+
+        IF v_scope_extent IS NULL THEN
+            code := 404;
+            msg := format('未找到可刷新的电子围栏或围栏无geom：%s', p_fence_id);
+            count := 0;
+            RETURN NEXT;
+            RETURN;
+        END IF;
+    END IF;
+
+    INSERT INTO tmp_refresh_electric_fence (
+        id, source_table, priority, zone_type, max_height, geom4326
+    )
+    SELECT
+        id::text,
+        'bo_electric_fence',
+        CASE fence_type WHEN '1' THEN 10 WHEN '2' THEN 20 WHEN '3' THEN 30 END AS priority,
+        CASE fence_type
+            WHEN '1' THEN '禁飞区'
+            WHEN '2' THEN '管控区'
+            WHEN '3' THEN '适飞区'
+        END::varchar(20) AS zone_type,
+        NULLIF(COALESCE(height, 0), 0)::double precision AS max_height,
+        ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
+    FROM bo_electric_fence
+    WHERE del_flag = false
+      AND status = '1'
+      AND geom IS NOT NULL
+      AND fence_type IN ('1', '2', '3')
+      AND (COALESCE(p_project_id, '') = '' OR project_id::TEXT = p_project_id::TEXT)
+      AND (
+          NOT v_is_partial
+          OR ST_SetSRID(ST_Force2D(geom), 4326) && ST_MakeEnvelope(
+              ST_XMin(v_scope_extent), ST_YMin(v_scope_extent),
+              ST_XMax(v_scope_extent), ST_YMax(v_scope_extent), 4326
+          )
+      );
+
+    IF v_project_fence_table IS NOT NULL THEN
+        IF v_project_fence_regclass IS NOT NULL THEN
+            EXECUTE format('
+                INSERT INTO tmp_refresh_electric_fence (
+                    id, source_table, priority, zone_type, max_height, geom4326
+                )
+                SELECT
+                    id::text,
+                    %L,
+                    CASE fence_type WHEN ''1'' THEN 10 WHEN ''2'' THEN 20 END AS priority,
+                    CASE fence_type
+                        WHEN ''1'' THEN ''禁飞区''
+                        WHEN ''2'' THEN ''管控区''
+                    END::varchar(20) AS zone_type,
+                    NULL::double precision AS max_height,
+                    ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
+                FROM %s
+                WHERE geom IS NOT NULL
+                  AND fence_type IN (''1'',''2'')
+                  AND (
+                      NOT $1
+                      OR ST_SetSRID(ST_Force2D(geom), 4326) && ST_MakeEnvelope($2, $3, $4, $5, 4326)
+                  )
+            ', v_project_fence_table, v_project_fence_regclass)
+            USING v_is_partial,
+                  CASE WHEN v_scope_extent IS NULL THEN NULL ELSE ST_XMin(v_scope_extent) END,
+                  CASE WHEN v_scope_extent IS NULL THEN NULL ELSE ST_YMin(v_scope_extent) END,
+                  CASE WHEN v_scope_extent IS NULL THEN NULL ELSE ST_XMax(v_scope_extent) END,
+                  CASE WHEN v_scope_extent IS NULL THEN NULL ELSE ST_YMax(v_scope_extent) END;
+        END IF;
+    END IF;
+
+    CREATE INDEX IF NOT EXISTS idx_tmp_refresh_electric_fence_geom ON tmp_refresh_electric_fence USING GIST (geom4326);
+    ANALYZE tmp_refresh_electric_fence;
+
+    IF NOT v_is_partial THEN
+        SELECT ST_Extent(geom4326) INTO v_scope_extent FROM tmp_refresh_electric_fence;
+    END IF;
+
+    IF v_scope_extent IS NULL THEN
+        EXECUTE format('
+            UPDATE %I
+            SET
+                zone_type = NULL,
+                block_mask = COALESCE(block_mask, 0) & ~1,
+                is_flyable = ((COALESCE(block_mask, 0) & ~1) = 0)
+            WHERE zone_type IS NOT NULL
+               OR (COALESCE(block_mask, 0) & 1) <> 0
+        ', v_table);
+        GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
+        count := v_cleared_rows;
+        code := 200;
+        msg := format('无有效电子围栏，已清空 %s 条标记', v_cleared_rows);
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    DROP TABLE IF EXISTS tmp_refresh_scope_xy;
+    EXECUTE format('
+        CREATE TEMP TABLE tmp_refresh_scope_xy ON COMMIT DROP AS
+        SELECT DISTINCT x, y, %I AS geom2d
+        FROM %I
+        WHERE z = 0
+          AND %I && ST_MakeEnvelope($1, $2, $3, $4, 4326)
+    ', v_geom_col, v_table, v_geom_col)
+    USING ST_XMin(v_scope_extent), ST_YMin(v_scope_extent), ST_XMax(v_scope_extent), ST_YMax(v_scope_extent);
+
+    CREATE INDEX IF NOT EXISTS idx_tmp_refresh_scope_xy ON tmp_refresh_scope_xy (x, y);
+    ANALYZE tmp_refresh_scope_xy;
+
+    DROP TABLE IF EXISTS tmp_desired_zone;
     EXECUTE format(' 
         CREATE TEMP TABLE tmp_desired_zone ON COMMIT DROP AS
-        WITH filtered_fences AS (
+        WITH xy_match AS MATERIALIZED (
             SELECT
-                id,
-                fence_type,
-                ST_SetSRID(geom, 4326) AS geom4326,
-                CASE fence_type
-                    WHEN ''1'' THEN 1
-                    WHEN ''2'' THEN 2
-                    WHEN ''3'' THEN 3
-                    ELSE 4
-                END AS priority
-            FROM bo_electric_fence
-            WHERE del_flag = false
-              AND fence_type IN (''1'', ''2'', ''3'')
-              AND ($1 = '''' OR project_id::TEXT = $1::TEXT)
-        ),
-        ranked_matches AS (
-            SELECT
-                n.id,
-                CASE f.fence_type
-                    WHEN ''1'' THEN ''禁飞区''
-                    WHEN ''2'' THEN ''管控区''
-                    WHEN ''3'' THEN ''适飞区''
-                END AS zone_type,
-                ROW_NUMBER() OVER (PARTITION BY n.id ORDER BY f.priority) AS rn
-            FROM %I n
-            JOIN filtered_fences f
-              ON n.geom && f.geom4326
-             AND ST_Intersects(n.geom, f.geom4326)
+                n.x,
+                n.y,
+                f.zone_type,
+                f.max_height,
+                f.priority,
+                f.id AS fence_id
+            FROM (
+                SELECT x, y, geom2d
+                FROM tmp_refresh_scope_xy
+            ) n
+            JOIN tmp_refresh_electric_fence f
+              ON n.geom2d && f.geom4326
+             AND ST_Intersects(n.geom2d, f.geom4326)
         )
-        SELECT id, zone_type
-        FROM ranked_matches
-        WHERE rn = 1
-    ', v_table) USING p_project_id;
+        SELECT DISTINCT ON (n.id)
+            n.id,
+            xy.zone_type
+        FROM %I n
+        JOIN xy_match xy
+          ON n.x = xy.x
+         AND n.y = xy.y
+        WHERE xy.max_height IS NULL
+           OR n.alt <= xy.max_height
+        ORDER BY n.id, xy.priority, xy.fence_id
+    ', v_table);
 
     EXECUTE 'CREATE INDEX IF NOT EXISTS idx_tmp_desired_zone_id ON tmp_desired_zone(id);';
     EXECUTE 'ANALYZE tmp_desired_zone;';
 
-    -- 更新当前应保留或修改的 zone_type
     EXECUTE format(' 
         UPDATE %I n
-        SET zone_type = t.zone_type
+        SET
+            zone_type = t.zone_type,
+            block_mask = CASE
+                WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN COALESCE(n.block_mask, 0) | 1
+                ELSE COALESCE(n.block_mask, 0) & ~1
+            END,
+            is_flyable = CASE
+                WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN false
+                ELSE ((COALESCE(n.block_mask, 0) & ~1) = 0)
+            END
         FROM tmp_desired_zone t
         WHERE n.id = t.id
-          AND (n.zone_type IS DISTINCT FROM t.zone_type)
+          AND (
+              n.zone_type IS DISTINCT FROM t.zone_type
+              OR n.block_mask IS DISTINCT FROM CASE
+                    WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN COALESCE(n.block_mask, 0) | 1
+                    ELSE COALESCE(n.block_mask, 0) & ~1
+                 END
+              OR n.is_flyable IS DISTINCT FROM CASE
+                    WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN false
+                    ELSE ((COALESCE(n.block_mask, 0) & ~1) = 0)
+                 END
+          )
     ', v_table);
     GET DIAGNOSTICS v_updated_match_rows = ROW_COUNT;
 
-    -- 清除不再落在有效围栏内的旧 zone_type
     EXECUTE format('
         UPDATE %I n
-        SET zone_type = NULL
-        WHERE n.zone_type IS NOT NULL
+        SET
+            zone_type = NULL,
+            block_mask = COALESCE(n.block_mask, 0) & ~1,
+            is_flyable = ((COALESCE(n.block_mask, 0) & ~1) = 0)
+        WHERE (n.zone_type IS NOT NULL OR (COALESCE(n.block_mask, 0) & 1) <> 0)
+          AND EXISTS (SELECT 1 FROM tmp_refresh_scope_xy s WHERE s.x = n.x AND s.y = n.y)
           AND NOT EXISTS (SELECT 1 FROM tmp_desired_zone t WHERE t.id = n.id)
     ', v_table);
     GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
 
     count := v_updated_match_rows + v_cleared_rows;
     code := 200;
-    msg := format('刷新电子围栏标记完成，更新 %s 条记录', count);
+    msg := CASE
+        WHEN v_is_partial THEN format('按围栏 %s 局部刷新完成，更新 %s 条，清空 %s 条', p_fence_id, v_updated_match_rows, v_cleared_rows)
+        ELSE format('按 bo_electric_fence 当前有效数据和项目专属围栏刷新完成，更新 %s 条，清空 %s 条', v_updated_match_rows, v_cleared_rows)
+    END;
     RETURN NEXT;
 
 EXCEPTION WHEN OTHERS THEN
@@ -611,6 +918,171 @@ $$;
 -- 当围栏数据发生变更（如新增、修改、删除），调用此函数刷新全部区域标记
  -- 示例 刷新指定项目网格表
 SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
+-- 示例 只刷新指定围栏影响范围
+-- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126', '围栏ID');
 
 
+-- ========================================== gis_mark_buildings  根据建筑表标记三维网格障碍============================================================
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN (SELECT oid, proname, pg_get_function_identity_arguments(oid) as args
+              FROM pg_proc
+              WHERE proname = 'gis_mark_buildings')
+    LOOP
+        EXECUTE 'DROP FUNCTION ' || r.oid::regproc || '(' || r.args || ') CASCADE';
+    END LOOP;
+END;
+$$;
 
+CREATE OR REPLACE FUNCTION gis_mark_buildings(p_project_id VARCHAR)
+RETURNS TABLE (code integer, table_name text, msg text, count bigint)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_grid_table TEXT;
+    v_building_table TEXT;
+    v_grid_reg REGCLASS;
+    v_building_reg REGCLASS;
+    v_geom_col TEXT;
+    v_updated_rows BIGINT := 0;
+    v_cleared_rows BIGINT := 0;
+    v_idx_prefix TEXT;
+BEGIN
+    IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
+        code := 400;
+        table_name := NULL;
+        msg := '参数错误：项目ID不能为空';
+        count := 0;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    v_grid_table := 'gis_grid_nodes_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
+    v_building_table := 'gis_buildings_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
+    table_name := v_grid_table;
+    v_idx_prefix := 'idx_' || substr(md5(v_grid_table), 1, 12);
+
+    SELECT to_regclass(format('%I.%I', current_schema(), v_grid_table)) INTO v_grid_reg;
+    SELECT to_regclass(format('%I.%I', current_schema(), v_building_table)) INTO v_building_reg;
+
+    IF v_grid_reg IS NULL THEN
+        code := 404;
+        msg := format('网格表不存在：%s', v_grid_table);
+        count := 0;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    IF v_building_reg IS NULL THEN
+        code := 404;
+        msg := format('建筑表不存在：%s', v_building_table);
+        count := 0;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    SELECT CASE WHEN EXISTS (
+        SELECT 1
+        FROM information_schema.columns c
+        WHERE c.table_schema = current_schema()
+          AND c.table_name = v_grid_table
+          AND c.column_name = 'geom2d'
+    ) THEN 'geom2d' ELSE 'geom' END INTO v_geom_col;
+
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS block_mask INT DEFAULT 0;', v_grid_table);
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS is_flyable BOOLEAN DEFAULT true;', v_grid_table);
+    EXECUTE format(
+        'CREATE INDEX IF NOT EXISTS %I ON %I USING GIST (%I) WHERE z = 0;',
+        v_idx_prefix || '_' || v_geom_col || '_z0',
+        v_grid_table,
+        v_geom_col
+    );
+
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST (geom gist_geometry_ops_2d);',
+                   'idx_' || substr(md5(v_building_table), 1, 12) || '_geom',
+                   v_building_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (id);',
+                   'idx_' || substr(md5(v_building_table), 1, 12) || '_id',
+                   v_building_table);
+
+    DROP TABLE IF EXISTS tmp_mark_building_hit;
+    EXECUTE format('
+        CREATE TEMP TABLE tmp_mark_building_hit ON COMMIT DROP AS
+        WITH buildings AS MATERIALIZED (
+            SELECT
+                COALESCE(id::text, gid::text) AS building_id,
+                CASE WHEN COALESCE(height, 0) > 0 THEN height::double precision ELSE 5::double precision END AS max_height,
+                ST_SetSRID(ST_Force2D(geom), 4326) AS geom2d
+            FROM %I
+            WHERE geom IS NOT NULL
+        ),
+        xy_match AS MATERIALIZED (
+            SELECT DISTINCT ON (n.x, n.y)
+                n.x,
+                n.y,
+                b.building_id,
+                b.max_height
+            FROM (
+                SELECT DISTINCT x, y, %I AS geom2d
+                FROM %I
+                WHERE z = 0
+            ) n
+            JOIN buildings b
+              ON n.geom2d && b.geom2d
+             AND ST_Intersects(n.geom2d, b.geom2d)
+            ORDER BY n.x, n.y, b.max_height DESC, b.building_id
+        )
+        SELECT
+            n.id,
+            xy.building_id
+        FROM %I n
+        JOIN xy_match xy
+          ON n.x = xy.x
+         AND n.y = xy.y
+        WHERE n.alt <= xy.max_height
+    ', v_building_table, v_geom_col, v_grid_table, v_grid_table);
+
+    CREATE INDEX IF NOT EXISTS idx_tmp_mark_building_hit_id ON tmp_mark_building_hit(id);
+    ANALYZE tmp_mark_building_hit;
+
+    EXECUTE format('
+        UPDATE %I n
+        SET
+            block_mask = COALESCE(n.block_mask, 0) | 2,
+            is_flyable = false
+        FROM tmp_mark_building_hit h
+        WHERE n.id = h.id
+          AND (
+              (COALESCE(n.block_mask, 0) & 2) = 0
+              OR n.is_flyable IS DISTINCT FROM false
+          )
+    ', v_grid_table);
+    GET DIAGNOSTICS v_updated_rows = ROW_COUNT;
+
+    EXECUTE format('
+        UPDATE %I n
+        SET
+            block_mask = COALESCE(n.block_mask, 0) & ~2,
+            is_flyable = ((COALESCE(n.block_mask, 0) & ~2) = 0)
+        WHERE (COALESCE(n.block_mask, 0) & 2) <> 0
+          AND NOT EXISTS (SELECT 1 FROM tmp_mark_building_hit h WHERE h.id = n.id)
+    ', v_grid_table);
+    GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
+
+    count := v_updated_rows + v_cleared_rows;
+    code := 200;
+    msg := format('建筑打标完成，更新 %s 条，清空 %s 条', v_updated_rows, v_cleared_rows);
+    RETURN NEXT;
+
+EXCEPTION WHEN OTHERS THEN
+    code := 500;
+    table_name := v_grid_table;
+    msg := '建筑打标失败：' || SQLERRM;
+    count := 0;
+    RETURN NEXT;
+END;
+$$;
+
+-- SELECT * FROM gis_mark_buildings('2c95908e958f3b75019593551f520126');

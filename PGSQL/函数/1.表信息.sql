@@ -3,7 +3,7 @@
 -- 顺序说明：
 -- 1. 三维网格节点表模板：系统空间计算底座
 -- 2. 网格打标数据源：按 block_mask 顺序排列
---    1=电子围栏/国家空域规则，2=建筑，4=地形，8=倾斜摄影，16=DEM
+--    1=电子围栏，2=建筑，4=地形，8=倾斜摄影，16=DEM，32=国家空域规则
 -- 3. 正射/DOM：展示与辅助判读数据，不直接作为高度来源
 -- 4. 飞行路径记录表：路径规划结果表
 --
@@ -45,22 +45,14 @@ CREATE UNLOGGED TABLE IF NOT EXISTS gis_grid_nodes_template (
     lat DOUBLE PRECISION,
     alt DOUBLE PRECISION,
 
-    -- DEM/地形高度字段
-    ground_alt DOUBLE PRECISION DEFAULT 0,
-    relative_alt DOUBLE PRECISION,
-
     -- A*路径规划优先使用的综合可飞状态
     is_flyable BOOLEAN DEFAULT true NOT NULL,
-    risk_level SMALLINT DEFAULT 0 NOT NULL,
 
     -- 电子围栏兼容字段
     zone_type VARCHAR(20) DEFAULT NULL,
 
-    -- 多源打标字段：1电子围栏，2建筑，4地形，8倾斜摄影，16 DEM
+    -- 多源阻塞位：1电子围栏，2建筑，4地形，8倾斜摄影，16 DEM，32国家空域规则
     block_mask INT DEFAULT 0 NOT NULL,
-    obstacle_type VARCHAR(30) DEFAULT NULL,
-    obstacle_id VARCHAR(64) DEFAULT NULL,
-    source_flags JSONB DEFAULT '{}'::jsonb NOT NULL,
 
     -- 空间字段
     geom2d geometry(Point,4326),
@@ -75,15 +67,9 @@ COMMENT ON COLUMN gis_grid_nodes_template.z IS '网格Z索引，高度方向';
 COMMENT ON COLUMN gis_grid_nodes_template.lon IS '经度';
 COMMENT ON COLUMN gis_grid_nodes_template.lat IS '纬度';
 COMMENT ON COLUMN gis_grid_nodes_template.alt IS '绝对高度或当前系统统一高度基准，单位：米';
-COMMENT ON COLUMN gis_grid_nodes_template.ground_alt IS '地面高程，来自DEM/地形数据，单位：米';
-COMMENT ON COLUMN gis_grid_nodes_template.relative_alt IS '相对地面高度：alt - ground_alt，单位：米';
 COMMENT ON COLUMN gis_grid_nodes_template.is_flyable IS '是否可飞：true=可参与路径规划，false=不可通行';
-COMMENT ON COLUMN gis_grid_nodes_template.risk_level IS '综合风险等级：0安全，1低，2中，3高，9不可飞';
 COMMENT ON COLUMN gis_grid_nodes_template.zone_type IS '电子围栏区域类型：禁飞区/管控区/适飞区';
-COMMENT ON COLUMN gis_grid_nodes_template.block_mask IS '阻塞位标记：1电子围栏，2建筑，4地形，8倾斜摄影，16 DEM';
-COMMENT ON COLUMN gis_grid_nodes_template.obstacle_type IS '障碍类型：建筑/地形/倾斜模型/DEM等';
-COMMENT ON COLUMN gis_grid_nodes_template.obstacle_id IS '命中的障碍对象ID';
-COMMENT ON COLUMN gis_grid_nodes_template.source_flags IS '多源数据命中详情，用于调试和溯源';
+COMMENT ON COLUMN gis_grid_nodes_template.block_mask IS '阻塞位标记：1电子围栏，2建筑，4地形，8倾斜摄影，16 DEM，32国家空域规则';
 COMMENT ON COLUMN gis_grid_nodes_template.geom2d IS '二维空间点，WGS84经纬度坐标系';
 COMMENT ON COLUMN gis_grid_nodes_template.geom IS '三维空间点，WGS84经纬度坐标系 + 高度';
 
@@ -99,21 +85,13 @@ COMMENT ON INDEX idx_gis_grid_nodes_template_flyable_xyz IS '可飞网格三维�
 CREATE INDEX IF NOT EXISTS idx_gis_grid_nodes_template_flyable_xy ON gis_grid_nodes_template (x, y) WHERE is_flyable = true;
 COMMENT ON INDEX idx_gis_grid_nodes_template_flyable_xy IS '可飞网格二维局部索引，用于路径规划范围裁剪';
 
--- 电子围栏类型筛选索引，兼容旧逻辑 zone_type 查询。
-CREATE INDEX IF NOT EXISTS idx_gis_grid_nodes_template_zone_type ON gis_grid_nodes_template (zone_type);
-COMMENT ON INDEX idx_gis_grid_nodes_template_zone_type IS '电子围栏区域类型索引，兼容禁飞区/管控区/适飞区查询';
-
--- 多源阻塞位索引，用于快速查询被建筑、地形、DEM等阻塞的网格。
-CREATE INDEX IF NOT EXISTS idx_gis_grid_nodes_template_block_mask ON gis_grid_nodes_template (block_mask);
+-- 多源阻塞位索引，仅索引被阻塞的网格，降低大表建索引成本。
+CREATE INDEX IF NOT EXISTS idx_gis_grid_nodes_template_block_mask ON gis_grid_nodes_template (block_mask) WHERE block_mask <> 0;
 COMMENT ON INDEX idx_gis_grid_nodes_template_block_mask IS '多源阻塞位索引，用于查询电子围栏/建筑/地形/倾斜摄影/DEM打标结果';
 
--- 二维点空间索引，电子围栏、建筑轮廓、DEM格网等平面叠加优先使用。
-CREATE INDEX IF NOT EXISTS idx_gis_grid_nodes_template_geom2d ON gis_grid_nodes_template USING GIST (geom2d);
+-- 二维点空间索引只建 z=0 层，电子围栏/建筑等二维叠加先算平面命中，再回填高度层。
+CREATE INDEX IF NOT EXISTS idx_gis_grid_nodes_template_geom2d ON gis_grid_nodes_template USING GIST (geom2d) WHERE z = 0;
 COMMENT ON INDEX idx_gis_grid_nodes_template_geom2d IS '二维网格点空间索引，用于面内判断和二维空间叠加分析';
-
--- 三维点空间索引，路径规划、三维距离、3D空间查询使用。
-CREATE INDEX IF NOT EXISTS idx_gis_grid_nodes_template_geom ON gis_grid_nodes_template USING GIST (geom);
-COMMENT ON INDEX idx_gis_grid_nodes_template_geom IS '三维网格点空间索引，用于路径规划和三维空间查询';
 
 
 -- ====================================================================================

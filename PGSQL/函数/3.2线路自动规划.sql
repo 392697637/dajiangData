@@ -221,21 +221,21 @@ BEGIN
     END IF;
 
     IF v_grid_table IS NOT NULL THEN
-        -- 查找起点最近的 可通行网格（非禁飞区、非管控区）
+        -- 查找起点最近的可通行网格，优先使用综合 is_flyable 标记。
         EXECUTE format('
             SELECT id
             FROM %I
-            WHERE zone_type IS NULL OR zone_type = ''适飞区''
+            WHERE is_flyable = true
             ORDER BY geom <-> $1
             LIMIT 1', v_grid_table)
         INTO v_start_id
         USING v_start_pt;
 
-        -- 查找终点最近的 可通行网格（非禁飞区、非管控区）
+        -- 查找终点最近的可通行网格，优先使用综合 is_flyable 标记。
         EXECUTE format('
             SELECT id
             FROM %I
-            WHERE zone_type IS NULL OR zone_type = ''适飞区''
+            WHERE is_flyable = true
             ORDER BY geom <-> $1
             LIMIT 1', v_grid_table)
         INTO v_goal_id
@@ -252,9 +252,9 @@ BEGIN
         -- 所有条件满足，启用A*寻路
         EXECUTE format('
             SELECT
-                EXISTS(SELECT 1 FROM %I WHERE id = $1 AND (zone_type IS NULL OR zone_type = ''适飞区''))
-                AND EXISTS(SELECT 1 FROM %I WHERE id = $2 AND (zone_type IS NULL OR zone_type = ''适飞区''))
-                AND EXISTS(SELECT 1 FROM %I WHERE zone_type IS NULL OR zone_type = ''适飞区'')',
+                EXISTS(SELECT 1 FROM %I WHERE id = $1 AND is_flyable = true)
+                AND EXISTS(SELECT 1 FROM %I WHERE id = $2 AND is_flyable = true)
+                AND EXISTS(SELECT 1 FROM %I WHERE is_flyable = true)',
             v_grid_table, v_grid_table, v_grid_table)
         INTO v_use_astar
         USING v_start_id, v_goal_id;
@@ -333,8 +333,7 @@ BEGIN
     v_min_y := v_min_y - 10;
     v_max_y := v_max_y + 10;
 
-  -- 将搜索范围内的网格数据导入临时表，并动态计算 is_walkable,is_walkable始终为true（WHERE已过滤不可通行区域）
-    -- 根据 zone_type 字段：'禁飞区' → false（不可通行），其他 → true（可通行）
+  -- 将搜索范围内的可飞网格数据导入临时表；is_walkable 始终为 true（WHERE 已过滤不可通行区域）
     EXECUTE format('
          INSERT INTO tmp_grid
         SELECT id, x, y, z, geom,
@@ -342,7 +341,7 @@ BEGIN
                0,0,0,NULL
         FROM %I
         WHERE x BETWEEN %s AND %s AND y BETWEEN %s AND %s
-          AND (zone_type IS NULL OR zone_type = ''适飞区'')
+          AND is_flyable = true
     ', v_grid_table, v_min_x, v_max_x, v_min_y, v_max_y);
 
     -- 在临时表中重新匹配最近的起点/终点网格（确保在搜索范围内）
