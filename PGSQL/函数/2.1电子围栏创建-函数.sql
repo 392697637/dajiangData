@@ -18,7 +18,12 @@ DROP FUNCTION IF EXISTS gis_electric_fence_project(text, text);
 --   p_geom_json     text        输入参数：项目范围的GeoJSON多边形字符串
 -- 返回值： 标准TABLE结构
 --   code        integer     状态码：200=执行成功 400=参数错误/无数据 500=执行异常
---   msg         varchar     状态描述信息
+--   msg         varchar     状态描述信息，包含执行时间
+-- 返回策略：
+--   code=200 表示函数正常完成。
+--   code=400 表示输入参数非法。
+--   code=500 表示执行过程中出现异常。
+--   msg 中包含执行时间，以及具体执行说明。
 --   table_name   varchar     生成的项目电子围栏表名
 --   count       bigint      导入围栏数据总条数
 -- 函数注意：
@@ -52,6 +57,7 @@ DECLARE
     v_table_suffix text;                                           -- 循环中：省份试飞区表名后缀
     v_row_count BIGINT := 0;                                       -- 插入数据的总行数
     v_columns text[];                                              -- 存储源表的字段名数组
+    v_start_time timestamptz := clock_timestamp();                  -- 函数开始时间，用于统一返回耗时
 BEGIN
     -- =============================================
     -- 第一步：必填参数合法性校验
@@ -59,7 +65,8 @@ BEGIN
     -- 判断项目ID和GeoJSON是否为空
     IF p_project_id IS NULL OR p_project_id = '' OR p_geom_json IS NULL OR p_geom_json = '' THEN
         -- 为空则返回参数错误
-        RETURN QUERY SELECT 400, '项目ID或地理范围GeoJSON不能为空'::varchar, ''::varchar, 0::bigint;
+        RETURN QUERY SELECT 400, format('项目ID或地理范围GeoJSON不能为空，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, ''::varchar, 0::bigint;
         RETURN;
     END IF;
 
@@ -71,7 +78,8 @@ BEGIN
         v_geom := ST_SetSRID(ST_GeomFromGeoJSON(p_geom_json), 4326);
     -- 捕获GeoJSON解析异常
     EXCEPTION WHEN OTHERS THEN
-        RETURN QUERY SELECT 400, ('GeoJSON格式错误：' || SQLERRM)::varchar, ''::varchar, 0::bigint;
+        RETURN QUERY SELECT 400, format('GeoJSON格式错误：%s，执行时间 %s 秒',
+            SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, ''::varchar, 0::bigint;
         RETURN;
     END;
 
@@ -243,9 +251,11 @@ BEGIN
     -- =============================================
     -- 根据插入行数返回成功或无数据
     IF v_row_count > 0 THEN
-        RETURN QUERY SELECT 200, '执行成功，电子围栏已生成'::varchar, v_target_table::varchar, v_row_count;
+        RETURN QUERY SELECT 200, format('执行成功，电子围栏已生成，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, v_target_table::varchar, v_row_count;
     ELSE
-        RETURN QUERY SELECT 400, '未查询到相交电子围栏数据'::varchar, v_target_table::varchar, 0::bigint;
+        RETURN QUERY SELECT 400, format('未查询到相交电子围栏数据，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, v_target_table::varchar, 0::bigint;
     END IF;
 
 -- =============================================
@@ -254,7 +264,8 @@ BEGIN
 -- 捕获所有未处理异常，返回500错误
 EXCEPTION WHEN OTHERS THEN
     -- 兜底异常处理：保留数据库原始错误信息，便于接口调用方定位失败原因。
-    RETURN QUERY SELECT 500, ('执行异常：' || SQLERRM)::varchar, v_target_table::varchar, 0::bigint;
+    RETURN QUERY SELECT 500, format('执行异常：%s，执行时间 %s 秒',
+        SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, v_target_table::varchar, 0::bigint;
 END;
 $$;
 -- ============================================================

@@ -17,6 +17,11 @@
 -- 400：参数为空 / 无有效围栏数据（业务异常）
 -- 500：SQL 执行异常、表不存在、字段错误等（系统异常）
 --   msg       varchar    状态描述信息
+-- 返回策略：
+--   code=200 表示函数正常完成。
+--   code=400 表示输入参数非法。
+--   code=500 表示执行过程中出现异常。
+--   msg 中包含执行时间，以及具体执行说明。
 --   id        varchar(32) 围栏ID
 --   geom_geojson json    原始围栏几何的GeoJSON
 --   buffer_2d_geojson json 2D缓冲面几何的GeoJSON
@@ -58,6 +63,7 @@ DECLARE
     v_fence_record bo_electric_fence%ROWTYPE;
     -- 定义变量：存储3D立体几何对象
     v_3d_geom geometry;
+    v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
 BEGIN
     -- ==============================================
     -- 1. 入参合法性校验：围栏ID 不能为空/空字符串
@@ -65,7 +71,8 @@ BEGIN
     IF p_fence_id IS NULL OR p_fence_id = '' THEN
         -- 返回400：参数错误，所有几何字段置空
         RETURN QUERY SELECT
-            400, '围栏ID不能为空'::varchar,
+            400, format('围栏ID不能为空，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
         -- 终止函数执行
         RETURN;
@@ -86,7 +93,8 @@ BEGIN
     IF v_fence_record.id IS NULL THEN
         -- 返回400：无数据，所有几何字段置空
         RETURN QUERY SELECT
-            400, '未查询到有效围栏数据'::varchar,
+            400, format('未查询到有效围栏数据，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
@@ -133,7 +141,8 @@ BEGIN
     -- ==============================================
     RETURN QUERY SELECT
         200,                        -- 状态码：成功
-        '成功'::varchar,            -- 提示信息
+        format('成功，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,            -- 提示信息
         v_fence_record.id::varchar, -- 围栏ID
         -- 原始围栏几何 → GeoJSON
         ST_AsGeoJSON(ST_SetSRID(v_fence_record.geom, 4326))::json,
@@ -149,7 +158,8 @@ EXCEPTION
     WHEN OTHERS THEN
         RETURN QUERY SELECT
             500,                                -- 状态码：服务异常
-            ('服务异常：' || SQLERRM)::varchar,  -- 异常信息（SQLERRM=系统错误描述）
+            format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,  -- 异常信息（SQLERRM=系统错误描述）
             NULL::varchar, NULL::json, NULL::json, NULL::json;
 END;
 $$;
@@ -210,11 +220,29 @@ STABLE
 AS $$
 DECLARE
     v_line geometry; -- 存储转换后的线路几何对象
+    v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
 BEGIN
     -- ==============================================
     -- 1. GeoJSON线路解析：转换为PostGIS几何对象，强制设置4326坐标系
     -- ==============================================
-    v_line := ST_SetSRID(ST_GeomFromGeoJSON(p_line_geojson), 4326);
+    IF p_line_geojson IS NULL OR p_line_geojson = '' THEN
+        RETURN QUERY SELECT
+            400, format('航线GeoJSON不能为空，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            NULL::varchar, NULL::json, NULL::json, NULL::json;
+        RETURN;
+    END IF;
+
+    BEGIN
+        v_line := ST_SetSRID(ST_GeomFromGeoJSON(p_line_geojson), 4326);
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN QUERY SELECT
+                400, format('GeoJSON格式解析失败：%s，执行时间 %s 秒',
+                    SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+                NULL::varchar, NULL::json, NULL::json, NULL::json;
+            RETURN;
+    END;
 
     -- ==============================================
     -- 2. 核心逻辑：查询所有与线路3D相交的有效围栏
@@ -222,7 +250,9 @@ BEGIN
     RETURN QUERY
     SELECT
         res.code,
-        res.msg,
+        format('%s，线检测执行时间 %s 秒',
+            res.msg,
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar AS msg,
         res.id,
         res.geom_geojson,
         res.buffer_2d_geojson,
@@ -243,10 +273,18 @@ BEGIN
         f.del_flag = false  -- 仅有效围栏
         AND ST_3DIntersects(v_line, solid_geom); -- 3D空间相交判断
 
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT
+            200, format('航线未闯入任何电子围栏，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            NULL::varchar, NULL::json, NULL::json, NULL::json;
+    END IF;
+
 EXCEPTION
     WHEN OTHERS THEN
         RETURN QUERY SELECT
-            500, ('服务异常：' || SQLERRM)::varchar,
+            500, format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
 END;
 $$;
@@ -302,11 +340,13 @@ AS $$
 DECLARE
     v_line geometry;       -- 解析后的航线几何体
     v_fence_3d geometry;  -- 3D围栏几何体
+    v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
 BEGIN
     -- 1. 参数校验
     IF p_line_geojson IS NULL OR p_line_geojson = '' THEN
         RETURN QUERY SELECT
-            400, '航线GeoJSON不能为空'::varchar,
+            400, format('航线GeoJSON不能为空，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json;
         RETURN;
     END IF;
@@ -317,7 +357,8 @@ BEGIN
     EXCEPTION
         WHEN OTHERS THEN
             RETURN QUERY SELECT
-                400, 'GeoJSON格式解析失败：' || SQLERRM::varchar,
+                400, format('GeoJSON格式解析失败：%s，执行时间 %s 秒',
+                    SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
                 NULL::varchar, NULL::json;
             RETURN;
     END;
@@ -325,7 +366,8 @@ BEGIN
     -- 3. 校验输入必须是线要素(LineString/MultiLineString)
     IF ST_GeometryType(v_line) NOT IN ('ST_LineString', 'ST_MultiLineString') THEN
         RETURN QUERY SELECT
-            400, '输入几何体必须是线类型(LineString)'::varchar,
+            400, format('输入几何体必须是线类型(LineString)，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json;
         RETURN;
     END IF;
@@ -334,7 +376,8 @@ BEGIN
     RETURN QUERY
     SELECT
         200 AS code,
-        '检测到航线闯入电子围栏'::varchar AS msg,
+        format('检测到航线闯入电子围栏，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar AS msg,
         f.id,
         ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
     FROM bo_electric_fence f
@@ -357,7 +400,8 @@ BEGIN
     -- 5. 无碰撞时返回空结果+状态200
     IF NOT FOUND THEN
         RETURN QUERY SELECT
-            200, '航线未闯入任何电子围栏'::varchar,
+            200, format('航线未闯入任何电子围栏，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json;
     END IF;
 
@@ -365,7 +409,8 @@ BEGIN
 EXCEPTION
     WHEN OTHERS THEN
         RETURN QUERY SELECT
-            500, ('服务异常：' || SQLERRM)::varchar,
+            500, format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json;
 END;
 $$;
@@ -394,7 +439,7 @@ SELECT * FROM public.gis_electric_fence_check_line('{
 --   p_project_id    text            输入参数：项目ID（可选），为空则查询公共表
 --   p_point_geojson text            输入参数：点的GeoJSON字符串（必填，支持Feature和Point格式）
 -- 返回值： 标准TABLE结构，与航线检测函数完全一致
---   code      integer    状态码：200=执行成功 201=不在禁飞区 400=参数错误 500=执行异常
+--   code      integer    状态码：200=执行成功 400=参数错误 500=执行异常
 --   msg       varchar    状态描述信息
 --   id        varchar(32) 围栏ID
 --   geom_geojson json    原始围栏几何的GeoJSON
@@ -430,13 +475,15 @@ DECLARE
     v_sql text;                -- 动态SQL语句
     v_table_exists boolean;    -- 表是否存在
     v_found boolean;           -- 是否找到匹配的围栏
+    v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
 BEGIN
     -- =============================================
     -- 【400 参数错误】第一步：校验点GeoJSON是否为空
     -- =============================================
     IF p_point_geojson IS NULL OR p_point_geojson = '' THEN
         RETURN QUERY SELECT
-            400, '点的GeoJSON不能为空'::varchar,
+            400, format('点的GeoJSON不能为空，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json;
         RETURN;
     END IF;
@@ -449,7 +496,8 @@ BEGIN
     EXCEPTION
         WHEN OTHERS THEN
             RETURN QUERY SELECT
-                400, '点的GeoJSON格式错误'::varchar,
+                400, format('点的GeoJSON格式错误，执行时间 %s 秒',
+                    ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
                 NULL::varchar, NULL::json;
             RETURN;
     END;
@@ -476,7 +524,8 @@ BEGIN
     EXCEPTION
         WHEN OTHERS THEN
             RETURN QUERY SELECT
-                400, '点的GeoJSON解析失败'::varchar,
+                400, format('点的GeoJSON解析失败，执行时间 %s 秒',
+                    ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
                 NULL::varchar, NULL::json;
             RETURN;
     END;
@@ -486,7 +535,8 @@ BEGIN
     -- =============================================
     IF ST_GeometryType(v_point) NOT IN ('ST_Point') THEN
         RETURN QUERY SELECT
-            400, 'GeoJSON必须是Point类型'::varchar,
+            400, format('GeoJSON必须是Point类型，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json;
         RETURN;
     END IF;
@@ -520,7 +570,7 @@ BEGIN
             v_sql := format('
                 SELECT
                     200 AS code,
-                    ''当前位置在禁飞区内''::varchar AS msg,
+                    format(''当前位置在禁飞区内，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
                     f.id::varchar(32),
                     ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                 FROM %I f
@@ -536,7 +586,7 @@ BEGIN
                 UNION ALL
                 SELECT
                     200 AS code,
-                    ''当前位置在禁飞区内''::varchar AS msg,
+                    format(''当前位置在禁飞区内，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
                     f.id::varchar(32),
                     ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                 FROM bo_electric_fence f
@@ -558,7 +608,7 @@ BEGIN
             v_sql := '
                 SELECT
                     200 AS code,
-                    ''当前位置在禁飞区内''::varchar AS msg,
+                    format(''当前位置在禁飞区内，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
                     f.id::varchar(32),
                     ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                 FROM bo_electric_fence f
@@ -576,7 +626,7 @@ BEGIN
         END IF;
 
         -- 执行统一的查询
-        RETURN QUERY EXECUTE v_sql USING v_point, v_z;
+        RETURN QUERY EXECUTE v_sql USING v_point, v_z, v_start_time;
 
         -- 检查是否找到结果
         IF FOUND THEN
@@ -587,7 +637,8 @@ BEGIN
         RETURN QUERY
         SELECT
             200 AS code,
-            '当前位置在禁飞区内'::varchar AS msg,
+            format('当前位置在禁飞区内，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar AS msg,
             f.id::varchar(32),
             ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
         FROM bo_electric_fence f
@@ -610,11 +661,12 @@ BEGIN
     END IF;
 
     -- =============================================
-    -- 【201 成功】未检测到闯入任何禁飞区
+    -- 【200 成功】未检测到闯入任何禁飞区
     -- =============================================
     IF NOT v_found THEN
         RETURN QUERY SELECT
-            201, '当前位置不在禁飞区内'::varchar,
+            200, format('当前位置不在禁飞区内，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json;
         RETURN;
     END IF;
@@ -625,7 +677,8 @@ BEGIN
 EXCEPTION
     WHEN OTHERS THEN
         RETURN QUERY SELECT
-            500, ('服务异常：' || SQLERRM)::varchar,
+            500, format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             NULL::varchar, NULL::json;
 END;
 $$;
@@ -655,5 +708,4 @@ SELECT * FROM gis_electric_fence_check_point(
     NULL,
     '{"type":"Point","coordinates":[113.405861,34.769437]}'
 );
- 
  

@@ -2,6 +2,12 @@
 DROP FUNCTION IF EXISTS gis_check_electric_fence(jsonb, varchar);
 DROP FUNCTION IF EXISTS gis_check_electric_fence(varchar, text, text);
 
+-- 返回策略：
+--   code=200 表示函数正常完成。
+--   code=400 表示输入参数非法。
+--   code=500 表示执行过程中出现异常。
+--   msg 中包含执行时间，以及具体执行说明。
+
 -- =============================================
 -- 函数名称： gis_check_electric_fence
 -- 函数功能： 电子围栏空间冲突校验（禁飞区/管控区/试飞区互斥规则校验）
@@ -55,6 +61,7 @@ DECLARE
   v_has_conflict boolean;     -- 是否存在冲突标记
   v_is_contains boolean;     -- 是否为包含关系标记
   v_conflict_name text;       -- 冲突围栏中文名称
+  v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
 BEGIN
   -- 初始化冲突标记：默认无冲突
   v_has_conflict := false;
@@ -73,7 +80,8 @@ BEGIN
     table_name := '';                -- 无表名
     orig_fence_type := v_orig_fence_type; -- 原始围栏类型
     conflict_fence_type := '';       -- 无冲突类型
-    msg := '参数校验失败：围栏类型不能为空'; -- 错误提示
+    msg := format('参数校验失败：围栏类型不能为空，执行时间 %s 秒',
+      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)); -- 错误提示
     new_geom := null;                -- 无几何数据
     conflict_geom := null;           -- 无冲突几何
     RETURN NEXT;  -- 返回结果行
@@ -86,7 +94,8 @@ BEGIN
     table_name := '';
     orig_fence_type := v_orig_fence_type;
     conflict_fence_type := '';
-    msg := '参数校验失败：坐标信息不能为空';
+    msg := format('参数校验失败：坐标信息不能为空，执行时间 %s 秒',
+      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     new_geom := null;
     conflict_geom := null;
     RETURN NEXT;
@@ -118,7 +127,8 @@ BEGIN
     table_name := '';
     orig_fence_type := v_orig_fence_type;
     conflict_fence_type := '';
-    msg := '校验成功：禁飞区无需检测空间冲突';
+    msg := format('校验成功：禁飞区无需检测空间冲突，执行时间 %s 秒',
+      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     new_geom := v_new_geom_json;
     conflict_geom := null;
     RETURN NEXT;
@@ -156,7 +166,7 @@ BEGIN
     LOOP
       -- 标记存在空间冲突
       v_has_conflict := true;
-      code := 500;                              -- 空间冲突错误码
+      code := 200;                              -- 空间冲突属于正常校验结果
       orig_fence_type := v_orig_fence_type;      -- 原始围栏类型
 
       -- 围栏类型数字映射为中文名称
@@ -168,9 +178,11 @@ BEGIN
 
       -- 根据空间关系（包含/相交）返回不同提示文案
       IF v_is_contains THEN
-        msg := format('试飞区与%s发生包含冲突', v_conflict_name);
+        msg := format('试飞区与%s发生包含冲突，执行时间 %s 秒',
+          v_conflict_name, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
       ELSE
-        msg := format('试飞区与%s发生相交冲突', v_conflict_name);
+        msg := format('试飞区与%s发生相交冲突，执行时间 %s 秒',
+          v_conflict_name, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
       END IF;
       new_geom := v_new_geom_json;  -- 返回标准化后的新几何
       RETURN NEXT;                  -- 返回当前冲突行
@@ -185,7 +197,7 @@ BEGIN
     FOR table_name, conflict_fence_type, conflict_geom, v_is_contains IN EXECUTE v_sql USING v_new_geom, p_project_id
     LOOP
       v_has_conflict := true;
-      code := 500;
+      code := 200;
       orig_fence_type := v_orig_fence_type;
 
       -- 冲突类型转中文
@@ -197,9 +209,11 @@ BEGIN
 
       -- 返回冲突提示信息
       IF v_is_contains THEN
-        msg := format('试飞区与%s发生包含冲突', v_conflict_name);
+        msg := format('试飞区与%s发生包含冲突，执行时间 %s 秒',
+          v_conflict_name, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
       ELSE
-        msg := format('试飞区与%s发生相交冲突', v_conflict_name);
+        msg := format('试飞区与%s发生相交冲突，执行时间 %s 秒',
+          v_conflict_name, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
       END IF;
       new_geom := v_new_geom_json;
       RETURN NEXT;
@@ -233,15 +247,17 @@ BEGIN
     FOR table_name, conflict_fence_type, conflict_geom, v_is_contains IN EXECUTE v_sql USING v_new_geom
     LOOP
       v_has_conflict := true;
-      code := 500;
+      code := 200;
       orig_fence_type := v_orig_fence_type;
       v_conflict_name := '禁飞区'; -- 管控区只校验禁飞区，固定名称
 
       -- 根据空间关系返回提示
       IF v_is_contains THEN
-        msg := format('管控区与%s发生包含冲突', v_conflict_name);
+        msg := format('管控区与%s发生包含冲突，执行时间 %s 秒',
+          v_conflict_name, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
       ELSE
-        msg := format('管控区与%s发生相交冲突', v_conflict_name);
+        msg := format('管控区与%s发生相交冲突，执行时间 %s 秒',
+          v_conflict_name, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
       END IF;
       new_geom := v_new_geom_json;
       RETURN NEXT;
@@ -256,15 +272,17 @@ BEGIN
     FOR table_name, conflict_fence_type, conflict_geom, v_is_contains IN EXECUTE v_sql USING v_new_geom, p_project_id
     LOOP
       v_has_conflict := true;
-      code := 500;
+      code := 200;
       orig_fence_type := v_orig_fence_type;
       v_conflict_name := '禁飞区';
 
       -- 返回冲突提示
       IF v_is_contains THEN
-        msg := format('管控区与%s发生包含冲突', v_conflict_name);
+        msg := format('管控区与%s发生包含冲突，执行时间 %s 秒',
+          v_conflict_name, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
       ELSE
-        msg := format('管控区与%s发生相交冲突', v_conflict_name);
+        msg := format('管控区与%s发生相交冲突，执行时间 %s 秒',
+          v_conflict_name, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
       END IF;
       new_geom := v_new_geom_json;
       RETURN NEXT;
@@ -277,7 +295,8 @@ BEGIN
     table_name := '';
     orig_fence_type := v_orig_fence_type;
     conflict_fence_type := '';
-    msg := '参数校验失败：不支持的围栏类型';
+    msg := format('参数校验失败：不支持的围栏类型，执行时间 %s 秒',
+      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     new_geom := null;
     conflict_geom := null;
     RETURN NEXT;
@@ -291,7 +310,8 @@ BEGIN
     table_name := '';
     orig_fence_type := v_orig_fence_type;
     conflict_fence_type := '';
-    msg := '校验成功：未检测到相交、包含空间冲突';
+    msg := format('校验成功：未检测到相交、包含空间冲突，执行时间 %s 秒',
+      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     new_geom := v_new_geom_json;
     conflict_geom := null;
     RETURN NEXT;
@@ -300,11 +320,12 @@ BEGIN
 -- ===================== 全局异常捕获 =====================
 -- 捕获函数执行过程中所有未知异常，返回标准化错误信息
 EXCEPTION WHEN OTHERS THEN
-  code := 400;
+  code := 500;
   table_name := '';
   orig_fence_type := v_orig_fence_type;
   conflict_fence_type := '';
-  msg := '系统异常：' || SQLERRM || ' | 错误码：' || SQLSTATE;
+  msg := format('系统异常：%s | 错误码：%s，执行时间 %s 秒',
+    SQLERRM, SQLSTATE, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
   new_geom := null;
   conflict_geom := null;
   RETURN NEXT;
