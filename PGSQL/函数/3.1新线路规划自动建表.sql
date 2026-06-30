@@ -1,5 +1,30 @@
 -- ==============================================
 -- PostgreSQL + PostGIS 无人机GIS系统 完整表结构初始化脚本
+--
+-- 本文件定位：
+--   负责把业务区域转换成项目级三维网格，并把电子围栏、项目专属围栏、建筑等障碍数据
+--   写入网格的 block_mask/is_flyable 字段。3.2/3.3 的路径规划函数主要读取这里生成的
+--   gis_grid_nodes_<project_id> 表。
+--
+-- 数据流：
+--   GeoJSON面 + 高度范围 + 分辨率
+--     -> gis_generate_3d_grid 生成 gis_grid_nodes_<project_id>
+--     -> gis_mark_electric_fence / gis_refresh_electric_fence 写入电子围栏阻塞位 block_mask & 1
+--     -> gis_mark_buildings 写入建筑阻塞位 block_mask & 2
+--     -> 3.2/3.3 基于 is_flyable=true 的节点做路径规划
+--
+-- 使用提醒：
+--   1. 文件底部包含 SELECT 调用示例，生产环境批量执行前建议确认是否需要注释示例调用。
+--   2. gis_generate_3d_grid 会先删除同名项目网格表再重建，适合初始化/重建，不适合在线增量更新。
+--   3. 网格表使用 UNLOGGED 提高写入速度，数据库异常重启后可能丢失，需要永久保存时可改为 LOGGED。
+--   4. 分辨率越小数据量按三维近似立方增长，100m适合全局粗网格，20/30m建议只在3.3走廊内生成。
+--
+-- 返回策略：
+--   code=200 表示函数正常完成。
+--   code=400 表示输入参数非法。
+--   code=500 表示执行过程中出现异常。
+--   msg 中包含执行时间，以及具体执行说明。
+--
 -- 功能说明：
 -- 1. 依赖PostGIS扩展实现空间数据存储、空间索引、地理计算
 -- 2. 包含电子围栏管理、3D网格路径规划、飞行轨迹记录三大核心模块
@@ -74,6 +99,7 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    v_start_time timestamptz := clock_timestamp(); -- 统计函数总耗时，写入返回msg
     v_table TEXT;                          -- 最终生成的网格表名
     v_idx_prefix TEXT;                     -- 动态索引名前缀，避免项目ID过长导致索引名截断冲突
     v_cnt BIGINT := 0;                     -- 插入网格点的总行数
@@ -127,7 +153,7 @@ BEGIN
         INTO v_min_lon, v_max_lon, v_min_lat, v_max_lat;
     EXCEPTION WHEN OTHERS THEN
         code := 400;
-        msg := '参数错误：GeoJSON格式非法，无法解析空间范围';
+        msg := format('参数错误：GeoJSON格式非法，无法解析空间范围，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         RETURN NEXT;
         RETURN;
     END;
@@ -136,7 +162,7 @@ BEGIN
     -- 检查范围参数：最小值不能大于等于最大值
     IF v_min_lon >= v_max_lon OR v_min_lat >= v_max_lat OR p_min_alt >= p_max_alt THEN
         code := 400;
-        msg := '参数错误：最小坐标不能大于等于最大坐标';
+        msg := format('参数错误：最小坐标不能大于等于最大坐标，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         RETURN NEXT;
         RETURN;
     END IF;
@@ -144,14 +170,14 @@ BEGIN
     -- 检查分辨率：必须大于0
     IF p_resolution <= 0 THEN
         code := 400;
-        msg := '参数错误：分辨率必须大于0';
+        msg := format('参数错误：分辨率必须大于0，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         RETURN NEXT;
         RETURN;
     END IF;
 
     IF GeometryType(v_geom) NOT IN ('POLYGON', 'MULTIPOLYGON') THEN
         code := 400;
-        msg := '参数错误：GeoJSON必须是Polygon或MultiPolygon面数据';
+        msg := format('参数错误：GeoJSON必须是Polygon或MultiPolygon面数据，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         RETURN NEXT;
         RETURN;
     END IF;
@@ -163,7 +189,7 @@ BEGIN
 
     IF abs(v_lon_meter) < 1 THEN
         code := 400;
-        msg := '参数错误：区域纬度过高，无法按经纬度生成稳定网格';
+        msg := format('参数错误：区域纬度过高，无法按经纬度生成稳定网格，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         RETURN NEXT;
         RETURN;
     END IF;
@@ -181,7 +207,7 @@ BEGIN
 
     IF v_estimated_count > v_max_grid_count THEN
         code := 400;
-        msg := format('参数错误：预计最多生成 %s 个网格点，超过单次上限 %s，请提高分辨率或缩小范围', v_estimated_count, v_max_grid_count);
+        msg := format('参数错误：预计最多生成 %s 个网格点，超过单次上限 %s，请提高分辨率或缩小范围，执行时间 %s 秒', v_estimated_count, v_max_grid_count, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := v_estimated_count;
         RETURN NEXT;
         RETURN;
@@ -293,13 +319,13 @@ BEGIN
     EXECUTE format('ALTER TABLE %I SET (autovacuum_enabled = on); ANALYZE %I;', v_table, v_table);
 
     -- ===================== 执行成功，返回结果 =====================
-    msg := format('三维网格生成成功，共生成 %s 个点', v_cnt);
+    msg := format('三维网格生成成功，共生成 %s 个点，执行时间 %s 秒', v_cnt, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     RETURN NEXT;
 
 -- ===================== 全局异常捕获 =====================
 EXCEPTION WHEN OTHERS THEN
     code := 500;
-    msg := '生成失败：' || SQLERRM;
+    msg := format('生成失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     count := 0;
     RETURN NEXT;
 END;
@@ -337,6 +363,9 @@ $$;
 --            '2' → '管控区'
 --            '3' → '适飞区'
 --          当一个网格点同时落在多个围栏内时，按照优先级选取：禁飞区 > 管控区 > 适飞区。
+--          同时维护 block_mask 第1位和 is_flyable：
+--            禁飞区/管控区：block_mask | 1，is_flyable=false
+--            适飞区：仅记录 zone_type，不清除建筑/地形等其他阻塞位
 -- 参数：p_project_id - 项目ID（可选，空字符串或NULL表示操作默认表 gis_grid_nodes）
 -- 返回值：标准TABLE结构
 --   code        integer     返回码：200成功，400参数错误，500执行异常
@@ -351,11 +380,14 @@ $$;
 -- 注意事项：
 --   - 调用前需确保三维网格表已通过 gis_generate_3d_grid 生成。
 --   - 围栏数据必须包含有效的 geometry 和 height（限制高度），且 fence_type 在 ('1','2','3') 范围内。
+--   - height 为空或0时表示不限高；否则仅标记 alt <= height 的网格层。
+--   - 如果存在 gis_electric_fence_<project_id> 项目专属围栏表，会与 bo_electric_fence 合并打标。
 -- ==============================================
 CREATE OR REPLACE FUNCTION gis_mark_electric_fence(p_project_id VARCHAR DEFAULT '')
 RETURNS TABLE (code integer, table_name text, msg text, count bigint)
 LANGUAGE plpgsql AS $$
 DECLARE
+    v_start_time timestamptz := clock_timestamp();
     v_table TEXT;
     v_updated_rows BIGINT := 0;
     v_cleared_rows BIGINT := 0;
@@ -379,8 +411,8 @@ BEGIN
     RAISE NOTICE '[gis_mark_electric_fence] table: %, elapsed: %', v_table, clock_timestamp() - v_step_start;
 
     IF to_regclass(format('%I.%I', current_schema(), v_table)) IS NULL THEN
-        code := 404;
-        msg := format('网格表不存在：%s', v_table);
+        code := 400;
+        msg := format('参数错误：网格表不存在：%s，执行时间 %s 秒', v_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start)::numeric, 3));
         count := 0;
         RETURN NEXT;
         RETURN;
@@ -490,7 +522,7 @@ BEGIN
         GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
         count := v_cleared_rows;
         code := 200;
-        msg := format('无有效电子围栏，已清空 %s 条标记', v_cleared_rows);
+        msg := format('无有效电子围栏，已清空 %s 条标记，执行时间 %s 秒', v_cleared_rows, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start)::numeric, 3));
         RETURN NEXT;
         RETURN;
     END IF;
@@ -575,13 +607,13 @@ BEGIN
 
     count := v_updated_rows + v_cleared_rows;
     code := 200;
-    msg := format('电子围栏标记完成，耗时 %s 秒，更新 %s 条，清空 %s 条', EXTRACT(epoch FROM clock_timestamp() - v_start)::int, v_updated_rows, v_cleared_rows);
+    msg := format('电子围栏标记完成，更新 %s 条，清空 %s 条，执行时间 %s 秒', v_updated_rows, v_cleared_rows, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start)::numeric, 3));
     RAISE NOTICE '[gis_mark_electric_fence] update elapsed: %, affected: %', clock_timestamp() - v_step_start, count;
     RETURN NEXT;
 
 EXCEPTION WHEN OTHERS THEN
     code := 500;
-    msg := SQLERRM;
+    msg := format('执行异常：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start)::numeric, 3));
     count := 0;
     table_name := v_table;
     RAISE NOTICE '[gis_mark_electric_fence] error: %', SQLERRM;
@@ -612,12 +644,17 @@ $$;
 -- 函数名：gis_refresh_electric_fence
 -- 功能描述：刷新三维网格的电子围栏标记。先清空已标记的zone_type，再重新标记。
 -- 参数：p_project_id - 项目ID（可选，空表示公共表）
+--       p_fence_id   - 可选围栏ID；为空时全量刷新，不为空时只刷新该围栏影响范围。
 -- 返回值：标准TABLE结构
 --   code        integer     返回码：200成功，500执行异常
 --   table_name  text        操作的网格表名
 --   msg         text        结果描述
 --   count       bigint      更新记录数
 -- 适用场景：电子围栏数据修改后，快速刷新网格区域标记
+-- 说明：
+--   - 局部刷新会先找到指定围栏范围，再把该范围内所有可能重叠的有效围栏重新计算一遍；
+--   - 如果围栏已经被物理删除且无法找到原 geom，无法确定影响范围，只能做全量刷新；
+--   - 推荐业务删除围栏时使用软删除，然后调用本函数局部刷新。
 -- ==============================================
 CREATE OR REPLACE FUNCTION gis_refresh_electric_fence(
     p_project_id VARCHAR DEFAULT '',
@@ -651,8 +688,8 @@ BEGIN
     table_name := v_table;
 
     IF to_regclass(format('%I.%I', current_schema(), v_table)) IS NULL THEN
-        code := 404;
-        msg := format('网格表不存在：%s', v_table);
+        code := 400;
+        msg := format('参数错误：网格表不存在：%s，执行时间 %s 秒', v_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
         RETURN NEXT;
         RETURN;
@@ -717,8 +754,8 @@ BEGIN
         SELECT ST_Extent(geom4326) INTO v_scope_extent FROM tmp_refresh_scope_fence;
 
         IF v_scope_extent IS NULL THEN
-            code := 404;
-            msg := format('未找到可刷新的电子围栏或围栏无geom：%s', p_fence_id);
+            code := 400;
+            msg := format('参数错误：未找到可刷新的电子围栏或围栏无geom：%s，执行时间 %s 秒', p_fence_id, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
             count := 0;
             RETURN NEXT;
             RETURN;
@@ -805,7 +842,7 @@ BEGIN
         GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
         count := v_cleared_rows;
         code := 200;
-        msg := format('无有效电子围栏，已清空 %s 条标记', v_cleared_rows);
+        msg := format('无有效电子围栏，已清空 %s 条标记，执行时间 %s 秒', v_cleared_rows, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         RETURN NEXT;
         RETURN;
     END IF;
@@ -900,15 +937,15 @@ BEGIN
     count := v_updated_match_rows + v_cleared_rows;
     code := 200;
     msg := CASE
-        WHEN v_is_partial THEN format('按围栏 %s 局部刷新完成，更新 %s 条，清空 %s 条', p_fence_id, v_updated_match_rows, v_cleared_rows)
-        ELSE format('按 bo_electric_fence 当前有效数据和项目专属围栏刷新完成，更新 %s 条，清空 %s 条', v_updated_match_rows, v_cleared_rows)
+        WHEN v_is_partial THEN format('按围栏 %s 局部刷新完成，更新 %s 条，清空 %s 条，执行时间 %s 秒', p_fence_id, v_updated_match_rows, v_cleared_rows, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
+        ELSE format('按 bo_electric_fence 当前有效数据和项目专属围栏刷新完成，更新 %s 条，清空 %s 条，执行时间 %s 秒', v_updated_match_rows, v_cleared_rows, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
     END;
     RETURN NEXT;
 
 EXCEPTION WHEN OTHERS THEN
     code := 500;
     table_name := v_table;
-    msg := '刷新失败：' || SQLERRM;
+    msg := format('刷新失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     count := 0;
     RETURN NEXT;
 END;
@@ -923,6 +960,19 @@ SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
 
 
 -- ========================================== gis_mark_buildings  根据建筑表标记三维网格障碍============================================================
+-- 功能说明：
+--   1. 根据项目建筑表 gis_buildings_<project_id> 标记三维网格中的建筑障碍。
+--   2. 命中的网格设置 block_mask 第2位：block_mask | 2，并将 is_flyable=false。
+--   3. 未命中的旧建筑标记会清除：block_mask & ~2，并按剩余阻塞位重算 is_flyable。
+-- 性能优化：
+--   - 先把建筑几何物化到临时表并创建 GiST 索引；
+--   - 再按建筑总体空间范围裁剪 z=0 平面网格；
+--   - 先做二维 x/y 命中，再展开高度层，避免全量三维网格和所有建筑直接空间连接。
+-- 参数：
+--   p_project_id       项目ID，不能为空。
+--   p_building_buffer  建筑缓冲距离，单位米；100m 粗网格建议 30~50，避免小建筑漏标。
+-- 返回：
+--   code/table_name/msg/count，其中 count=更新建筑阻塞位 + 清除旧建筑阻塞位的行数。
 DO $$
 DECLARE
     r RECORD;
@@ -944,6 +994,7 @@ RETURNS TABLE (code integer, table_name text, msg text, count bigint)
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    v_start_time timestamptz := clock_timestamp();
     v_grid_table TEXT;
     v_building_table TEXT;
     v_grid_reg REGCLASS;
@@ -958,7 +1009,7 @@ BEGIN
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         code := 400;
         table_name := NULL;
-        msg := '参数错误：项目ID不能为空';
+        msg := format('参数错误：项目ID不能为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
         RETURN NEXT;
         RETURN;
@@ -974,16 +1025,16 @@ BEGIN
     SELECT to_regclass(format('%I.%I', current_schema(), v_building_table)) INTO v_building_reg;
 
     IF v_grid_reg IS NULL THEN
-        code := 404;
-        msg := format('网格表不存在：%s', v_grid_table);
+        code := 400;
+        msg := format('参数错误：网格表不存在：%s，执行时间 %s 秒', v_grid_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
         RETURN NEXT;
         RETURN;
     END IF;
 
     IF v_building_reg IS NULL THEN
-        code := 404;
-        msg := format('建筑表不存在：%s', v_building_table);
+        code := 400;
+        msg := format('参数错误：建筑表不存在：%s，执行时间 %s 秒', v_building_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
         RETURN NEXT;
         RETURN;
@@ -1046,7 +1097,7 @@ BEGIN
 
         count := v_cleared_rows;
         code := 200;
-        msg := format('无有效建筑数据，已清空 %s 条建筑标记', v_cleared_rows);
+        msg := format('无有效建筑数据，已清空 %s 条建筑标记，执行时间 %s 秒', v_cleared_rows, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         RETURN NEXT;
         RETURN;
     END IF;
@@ -1123,13 +1174,13 @@ BEGIN
 
     count := v_updated_rows + v_cleared_rows;
     code := 200;
-    msg := format('建筑打标完成，更新 %s 条，清空 %s 条', v_updated_rows, v_cleared_rows);
+    msg := format('建筑打标完成，更新 %s 条，清空 %s 条，执行时间 %s 秒', v_updated_rows, v_cleared_rows, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     RETURN NEXT;
 
 EXCEPTION WHEN OTHERS THEN
     code := 500;
     table_name := v_grid_table;
-    msg := '建筑打标失败：' || SQLERRM;
+    msg := format('建筑打标失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     count := 0;
     RETURN NEXT;
 END;

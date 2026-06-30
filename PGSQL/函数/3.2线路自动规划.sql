@@ -1,3 +1,27 @@
+-- ==============================================
+-- 3.2 线路自动规划：全局网格 A* 粗规划函数
+--
+-- 本文件定位：
+--   基于 3.1 生成的项目级网格表 gis_grid_nodes_<project_id> 做三维 A* 路径规划，
+--   并把结果写入 gis_flight_paths。它适合使用 100m 左右的全局粗网格进行快速规划。
+--
+-- 与 3.1 / 3.3 的关系：
+--   1. 3.1 负责生成网格和障碍打标，输出 is_flyable=true/false。
+--   2. 3.2 读取可飞网格做全局路径搜索，返回 code/msg + 航线字段。
+--   3. 3.3 会先调用本文件的 gis_astar_3d_flight_plan 得到粗航线，
+--      再沿粗航线走廊生成 20/30m 精细网格做二次规划。
+--
+-- 返回策略：
+--   code=200 表示函数正常完成。
+--   code=400 表示输入参数非法。
+--   code=500 表示执行过程中出现异常。
+--   msg 中包含执行时间，以及具体执行说明，便于接口侧记录耗时和定位慢点。
+--
+-- 维护提醒：
+--   本文件的核心函数使用 RETURNS TABLE，返回列 id/project_id/del_flag 等会成为 PL/pgSQL 变量。
+--   函数体内静态 SQL 必须使用表别名访问同名字段，避免 "column reference is ambiguous"。
+-- ==============================================
+
 -- =============================================================================
 -- 计算 LineStringZ 的近似米制三维长度：经纬度近似换算为米，高度差按 Z 值米计算
 -- =============================================================================
@@ -101,6 +125,11 @@ $$;
  * code        integer     返回码：200成功，400参数错误，500执行异常
  * msg         text        执行结果描述，包含执行时间
  * 其余字段为 gis_flight_paths 表字段，实际调用时通常只有一行。
+ *
+ * 维护注意：
+ * 本函数使用 RETURNS TABLE，id/project_id/del_flag 等返回列会成为 PL/pgSQL 输出变量。
+ * 函数体内静态 SQL 访问同名表字段时必须使用表别名，例如 p.id、g.id，
+ * INSERT ... RETURNING 主键时必须写 RETURNING gis_flight_paths.id，避免字段歧义。
  */
 CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan(
     p_start_lon        DOUBLE PRECISION,
@@ -407,7 +436,7 @@ BEGIN
     UPDATE tmp_grid g
     SET g_cost = 0,
         h_cost = ST_3DDistance(g.geom, v_end_pt),
-        f_cost = g_cost + h_cost
+        f_cost = 0 + ST_3DDistance(g.geom, v_end_pt)
     WHERE g.id = v_start_id;
 
     -- ====================== A* 算法核心循环 ======================
