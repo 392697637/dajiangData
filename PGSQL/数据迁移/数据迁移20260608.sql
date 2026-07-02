@@ -459,7 +459,7 @@ DROP INDEX IF EXISTS idx_bo_ground_ele_geom_3d;
 ALTER TABLE bo_ground_ele DROP COLUMN IF EXISTS geom_3d;
   
 
--- 创建通用空间字段（兼容 点 Point、线 Line、面 Polygon）
+-- 创建通用空间字段（兼容 点 Point、线 Line、面 Polygon、混合集合 GeometryCollection）
 ALTER TABLE bo_ground_ele ADD COLUMN geom geometry(Geometry);
 ALTER TABLE bo_ground_ele ADD COLUMN geom_3d geometry(GeometryZ);
 CREATE INDEX IF NOT EXISTS idx_bo_ground_ele_geom ON bo_ground_ele USING GIST (geom);
@@ -472,7 +472,8 @@ COMMENT ON COLUMN bo_ground_ele.geom_3d IS '空间数据';
 -- 1. FeatureCollection：{"type":"FeatureCollection","features":[...]}
 -- 2. Feature：{"type":"Feature","geometry":{...},"properties":{...}}
 -- 3. Geometry：{"type":"Point/LineString/Polygon/MultiPolygon","coordinates":[...]}
--- 兼容点、线、面；对无效面/线使用 ST_MakeValid 尝试修复。
+-- 4. GeometryCollection：{"type":"GeometryCollection","geometries":[...]}
+-- 兼容点、线、面、混合集合；对无效面/线使用 ST_MakeValid 尝试修复。
 UPDATE bo_ground_ele t
 SET 
     geom = ST_SetSRID(ST_Force2D(ST_MakeValid(src.raw_geom)), 4326),
@@ -493,7 +494,8 @@ WHERE
         'ST_LineString',
         'ST_MultiLineString',
         'ST_Polygon',
-        'ST_MultiPolygon'
+        'ST_MultiPolygon',
+        'ST_GeometryCollection'
     );
 
 SELECT * FROM bo_ground_ele WHERE geom IS NULL;

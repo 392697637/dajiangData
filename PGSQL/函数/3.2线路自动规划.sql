@@ -50,8 +50,9 @@ RETURNS DOUBLE PRECISION AS $$
     ), 0)::DOUBLE PRECISION
     FROM segs;
 $$ LANGUAGE SQL IMMUTABLE STRICT;
+COMMENT ON FUNCTION gis_linestring_length_m(geometry) IS '计算线长';
 
--- ==================================================================================== gis_astar_3d_flight_plan  空间三维路径规划====================================================================================
+-- ==================================================================================== gis_astar_3d_flight  单段三维路径规划====================================================================================
 -- ===================== 删除可能存在的同名函数（保证幂等性） =====================
 
 DO $$
@@ -60,7 +61,8 @@ DECLARE
 BEGIN
     FOR r IN (SELECT oid, proname, pg_get_function_identity_arguments(oid) as args
               FROM pg_proc
-              WHERE proname = 'gis_astar_3d_flight_plan')
+              WHERE proname IN ('gis_astar_3d_flight_plan', 'gis_astar_3d_flight')
+              ORDER BY CASE proname WHEN 'gis_astar_3d_flight_plan' THEN 1 ELSE 2 END)
     LOOP
         EXECUTE 'DROP FUNCTION ' || r.oid::regproc || '(' || r.args || ') CASCADE';
     END LOOP;
@@ -69,7 +71,7 @@ $$;
 
 
 /**
- * 函数名称：gis_astar_3d_flight_plan
+ * 函数名称：gis_astar_3d_flight
  * 所属模块：GIS 空间三维路径规划 / 无人机自动驾驶航线生成
  * 依赖环境：PostgreSQL + PostGIS（支持PointZ/LineStringZ/3D距离计算）
  * 依赖表：
@@ -79,7 +81,7 @@ $$;
  *   3. bo_electric_fence 禁飞区表（用于边相交性动态检查）
  *
  * 【核心功能】
- * 基于三维A*寻路算法，为无人机/飞行器自动生成带避障、高度平滑、可直接执行的低空飞行航线。
+ * 基于三维A*寻路算法，为单段起终点自动生成带避障、高度平滑、可直接执行的低空飞行航线。
  * 支持历史航线复用、强制重算、多级容错兜底、多项目多用户数据隔离。
  *
  * 【重要修改说明】
@@ -128,10 +130,9 @@ $$;
  *
  * 维护注意：
  * 本函数使用 RETURNS TABLE，id/project_id/del_flag 等返回列会成为 PL/pgSQL 输出变量。
- * 函数体内静态 SQL 访问同名表字段时必须使用表别名，例如 p.id、g.id，
- * INSERT ... RETURNING 主键时必须写 RETURNING gis_flight_paths.id，避免字段歧义。
+ * 函数体内静态 SQL 访问同名表字段时必须使用表别名，例如 p.id、g.id。
  */
-CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan(
+CREATE OR REPLACE FUNCTION gis_astar_3d_flight(
     p_start_lon        DOUBLE PRECISION,
     p_start_lat        DOUBLE PRECISION,
     p_start_alt        DOUBLE PRECISION,
@@ -206,10 +207,6 @@ DECLARE
     ratio           DOUBLE PRECISION;
     -- 插值计算后的新高度值（米）
     new_z           DOUBLE PRECISION;
-    
-    -- ====================== 数据库操作 ======================
-    -- 新插入航线表的主键ID
-    v_path_id       INT;
     
     -- ====================== 搜索范围裁剪 ======================
     -- 网格搜索范围X轴最小值（经度方向索引）
@@ -356,31 +353,18 @@ BEGIN
         );
         -- 平滑航点与原始航点一致（直线无需平滑）
         v_smooth_waypoints := v_waypoints;
-        -- 将直线航线插入数据库持久化，并获取新记录的ID
-        INSERT INTO gis_flight_paths (
-            project_id, create_user, update_user,
-            start_point, end_point, safe_altitude,
-            path_line, smooth_path_line,
-            waypoints, smooth_waypoints, total_distance, smooth_ratio
-        ) VALUES (
-            p_project_id,
-            p_create_user,
-            p_create_user,
-            v_start_pt,
-            v_end_pt, 
-            p_safe_altitude,
-            v_path_line, 
-            v_final_path,
-            v_waypoints, 
-            v_smooth_waypoints,
-            gis_linestring_length_m(v_final_path),    -- 计算 smooth_path_line 的米制三维长度
-            p_height_mode
-        ) RETURNING gis_flight_paths.id INTO v_path_id;    -- 获取插入后的自增主键
-
-        -- 返回新生成的航线记录
+        -- 只返回计算结果，不写入 gis_flight_paths。
         v_return_msg := format('规划成功：未满足A*条件，已生成直线兜底航线，执行时间 %s 秒',
                                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
-        RETURN QUERY SELECT 200, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
+        RETURN QUERY
+        SELECT
+            200, v_return_msg,
+            NULL::integer, p_project_id::char(32), p_create_user::varchar(32), NOW()::timestamp,
+            p_create_user::varchar(32), NOW()::timestamp, false,
+            v_start_pt, v_end_pt, p_safe_altitude,
+            v_path_line, v_final_path,
+            v_waypoints, v_smooth_waypoints,
+            gis_linestring_length_m(v_final_path), p_height_mode;
         RETURN; -- 提前结束函数
     END IF;
  -- ====================== 分支2：满足A*条件 → 执行三维路径规划 ======================
@@ -576,22 +560,17 @@ BEGIN
         );
         v_smooth_waypoints := v_waypoints;
 
-        INSERT INTO gis_flight_paths (
-            project_id, create_user, update_user,
-            start_point, end_point, safe_altitude,
-            path_line, smooth_path_line,
-            waypoints, smooth_waypoints, total_distance, smooth_ratio
-        ) VALUES (
-            p_project_id, p_create_user, p_create_user,
+        v_return_msg := format('规划成功：A*未找到有效路径，已生成直线兜底航线，执行时间 %s 秒',
+                               ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY
+        SELECT
+            200, v_return_msg,
+            NULL::integer, p_project_id::char(32), p_create_user::varchar(32), NOW()::timestamp,
+            p_create_user::varchar(32), NOW()::timestamp, false,
             v_start_pt, v_end_pt, p_safe_altitude,
             v_path_line, v_final_path,
             v_waypoints, v_smooth_waypoints,
-            gis_linestring_length_m(v_final_path), p_height_mode
-        ) RETURNING gis_flight_paths.id INTO v_path_id;
-
-        v_return_msg := format('规划成功：A*未找到有效路径，已生成直线兜底航线，执行时间 %s 秒',
-                               ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
-        RETURN QUERY SELECT 200, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
+            gis_linestring_length_m(v_final_path), p_height_mode;
         RETURN;
     END IF;
 
@@ -772,27 +751,21 @@ BEGIN
     INTO v_smooth_waypoints
     FROM (SELECT (ST_DumpPoints(v_final_path)).geom AS p) AS t;
 
-    -- ====================== 将最终航线保存到数据库 ======================
-    INSERT INTO gis_flight_paths (
-        project_id, create_user, update_user,
-        start_point, end_point, safe_altitude,
-        path_line, smooth_path_line,
-        waypoints, smooth_waypoints, total_distance, smooth_ratio
-    ) VALUES (
-        p_project_id, p_create_user, p_create_user,
+    -- 单段核心函数只返回计算结果，最终入库由 gis_flight_paths_plan 汇总后处理。
+    DROP TABLE IF EXISTS tmp_grid;
+
+    -- 返回最终生成的航线数据
+    v_return_msg := format('规划成功：A*路径规划完成，执行时间 %s 秒',
+                           ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    RETURN QUERY
+    SELECT
+        200, v_return_msg,
+        NULL::integer, p_project_id::char(32), p_create_user::varchar(32), NOW()::timestamp,
+        p_create_user::varchar(32), NOW()::timestamp, false,
         v_start_pt, v_end_pt, p_safe_altitude,
         v_path_line, v_final_path,
         v_waypoints, v_smooth_waypoints,
-        gis_linestring_length_m(v_final_path),  -- 计算 smooth_path_line 的米制三维长度
-        p_height_mode
-    ) RETURNING gis_flight_paths.id INTO v_path_id;
-     -- 删除临时表，释放资源
-    DROP TABLE IF EXISTS tmp_grid;
-
-    -- 返回最终生成的航线记录
-    v_return_msg := format('规划成功：A*路径规划完成，执行时间 %s 秒',
-                           ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
-    RETURN QUERY SELECT 200, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
+        gis_linestring_length_m(v_final_path), p_height_mode;
 
 -- ====================== 全局异常捕获：任何错误都返回直线航线（保证服务不崩溃） ======================
 EXCEPTION WHEN OTHERS THEN
@@ -809,26 +782,107 @@ EXCEPTION WHEN OTHERS THEN
     );
     v_smooth_waypoints := v_waypoints;
 
-    INSERT INTO gis_flight_paths (
-        project_id, create_user, update_user,
-        start_point, end_point, safe_altitude,
-        path_line, smooth_path_line,
-        waypoints, smooth_waypoints, total_distance, smooth_ratio
-    ) VALUES (
-        p_project_id, p_create_user, p_create_user,
-        v_start_pt, v_end_pt, p_safe_altitude,
-        v_path_line, v_final_path,
-        v_waypoints, v_smooth_waypoints,
-        gis_linestring_length_m(v_final_path), p_height_mode
-    ) RETURNING gis_flight_paths.id INTO v_path_id;
-
-    -- 返回兜底航线
+    -- 异常时也只返回兜底航线，不写入 gis_flight_paths。
     v_return_msg := format('执行异常：%s，已返回直线兜底航线，执行时间 %s 秒',
                            SQLERRM,
                            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
-    RETURN QUERY SELECT 500, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
+    RETURN QUERY
+    SELECT
+        500, v_return_msg,
+        NULL::integer, p_project_id::char(32), p_create_user::varchar(32), NOW()::timestamp,
+        p_create_user::varchar(32), NOW()::timestamp, false,
+        v_start_pt, v_end_pt, p_safe_altitude,
+        v_path_line, v_final_path,
+        v_waypoints, v_smooth_waypoints,
+        gis_linestring_length_m(v_final_path), p_height_mode;
 END;
 $$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION gis_astar_3d_flight(
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR
+) IS '单段航线';
+
+-- ====================================================================================
+-- gis_astar_3d_flight_plan
+-- 对外入口函数：统一调用 gis_flight_paths_plan，最终只写入一条总航线。
+-- ====================================================================================
+/**
+ * 函数名称：gis_astar_3d_flight_plan
+ * 核心功能：对外航线规划入口。
+ * 处理规则：
+ *   1. 起终点距离不超过 5km：按 1 段计算。
+ *   2. 起终点距离超过 5km：按每段不超过 5km 拆分。
+ *   3. 所有分段统一合并，只写入一条总航线。
+ */
+CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan(
+    p_start_lon        DOUBLE PRECISION,
+    p_start_lat        DOUBLE PRECISION,
+    p_start_alt        DOUBLE PRECISION,
+    p_end_lon          DOUBLE PRECISION,
+    p_end_lat          DOUBLE PRECISION,
+    p_end_alt          DOUBLE PRECISION,
+    p_safe_altitude    DOUBLE PRECISION DEFAULT 120,
+    p_height_mode      DOUBLE PRECISION DEFAULT 0,
+    p_force_gen        BOOLEAN DEFAULT FALSE,
+    p_project_id       VARCHAR DEFAULT NULL,
+    p_create_user      VARCHAR DEFAULT NULL
+) RETURNS TABLE (
+    code integer,
+    msg text,
+    id integer,
+    project_id char(32),
+    create_user varchar(32),
+    create_time timestamp,
+    update_user varchar(32),
+    update_time timestamp,
+    del_flag boolean,
+    start_point geometry(PointZ,4326),
+    end_point geometry(PointZ,4326),
+    safe_altitude double precision,
+    path_line geometry(LineStringZ,4326),
+    smooth_path_line geometry(LineStringZ,4326),
+    waypoints jsonb,
+    smooth_waypoints jsonb,
+    total_distance double precision,
+    smooth_ratio double precision
+) AS $$
+BEGIN
+    IF p_start_lon IS NULL OR p_start_lat IS NULL OR p_start_alt IS NULL
+       OR p_end_lon IS NULL OR p_end_lat IS NULL OR p_end_alt IS NULL THEN
+        RETURN QUERY
+        SELECT *
+        FROM gis_astar_3d_flight(
+            p_start_lon, p_start_lat, p_start_alt,
+            p_end_lon, p_end_lat, p_end_alt,
+            p_safe_altitude, p_height_mode, p_force_gen,
+            p_project_id, p_create_user
+        );
+        RETURN;
+    END IF;
+
+    -- 正常入口统一走汇总函数：
+    -- 5km 内按 1 段计算，超过 5km 自动拆段；最终只插入并返回一条总航线。
+    RETURN QUERY
+    SELECT *
+    FROM gis_flight_paths_plan(
+        jsonb_build_array(
+            jsonb_build_object('lon', p_start_lon, 'lat', p_start_lat, 'alt', p_start_alt),
+            jsonb_build_object('lon', p_end_lon, 'lat', p_end_lat, 'alt', p_end_alt)
+        ),
+        p_safe_altitude,
+        p_force_gen,
+        p_project_id,
+        p_create_user,
+        p_height_mode
+    );
+END;
+$$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION gis_astar_3d_flight_plan(
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR
+) IS '分段入口';
 
 
 -- =============================================================================
@@ -841,13 +895,15 @@ $$ LANGUAGE plpgsql;
 --   [[113.1,34.1,50],[113.2,34.2,50]]
 -- =============================================================================
 DROP FUNCTION IF EXISTS gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR);
+DROP FUNCTION IF EXISTS gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR, DOUBLE PRECISION);
 
 CREATE OR REPLACE FUNCTION gis_flight_paths_plan(
     p_points         JSONB,
     p_safe_altitude  DOUBLE PRECISION DEFAULT 120,
     p_force_gen      BOOLEAN DEFAULT FALSE,
     p_project_id     VARCHAR DEFAULT NULL,
-    p_create_user    VARCHAR DEFAULT NULL
+    p_create_user    VARCHAR DEFAULT NULL,
+    p_height_mode    DOUBLE PRECISION DEFAULT 0
 ) RETURNS TABLE (
     code integer,
     msg text,
@@ -873,7 +929,6 @@ DECLARE
     v_return_msg TEXT;
 
     v_input_count INT;
-    v_direct_m DOUBLE PRECISION;
     v_segment_m DOUBLE PRECISION;
     v_segment_count INT;
     v_input_idx INT;
@@ -896,7 +951,7 @@ DECLARE
     v_seg_end_alt DOUBLE PRECISION;
 
     v_part gis_flight_paths%ROWTYPE;
-    v_part_ids INT[] := '{}'::INT[];
+    v_part_count INT := 0;
     v_path_id INT;
 
     v_start_pt geometry(PointZ,4326);
@@ -985,35 +1040,9 @@ BEGIN
     FROM tmp_flight_plan_input_points
     WHERE seq = v_input_count;
 
-    -- 只有起终点且不超过 5km 时，直接复用核心规划函数。
-    IF v_input_count = 2 THEN
-        SELECT lon, lat, alt INTO v_lon1, v_lat1, v_alt1
-        FROM tmp_flight_plan_input_points WHERE seq = 1;
-        SELECT lon, lat, alt INTO v_lon2, v_lat2, v_alt2
-        FROM tmp_flight_plan_input_points WHERE seq = 2;
-
-        v_direct_m := SQRT(
-            POWER((v_lon2 - v_lon1) * 111000.0 * COS(RADIANS((v_lat1 + v_lat2) / 2.0)), 2)
-            + POWER((v_lat2 - v_lat1) * 111000.0, 2)
-        );
-
-        IF v_direct_m <= 5000 THEN
-            RETURN QUERY
-            SELECT *
-            FROM gis_astar_3d_flight_plan(
-                v_lon1, v_lat1, v_alt1,
-                v_lon2, v_lat2, v_alt2,
-                p_safe_altitude,
-                0,
-                p_force_gen,
-                p_project_id,
-                p_create_user
-            );
-            RETURN;
-        END IF;
-    END IF;
-
-    -- 多点或长距离：相邻输入点逐段处理，单段超过 5km 则继续拆成若干小段。
+    -- 相邻输入点逐段处理，单段超过 5km 则继续拆成若干小段。
+    -- gis_astar_3d_flight 只负责计算并返回数据，不写入 gis_flight_paths。
+    -- 本函数统一把所有分段结果合并后，只插入一条总航线。
     FOR v_input_idx IN 1..v_input_count - 1 LOOP
         SELECT lon, lat, alt INTO v_lon1, v_lat1, v_alt1
         FROM tmp_flight_plan_input_points WHERE seq = v_input_idx;
@@ -1047,22 +1076,22 @@ BEGIN
                 r.waypoints, r.smooth_waypoints,
                 r.total_distance, r.smooth_ratio
             INTO v_part
-            FROM gis_astar_3d_flight_plan(
+            FROM gis_astar_3d_flight(
                 v_seg_start_lon, v_seg_start_lat, v_seg_start_alt,
                 v_seg_end_lon, v_seg_end_lat, v_seg_end_alt,
                 p_safe_altitude,
-                0,
+                p_height_mode,
                 TRUE,
                 p_project_id,
                 p_create_user
             ) r
             LIMIT 1;
 
-            IF v_part.id IS NULL THEN
+            IF v_part.path_line IS NULL OR v_part.smooth_path_line IS NULL THEN
                 RAISE EXCEPTION '分段路径规划失败：input_seq=%, segment=%', v_input_idx, v_segment_idx;
             END IF;
 
-            v_part_ids := array_append(v_part_ids, v_part.id);
+            v_part_count := v_part_count + 1;
 
             v_point_count := ST_NumPoints(v_part.path_line);
             v_append_start := CASE WHEN ST_NumPoints(v_merged_path_line) = 0 THEN 1 ELSE 2 END;
@@ -1092,6 +1121,8 @@ BEGIN
     INTO v_smooth_waypoints
     FROM ST_DumpPoints(v_merged_smooth_line) AS dp;
 
+    -- 所有分段点已经合并到 v_merged_path_line / v_merged_smooth_line。
+    -- 这里只插入一条总航线记录，最终返回的也是这一条记录。
     INSERT INTO gis_flight_paths (
         project_id, create_user, update_user,
         start_point, end_point, safe_altitude,
@@ -1103,18 +1134,12 @@ BEGIN
         v_merged_path_line, v_merged_smooth_line,
         v_waypoints, v_smooth_waypoints,
         gis_linestring_length_m(v_merged_smooth_line),
-        0
+        p_height_mode
     ) RETURNING gis_flight_paths.id INTO v_path_id;
 
-    -- 子分段结果只作为计算过程数据，拼接成功后逻辑删除，避免污染业务航线列表。
-    UPDATE gis_flight_paths fp
-    SET del_flag = true,
-        update_user = p_create_user,
-        update_time = NOW()
-    WHERE fp.id = ANY(v_part_ids);
-
-    v_return_msg := format('规划成功：多点/长距离分段规划完成，共生成 %s 个分段，执行时间 %s 秒',
-                           COALESCE(array_length(v_part_ids, 1), 0),
+    -- 子分段只在内存中参与合并，不产生分段航线记录。
+    v_return_msg := format('规划成功：多点/长距离分段规划完成，共计算 %s 个分段，执行时间 %s 秒',
+                           v_part_count,
                            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     RETURN QUERY SELECT 200, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
 
@@ -1126,6 +1151,7 @@ EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
 END;
 $$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR, DOUBLE PRECISION) IS '多点规划';
 
 
 
@@ -1146,167 +1172,3 @@ SELECT gis_astar_3d_flight_plan (
     120, 0, False, 'project_001', 'user_123'
     );
 
-
- 
--- ==================================================================================== gis_generate_smooth_flight_path  Demo测试====================================================================================
--- ===================== 删除可能存在的同名函数（保证幂等性） =====================
-
--- =============================================================================
--- 函数名称：gis_generate_smooth_flight_path
--- 功能描述：无人机三维路径规划的上层封装接口，供业务系统直接调用。
---           接收 numeric 类型参数，自动转换为 double precision，
---           调用核心 A* 算法函数 gis_astar_3d_flight_plan，
---           并将返回的航线记录转换为 JSONB 格式输出。
--- 参数说明：
---   p_start_lon      numeric  起点经度（度）
---   p_start_lat      numeric  起点纬度（度）
---   p_start_alt      numeric  起点高度（米）
---   p_end_lon        numeric  终点经度（度）
---   p_end_lat        numeric  终点纬度（度）
---   p_end_alt        numeric  终点高度（米）
---   p_safe_altitude  numeric  安全飞行高度（默认120米）
---   p_height_mode    numeric  高度平滑模式：0=直升直降，0~1=三段式爬升/平飞/下降（默认0）
---   p_force_gen      boolean  是否强制重新生成（默认false）
---   p_project_id     varchar  项目ID（可选）
---   p_create_user    varchar  创建用户ID（可选）
--- 返回值：JSONB，包含以下字段：
---   - success        boolean   是否规划成功
---   - message        text      提示信息
---   - pathId         integer   航线记录ID（关联 gis_flight_paths 表）
---   - totalDistance  numeric   总飞行距离（米）
---   - safeAltitude   numeric   安全高度
---   - heightMode     numeric   高度模式
---   - rawWaypoints   jsonb     原始航点数组 [{lon,lat,alt}, ...]
---   - smoothWaypoints jsonb    平滑后航点数组
---   - rawPathWKT     text      原始路径WKT字符串（LineStringZ）
---   - smoothPathWKT  text      平滑路径WKT字符串（LineStringZ）
--- 依赖函数：gis_astar_3d_flight_plan（核心路径规划）
--- 依赖表：gis_flight_paths
--- =============================================================================
-DROP FUNCTION IF EXISTS gis_generate_smooth_flight_path(
-    numeric, numeric, numeric, numeric, numeric, numeric,
-    numeric, numeric, boolean, varchar, varchar
-);
-
-CREATE OR REPLACE FUNCTION gis_generate_smooth_flight_path(
-    p_start_lon      numeric,
-    p_start_lat      numeric,
-    p_start_alt      numeric,
-    p_end_lon        numeric,
-    p_end_lat        numeric,
-    p_end_alt        numeric,
-    p_safe_altitude  numeric DEFAULT 120,
-    p_height_mode    numeric DEFAULT 0,
-    p_force_gen      boolean DEFAULT FALSE,
-    p_project_id     varchar DEFAULT NULL,
-    p_create_user    varchar DEFAULT NULL
-) RETURNS JSONB AS $$
-DECLARE
-    v_result_record gis_flight_paths%ROWTYPE;  -- 存储核心函数返回的航线记录
-    v_result_json   JSONB;                     -- 最终返回的JSON结果
-    v_result_code   integer;
-    v_result_msg    text;
-BEGIN
-    -- 调用核心三维路径规划函数（类型转换：numeric → double precision）
-    -- 注意：gis_astar_3d_flight_plan 返回 code/msg + gis_flight_paths 字段，这里只取第一条记录
-    SELECT
-        r.code,
-        r.msg,
-        r.id,
-        r.project_id,
-        r.create_user,
-        r.create_time,
-        r.update_user,
-        r.update_time,
-        r.del_flag,
-        r.start_point,
-        r.end_point,
-        r.safe_altitude,
-        r.path_line,
-        r.smooth_path_line,
-        r.waypoints,
-        r.smooth_waypoints,
-        r.total_distance,
-        r.smooth_ratio
-    INTO
-        v_result_code,
-        v_result_msg,
-        v_result_record.id,
-        v_result_record.project_id,
-        v_result_record.create_user,
-        v_result_record.create_time,
-        v_result_record.update_user,
-        v_result_record.update_time,
-        v_result_record.del_flag,
-        v_result_record.start_point,
-        v_result_record.end_point,
-        v_result_record.safe_altitude,
-        v_result_record.path_line,
-        v_result_record.smooth_path_line,
-        v_result_record.waypoints,
-        v_result_record.smooth_waypoints,
-        v_result_record.total_distance,
-        v_result_record.smooth_ratio
-    FROM gis_astar_3d_flight_plan(
-        p_start_lon::double precision,
-        p_start_lat::double precision,
-        p_start_alt::double precision,
-        p_end_lon::double precision,
-        p_end_lat::double precision,
-        p_end_alt::double precision,
-        p_safe_altitude::double precision,
-        p_height_mode::double precision,
-        p_force_gen,
-        p_project_id,
-        p_create_user
-    ) r
-    LIMIT 1;  -- 确保只取一条记录（正常情况下只返回一行）
-
-    -- 检查是否成功获取到航线记录
-    IF v_result_code IS DISTINCT FROM 200 OR v_result_record.id IS NULL THEN
-        RETURN jsonb_build_object(
-            'success', false,
-            'code', COALESCE(v_result_code, 500),
-            'message', COALESCE(v_result_msg, '路径规划失败：未返回有效航线记录'),
-            'pathId', NULL
-        );
-    END IF;
-
-    -- 构建详细的 JSON 返回对象，包含航线所有关键信息
-    v_result_json := jsonb_build_object(
-        'success', true,
-        'code', v_result_code,
-        'message', v_result_msg,
-        'pathId', v_result_record.id,
-        'totalDistance', ROUND(v_result_record.total_distance::numeric, 2),
-        'safeAltitude', v_result_record.safe_altitude,
-        'heightMode', v_result_record.smooth_ratio,
-        'rawWaypoints', v_result_record.waypoints,
-        'smoothWaypoints', v_result_record.smooth_waypoints,
-        'rawPathWKT', ST_AsText(v_result_record.path_line),
-        'smoothPathWKT', ST_AsText(v_result_record.smooth_path_line)
-    );
-
-    RETURN v_result_json;
-
-EXCEPTION WHEN OTHERS THEN
-    -- 异常捕获：返回错误信息，保证接口不崩溃
-    RETURN jsonb_build_object(
-        'success', false,
-        'message', '路径规划异常：' || SQLERRM,
-        'pathId', NULL
-    );
-END;
-$$ LANGUAGE plpgsql;
-
-
-
--- 调用封装函数，返回 JSONB 结果
-SELECT gis_generate_smooth_flight_path(
-    113.64909580463211, 34.74222956510219, 50.0,
-    113.64114796099274, 34.75015766069998, 50.0,
-    120, 0, false, 'project_001', 'user_123'
-);
-SELECT gis_generate_smooth_flight_path
-
- (113.47373999723933, 34.81302708351442, 50.0, 113.4731599287305, 34.80794220338304, 50.0, 120, 0, False, 'project_001', 'user_123')
