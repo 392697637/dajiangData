@@ -21,12 +21,13 @@
 --   本文件的核心函数使用 RETURNS TABLE，返回列 id/project_id/del_flag 等会成为 PL/pgSQL 变量。
 --   函数体内静态 SQL 必须使用表别名访问同名字段，避免 "column reference is ambiguous"。
 -- ==============================================
-
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_linestring_length_m');
 -- =============================================================================
 -- 计算 LineStringZ 的近似米制三维长度：经纬度近似换算为米，高度差按 Z 值米计算
 -- =============================================================================
-DROP FUNCTION IF EXISTS gis_linestring_length_m(geometry);
-
 CREATE OR REPLACE FUNCTION gis_linestring_length_m(p_line geometry)
 RETURNS DOUBLE PRECISION AS $$
     WITH pts AS (
@@ -53,22 +54,10 @@ $$ LANGUAGE SQL IMMUTABLE STRICT;
 COMMENT ON FUNCTION gis_linestring_length_m(geometry) IS '计算线长';
 
 -- ==================================================================================== gis_astar_3d_flight  单段三维路径规划====================================================================================
--- ===================== 删除可能存在的同名函数（保证幂等性） =====================
-
-DO $$
-DECLARE
-    r RECORD;
-BEGIN
-    FOR r IN (SELECT oid, proname, pg_get_function_identity_arguments(oid) as args
-              FROM pg_proc
-              WHERE proname IN ('gis_astar_3d_flight_plan', 'gis_astar_3d_flight')
-              ORDER BY CASE proname WHEN 'gis_astar_3d_flight_plan' THEN 1 ELSE 2 END)
-    LOOP
-        EXECUTE 'DROP FUNCTION ' || r.oid::regproc || '(' || r.args || ') CASCADE';
-    END LOOP;
-END;
-$$;
-
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_astar_3d_flight');
 
 /**
  * 函数名称：gis_astar_3d_flight
@@ -803,6 +792,10 @@ COMMENT ON FUNCTION gis_astar_3d_flight(
     DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR
 ) IS '单段航线';
 
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_astar_3d_flight_plan');
 -- ====================================================================================
 -- gis_astar_3d_flight_plan
 -- 对外入口函数：统一调用 gis_flight_paths_plan，最终只写入一条总航线。
@@ -884,7 +877,10 @@ COMMENT ON FUNCTION gis_astar_3d_flight_plan(
     DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR
 ) IS '分段入口';
 
-
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_flight_paths_plan');
 -- =============================================================================
 -- gis_flight_paths_plan
 -- 支持起终点或多点规划。输入点超过 5km 的相邻段会按 5km 自动拆分后逐段规划，
@@ -894,9 +890,6 @@ COMMENT ON FUNCTION gis_astar_3d_flight_plan(
 --   [{"lon":113.1,"lat":34.1,"alt":50},{"lon":113.2,"lat":34.2,"alt":50}]
 --   [[113.1,34.1,50],[113.2,34.2,50]]
 -- =============================================================================
-DROP FUNCTION IF EXISTS gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR);
-DROP FUNCTION IF EXISTS gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR, DOUBLE PRECISION);
-
 CREATE OR REPLACE FUNCTION gis_flight_paths_plan(
     p_points         JSONB,
     p_safe_altitude  DOUBLE PRECISION DEFAULT 120,
@@ -1154,7 +1147,9 @@ $$ LANGUAGE plpgsql;
 COMMENT ON FUNCTION gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR, DOUBLE PRECISION) IS '多点规划';
 
 
-
+-- =============================================================================
+-- 测试函数
+-- =============================================================================
 SELECT * FROM gis_astar_3d_flight_plan(
     113.64040905110176, 34.744365280882896, 50,
     113.65792057874526, 34.748111106532264, 50,

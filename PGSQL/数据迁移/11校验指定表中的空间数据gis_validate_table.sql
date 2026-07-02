@@ -22,7 +22,10 @@
 --   error_count   ：本次错误数量。
 --   sql_statement ：查看本次错误明细的 SQL。
 -- ====================================================================================
-
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_geojson_to_geom');
 -- ====================================================================================
 -- 1. GeoJSON 转 geometry
 -- ====================================================================================
@@ -30,7 +33,6 @@
 --   1. 支持 FeatureCollection、Feature 和直接 Geometry 三种格式。
 --   2. 点、线直接转 geometry。
 --   3. Polygon / MultiPolygon 未闭合时，自动追加首点再转换。
-DROP FUNCTION IF EXISTS gis_geojson_to_geom(text, text);
 CREATE OR REPLACE FUNCTION gis_geojson_to_geom(
     p_geojson text,
     p_geo_type text DEFAULT 'Geometry'
@@ -219,13 +221,14 @@ END;
 $$;
 COMMENT ON FUNCTION gis_geojson_to_geom(text, text) IS 'GeoJSON转几何';
 
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_validate_write_error');
 -- ====================================================================================
 -- 2. 错误写入
 -- ====================================================================================
 -- 统一把校验错误写入 gis_error_table。
-DROP FUNCTION IF EXISTS gis_validate_write_error(
-    text, text, text, text, text, text, text, text, jsonb, text, jsonb, text, boolean, text, text
-);
 CREATE OR REPLACE FUNCTION gis_validate_write_error(
     p_error_table text,        -- 错误表名，目前固定为 gis_error_table
     p_table_name text,         -- 被校验的源表名
@@ -283,10 +286,13 @@ COMMENT ON FUNCTION gis_validate_write_error(
     text, text, text, text, text, text, text, text, jsonb, text, jsonb, text, boolean, text, text
 ) IS '写校验错误';
 
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_validate_table');
 -- ====================================================================================
--- 3. 主校验函数
+-- 主校验函数
 -- ====================================================================================
-DROP FUNCTION IF EXISTS gis_validate_table(text, text);
 CREATE OR REPLACE FUNCTION gis_validate_table(
     p_table_name text,
     p_geo_type text DEFAULT 'Geometry'

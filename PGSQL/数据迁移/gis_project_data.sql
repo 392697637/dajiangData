@@ -1,3 +1,8 @@
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_project_data');
+
 -- ============================================================
 -- 函数名称：gis_project_data
 -- 功能说明：循环读取 bo_project 表中的项目 id 和 region_shape，
@@ -32,9 +37,6 @@
 -- 数据范围：
 --   仅处理 bo_project.del_flag = false 且 region_shape 不为空的数据。
 -- ============================================================
-
-DROP FUNCTION IF EXISTS public.gis_project_data(text);
-
 CREATE OR REPLACE FUNCTION public.gis_project_data(
     p_project_id text DEFAULT NULL
 )
@@ -215,7 +217,10 @@ $$;
 COMMENT ON FUNCTION public.gis_project_data(text) IS
 '循环读取 bo_project.id 和 region_shape，生成三维网格、项目电子围栏并刷新围栏标记';
 
-
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('public.gis_project_data_batch');
 -- ============================================================
 -- 函数名称：gis_project_data_batch
 -- 功能说明：按项目 id 哈希分片处理 bo_project，用于多连接并行执行。
@@ -238,7 +243,7 @@ COMMENT ON FUNCTION public.gis_project_data(text) IS
 --      gis_generate_3d_grid -> gis_electric_fence_project -> gis_mark_electric_fence。
 -- ============================================================
 
-DROP FUNCTION IF EXISTS public.gis_project_data_batch(integer, integer);
+
 
 CREATE OR REPLACE FUNCTION public.gis_project_data_batch(
     p_worker_no integer,

@@ -109,7 +109,7 @@ SET time_plan = (
 -- =============================================
 ------------------------------------------------------------------------------------------ 函数：统一公共字段（create_time/update_time/del_flag等）
 -- =============================================
-DROP FUNCTION IF EXISTS lx_gis_base_common_columns(text);
+SELECT gis_drop_function('lx_gis_base_common_columns');
 CREATE OR REPLACE FUNCTION lx_gis_base_common_columns(tbl_name text)
 RETURNS void AS $$
 BEGIN
@@ -170,7 +170,7 @@ COMMENT ON FUNCTION lx_gis_base_common_columns(text) IS '统一公共字段';
 -- =============================================
 ------------------------------------------------------------------------------------------ 函数：char 直接改为 varchar(32) + 清除字符串前后空格
 -- =============================================
-DROP FUNCTION IF EXISTS lx_gis_string_columns_varchar(text);
+SELECT gis_drop_function('lx_gis_string_columns_varchar');
 
 CREATE OR REPLACE FUNCTION lx_gis_string_columns_varchar(p_table_name text)
 RETURNS void AS $$
@@ -230,7 +230,7 @@ SELECT lx_gis_string_columns_varchar('bo_ground_ele');
 -- 1. 支持 FeatureCollection、Feature 和直接 Geometry 三种格式。
 -- 2. Polygon / MultiPolygon 外环或内环未闭合时，自动追加第一个点完成闭合。
 -- 3. 返回 PostGIS geometry，后续可同时生成 2D / 3D 空间字段。
-DROP FUNCTION IF EXISTS gis_geojson_to_closed_geom(text);
+SELECT gis_drop_function('gis_geojson_to_closed_geom');
 CREATE OR REPLACE FUNCTION gis_geojson_to_closed_geom(p_geojson text)
 RETURNS geometry
 LANGUAGE plpgsql
@@ -505,7 +505,7 @@ DELETE FROM bo_ground_ele WHERE geom IS NULL;
 
 
 --------------------------------------------------------------------------------------------  函数：清理字段 + 重命名 geom_3d 为 geom
-DROP FUNCTION IF EXISTS update_geom_columns(text);
+SELECT gis_drop_function('update_geom_columns');
 CREATE OR REPLACE FUNCTION update_geom_columns(p_table_name text)
 RETURNS void AS $$
 BEGIN
