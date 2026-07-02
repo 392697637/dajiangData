@@ -102,9 +102,8 @@ SET time_plan = (
   WHERE t.pid = f.id  -- 关键：通过 pid 关联围栏ID
 );
 -- 修改后数据查看
--- SELECT id, time_plan FROM bo_electric_fence
--- SELECT * FROM bo_time_plan WHERE pid='b554fde12f1249019dc0559528d4ad84'
-
+-- SELECT id, time_plan FROM bo_electric_fence 
+-- SELECT * FROM bo_time_plan 
 
 
 -- =============================================
@@ -166,6 +165,7 @@ BEGIN
     RAISE NOTICE '✅ 表 % 公共字段处理完成', tbl_name;
 END;
 $$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION lx_gis_base_common_columns(text) IS '统一公共字段';
 
 -- =============================================
 ------------------------------------------------------------------------------------------ 函数：char 直接改为 varchar(32) + 清除字符串前后空格
@@ -209,6 +209,7 @@ BEGIN
     RAISE NOTICE '==================================================';
 END;
 $$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION lx_gis_string_columns_varchar(text) IS '字符串清洗';
  
 
 -- =============================================
@@ -225,22 +226,8 @@ SELECT lx_gis_string_columns_varchar('bo_time_plan');
 SELECT lx_gis_string_columns_varchar('bo_ground_ele');
 
  
-------------------------------------------------------------------------------------------空间数据创建bo_electric_fence
-DROP INDEX IF EXISTS idx_bo_electric_fence_geom;
-ALTER TABLE bo_electric_fence DROP COLUMN IF EXISTS geom;
-DROP INDEX IF EXISTS idx_bo_electric_fence_geom_3d;
-ALTER TABLE bo_electric_fence DROP COLUMN IF EXISTS geom_3d;
- 
---  添加   字段（必用）GEOMETRY
-ALTER TABLE bo_electric_fence ADD COLUMN geom geometry(Geometry);
-ALTER TABLE bo_electric_fence ADD COLUMN geom_3d geometry(GeometryZ);
-CREATE INDEX IF NOT EXISTS idx_bo_electric_fence_geom ON bo_electric_fence USING GIST (geom);
--- CREATE INDEX IF NOT EXISTS idx_bo_electric_fence_geom3d ON bo_electric_fence USING GIST (geom_3d);
-COMMENT ON COLUMN bo_electric_fence.geom IS '空间数据';
-COMMENT ON COLUMN bo_electric_fence.geom_3d IS '空间数据';
-
 -- GeoJSON 解析函数：
--- 1. 支持 Feature 和直接 Geometry 两种格式。
+-- 1. 支持 FeatureCollection、Feature 和直接 Geometry 三种格式。
 -- 2. Polygon / MultiPolygon 外环或内环未闭合时，自动追加第一个点完成闭合。
 -- 3. 返回 PostGIS geometry，后续可同时生成 2D / 3D 空间字段。
 DROP FUNCTION IF EXISTS gis_geojson_to_closed_geom(text);
@@ -252,14 +239,59 @@ DECLARE
     v_json jsonb;
     v_geom_json jsonb;
     v_geom_type text;
+    v_features jsonb;
+    v_feature_count integer;
+    v_bad_ring_count integer;
 BEGIN
     IF p_geojson IS NULL OR trim(p_geojson) = '' THEN
         RETURN NULL;
     END IF;
 
-    v_json := p_geojson::jsonb;
+    BEGIN
+        v_json := p_geojson::jsonb;
+    EXCEPTION WHEN others THEN
+        RETURN NULL;
+    END;
 
-    IF v_json ->> 'type' = 'Feature' THEN
+    IF v_json ->> 'type' = 'FeatureCollection' THEN
+        v_features := CASE
+            WHEN jsonb_typeof(v_json -> 'features') = 'array' THEN v_json -> 'features'
+            ELSE '[]'::jsonb
+        END;
+
+        SELECT count(*)
+        INTO v_feature_count
+        FROM jsonb_array_elements(v_features) AS f(feature)
+        WHERE f.feature -> 'geometry' IS NOT NULL;
+
+        IF v_feature_count = 0 THEN
+            RETURN NULL;
+        END IF;
+
+        IF v_feature_count = 1 THEN
+            SELECT f.feature -> 'geometry'
+            INTO v_geom_json
+            FROM jsonb_array_elements(v_features) AS f(feature)
+            WHERE f.feature -> 'geometry' IS NOT NULL
+            LIMIT 1;
+        ELSE
+            SELECT
+                CASE
+                    WHEN bool_and(f.feature -> 'geometry' ->> 'type' = 'Polygon')
+                        THEN jsonb_build_object(
+                            'type', 'MultiPolygon',
+                            'coordinates', jsonb_agg(f.feature -> 'geometry' -> 'coordinates' ORDER BY feature_ord)
+                        )
+                    ELSE jsonb_build_object(
+                        'type', 'GeometryCollection',
+                        'geometries', jsonb_agg(f.feature -> 'geometry' ORDER BY feature_ord)
+                    )
+                END
+            INTO v_geom_json
+            FROM jsonb_array_elements(v_features) WITH ORDINALITY AS f(feature, feature_ord)
+            WHERE f.feature -> 'geometry' IS NOT NULL;
+        END IF;
+    ELSIF v_json ->> 'type' = 'Feature' THEN
         v_geom_json := v_json -> 'geometry';
     ELSE
         v_geom_json := v_json;
@@ -272,6 +304,26 @@ BEGIN
     v_geom_type := v_geom_json ->> 'type';
 
     IF v_geom_type = 'Polygon' THEN
+        IF jsonb_typeof(v_geom_json -> 'coordinates') IS DISTINCT FROM 'array' THEN
+            RETURN NULL;
+        END IF;
+
+        IF jsonb_array_length(v_geom_json -> 'coordinates') = 0 THEN
+            RETURN NULL;
+        END IF;
+
+        SELECT count(*)
+        INTO v_bad_ring_count
+        FROM jsonb_array_elements(v_geom_json -> 'coordinates') AS r(ring)
+        WHERE CASE
+            WHEN jsonb_typeof(ring) = 'array' THEN jsonb_array_length(ring) < 3
+            ELSE true
+        END;
+
+        IF v_bad_ring_count > 0 THEN
+            RETURN NULL;
+        END IF;
+
         SELECT jsonb_set(
             v_geom_json,
             '{coordinates}',
@@ -293,6 +345,37 @@ BEGIN
         FROM jsonb_array_elements(v_geom_json -> 'coordinates') WITH ORDINALITY AS r(ring, ring_ord);
 
     ELSIF v_geom_type = 'MultiPolygon' THEN
+        IF jsonb_typeof(v_geom_json -> 'coordinates') IS DISTINCT FROM 'array' THEN
+            RETURN NULL;
+        END IF;
+
+        IF jsonb_array_length(v_geom_json -> 'coordinates') = 0 THEN
+            RETURN NULL;
+        END IF;
+
+        SELECT count(*)
+        INTO v_bad_ring_count
+        FROM jsonb_array_elements(v_geom_json -> 'coordinates') AS p(poly)
+        WHERE jsonb_typeof(poly) IS DISTINCT FROM 'array'
+           OR jsonb_array_length(poly) = 0;
+
+        IF v_bad_ring_count > 0 THEN
+            RETURN NULL;
+        END IF;
+
+        SELECT count(*)
+        INTO v_bad_ring_count
+        FROM jsonb_array_elements(v_geom_json -> 'coordinates') AS p(poly)
+        CROSS JOIN LATERAL jsonb_array_elements(p.poly) AS r(ring)
+        WHERE CASE
+            WHEN jsonb_typeof(ring) = 'array' THEN jsonb_array_length(ring) < 3
+            ELSE true
+        END;
+
+        IF v_bad_ring_count > 0 THEN
+            RETURN NULL;
+        END IF;
+
         SELECT jsonb_set(
             v_geom_json,
             '{coordinates}',
@@ -318,14 +401,35 @@ BEGIN
         ) s;
     END IF;
 
-    RETURN ST_GeomFromGeoJSON(v_geom_json::text);
+    BEGIN
+        RETURN ST_GeomFromGeoJSON(v_geom_json::text);
+    EXCEPTION WHEN others THEN
+        RETURN NULL;
+    END;
 END;
 $$;
+COMMENT ON FUNCTION gis_geojson_to_closed_geom(text) IS 'GeoJSON转几何';
+
+
+------------------------------------------------------------------------------------------空间数据创建bo_electric_fence
+DROP INDEX IF EXISTS idx_bo_electric_fence_geom;
+ALTER TABLE bo_electric_fence DROP COLUMN IF EXISTS geom;
+DROP INDEX IF EXISTS idx_bo_electric_fence_geom_3d;
+ALTER TABLE bo_electric_fence DROP COLUMN IF EXISTS geom_3d;
+ 
+--  添加   字段（必用）GEOMETRY
+ALTER TABLE bo_electric_fence ADD COLUMN geom geometry(Geometry);
+ALTER TABLE bo_electric_fence ADD COLUMN geom_3d geometry(GeometryZ);
+CREATE INDEX IF NOT EXISTS idx_bo_electric_fence_geom ON bo_electric_fence USING GIST (geom);
+-- CREATE INDEX IF NOT EXISTS idx_bo_electric_fence_geom3d ON bo_electric_fence USING GIST (geom_3d);
+COMMENT ON COLUMN bo_electric_fence.geom IS '空间数据';
+COMMENT ON COLUMN bo_electric_fence.geom_3d IS '空间数据';
 
 --  同时更新 2D / 3D 围栏
---  支持两种 GeoJSON：
---  1. Feature：{"type":"Feature","geometry":{...},"properties":{...}}
---  2. Geometry：{"type":"Polygon","coordinates":[...]} / {"type":"MultiPolygon","coordinates":[...]}
+--  支持三种 GeoJSON：
+--  1. FeatureCollection：{"type":"FeatureCollection","features":[...]}
+--  2. Feature：{"type":"Feature","geometry":{...},"properties":{...}}
+--  3. Geometry：{"type":"Polygon","coordinates":[...]} / {"type":"MultiPolygon","coordinates":[...]}
 UPDATE bo_electric_fence t
 SET
     geom = ST_SetSRID(ST_Force2D(ST_MakeValid(src.raw_geom)), 4326),
@@ -342,7 +446,8 @@ FROM (
 WHERE
     t.id = src.id
     AND ST_GeometryType(src.raw_geom) IN ('ST_Polygon','ST_MultiPolygon');
-
+--   查询无效数据
+SELECT * FROM bo_electric_fence WHERE geom IS NULL;
 --   删除无效数据
 DELETE FROM bo_electric_fence WHERE geom IS NULL;
 
@@ -363,9 +468,10 @@ COMMENT ON COLUMN bo_ground_ele.geom IS '空间数据';
 COMMENT ON COLUMN bo_ground_ele.geom_3d IS '空间数据';
 
 -- 同时生成 2D 和 3D 空间数据
--- 支持两种 GeoJSON：
--- 1. Feature：{"type":"Feature","geometry":{...},"properties":{...}}
--- 2. Geometry：{"type":"Point/LineString/Polygon/MultiPolygon","coordinates":[...]}
+-- 支持三种 GeoJSON：
+-- 1. FeatureCollection：{"type":"FeatureCollection","features":[...]}
+-- 2. Feature：{"type":"Feature","geometry":{...},"properties":{...}}
+-- 3. Geometry：{"type":"Point/LineString/Polygon/MultiPolygon","coordinates":[...]}
 -- 兼容点、线、面；对无效面/线使用 ST_MakeValid 尝试修复。
 UPDATE bo_ground_ele t
 SET 
@@ -390,12 +496,11 @@ WHERE
         'ST_MultiPolygon'
     );
 
+SELECT * FROM bo_ground_ele WHERE geom IS NULL;
 
 --   删除无效数据
 DELETE FROM bo_ground_ele WHERE geom IS NULL;
 
-
- 
 
 --------------------------------------------------------------------------------------------  函数：清理字段 + 重命名 geom_3d 为 geom
 DROP FUNCTION IF EXISTS update_geom_columns(text);
@@ -422,6 +527,7 @@ BEGIN
     RAISE NOTICE '✅ 表 % 字段处理完成：已删除 geom、lng_lat_alt，geom_3d → geom', p_table_name;
 END;
 $$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION update_geom_columns(text) IS '整理空间字段';
 
 
 SELECT update_geom_columns('bo_electric_fence');
@@ -429,7 +535,8 @@ SELECT update_geom_columns('bo_ground_ele');
 
 -- 1. 字段改名
 ALTER TABLE bo_ground_ele RENAME COLUMN enable TO enabled; 
- 
+ALTER TABLE bo_ground_ele RENAME COLUMN position TO location; 
+
 ------------------------------------------------------------------------------------------ --   Navicat同步数据
  
 
@@ -464,58 +571,8 @@ ALTER TABLE bo_ground_ele RENAME COLUMN enable TO enabled;
 
 
 
-
-
-
 -- -----------------------------------------------geoserver 自动调用项目服务------------------------------------------
 -- -- PG库调用
 -- SELECT * FROM gis_get_electric_fence_project('%project_id%', '%fence_type%')
 
 
-
-==========================================================================================创建项目=========================================================================================
--- 函数名：gis_generate_3d_grid
- SELECT * FROM gis_generate_3d_grid(
-    '2c95908e958f3b75019593551f520126',
-    '{"type":"Polygon","coordinates":[[[112.70,34.20],[114.20,34.20],[114.20,35.00],[112.70,35.00],[112.70,34.20]]]}',
-    50,300,100
-);
-
--- 函数名称： gis_electric_fence_project
-SELECT gis_electric_fence_project(
-    'zhengzhou', 
-    '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'
-);
-SELECT* FROM gis_electric_fence_project(
-    '2c95908e958f3b75019593551f520126', --  输入参数：项目唯一ID（用于生成表名）
-    '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'  -- 输入参数：项目范围的GeoJSON多边形字符串
-);
-
--- 函数名：gis_mark_electric_fence
-SELECT * FROM gis_mark_electric_fence('2c95908e958f3b75019593551f520126');
-  
--- ========================================================================================校验电子围栏==========================================================================================
--- 函数名称： gis_check_electric_fence 电子围栏空间冲突校验（禁飞区/管控区/试飞区互斥规则校验）
- SELECT * FROM gis_check_electric_fence(
-  '2c95908e958f3b75019593551f520126',
-  '3',
-  '{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[113.289609,34.951427,0],[113.290607,34.615358,0],[113.979944,34.596458,0],[114.013926,34.930172,0]]]},"properties":{}}'
-);
-
--- ============================================================================刷新三维网格的电子围栏标记=================================================================================
--- 函数名：gis_refresh_electric_fence 刷新三维网格的电子围栏标记。先清空已标记的zone_type，再重新标记。
-SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
