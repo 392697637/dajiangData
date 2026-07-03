@@ -53,6 +53,152 @@ RETURNS DOUBLE PRECISION AS $$
 $$ LANGUAGE SQL IMMUTABLE STRICT;
 COMMENT ON FUNCTION gis_linestring_length_m(geometry) IS '计算线长';
 
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_flight_point_in_fence');
+-- =============================================================================
+-- 判断点是否落在禁飞区/管控区内：同时检查 bo_electric_fence 和项目专属 gis_electric_fence_<project_id>
+-- =============================================================================
+CREATE OR REPLACE FUNCTION gis_flight_point_in_fence(
+    p_point geometry,
+    p_project_id varchar DEFAULT NULL
+)
+RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_hit boolean := false;
+    v_project_fence_table text;
+BEGIN
+    IF p_point IS NULL THEN
+        RETURN false;
+    END IF;
+
+    IF to_regclass('public.bo_electric_fence') IS NOT NULL THEN
+        SELECT EXISTS(
+            SELECT 1
+            FROM public.bo_electric_fence f
+            WHERE f.geom IS NOT NULL
+              AND f.fence_type IN ('1', '2')
+              AND f.status = '1'
+              AND f.del_flag = false
+              AND (COALESCE(p_project_id, '') = '' OR f.project_id::text = p_project_id::text)
+              AND ST_Covers(
+                  ST_SetSRID(ST_MakeValid(ST_Force2D(f.geom)), 4326),
+                  ST_Force2D(p_point)
+              )
+        ) INTO v_hit;
+
+        IF v_hit THEN
+            RETURN true;
+        END IF;
+    END IF;
+
+    IF p_project_id IS NOT NULL AND trim(p_project_id) <> '' THEN
+        v_project_fence_table := 'gis_electric_fence_' || trim(p_project_id);
+        IF to_regclass(format('%I.%I', 'public', v_project_fence_table)) IS NOT NULL THEN
+            EXECUTE format('
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM %I.%I f
+                    WHERE f.geom IS NOT NULL
+                      AND f.fence_type IN (''1'', ''2'')
+                      AND ST_Covers(
+                          ST_SetSRID(ST_MakeValid(ST_Force2D(f.geom)), 4326),
+                          ST_Force2D($1)
+                      )
+                )',
+                'public',
+                v_project_fence_table
+            )
+            INTO v_hit
+            USING p_point;
+
+            IF v_hit THEN
+                RETURN true;
+            END IF;
+        END IF;
+    END IF;
+
+    RETURN false;
+END;
+$$;
+COMMENT ON FUNCTION gis_flight_point_in_fence(geometry, varchar) IS '判断点是否落在禁飞区/管控区内';
+
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_flight_line_intersects_fence');
+-- =============================================================================
+-- 判断线段是否穿越禁飞区/管控区：同时检查 bo_electric_fence 和项目专属 gis_electric_fence_<project_id>
+-- =============================================================================
+CREATE OR REPLACE FUNCTION gis_flight_line_intersects_fence(
+    p_line geometry,
+    p_project_id varchar DEFAULT NULL
+)
+RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_hit boolean := false;
+    v_project_fence_table text;
+BEGIN
+    IF p_line IS NULL THEN
+        RETURN false;
+    END IF;
+
+    IF to_regclass('public.bo_electric_fence') IS NOT NULL THEN
+        SELECT EXISTS(
+            SELECT 1
+            FROM public.bo_electric_fence f
+            WHERE f.geom IS NOT NULL
+              AND f.fence_type IN ('1', '2')
+              AND f.status = '1'
+              AND f.del_flag = false
+              AND (COALESCE(p_project_id, '') = '' OR f.project_id::text = p_project_id::text)
+              AND ST_Intersects(
+                  ST_SetSRID(ST_MakeValid(ST_Force2D(f.geom)), 4326),
+                  ST_Force2D(p_line)
+              )
+        ) INTO v_hit;
+
+        IF v_hit THEN
+            RETURN true;
+        END IF;
+    END IF;
+
+    IF p_project_id IS NOT NULL AND trim(p_project_id) <> '' THEN
+        v_project_fence_table := 'gis_electric_fence_' || trim(p_project_id);
+        IF to_regclass(format('%I.%I', 'public', v_project_fence_table)) IS NOT NULL THEN
+            EXECUTE format('
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM %I.%I f
+                    WHERE f.geom IS NOT NULL
+                      AND f.fence_type IN (''1'', ''2'')
+                      AND ST_Intersects(
+                          ST_SetSRID(ST_MakeValid(ST_Force2D(f.geom)), 4326),
+                          ST_Force2D($1)
+                      )
+                )',
+                'public',
+                v_project_fence_table
+            )
+            INTO v_hit
+            USING p_line;
+
+            IF v_hit THEN
+                RETURN true;
+            END IF;
+        END IF;
+    END IF;
+
+    RETURN false;
+END;
+$$;
+COMMENT ON FUNCTION gis_flight_line_intersects_fence(geometry, varchar) IS '判断线段是否穿越禁飞区/管控区';
+
 -- ==================================================================================== gis_astar_3d_flight  单段三维路径规划====================================================================================
 -- =============================================================================
 -- 删除函数
@@ -798,15 +944,14 @@ COMMENT ON FUNCTION gis_astar_3d_flight(
 SELECT gis_drop_function('gis_astar_3d_flight_plan');
 -- ====================================================================================
 -- gis_astar_3d_flight_plan
--- 对外入口函数：统一调用 gis_flight_paths_plan，最终只写入一条总航线。
+-- 对外两点入口函数：5km 内直接调用 gis_astar_3d_flight，超过 5km 交给 gis_flight_paths_plan。
 -- ====================================================================================
 /**
  * 函数名称：gis_astar_3d_flight_plan
  * 核心功能：对外航线规划入口。
  * 处理规则：
- *   1. 起终点距离不超过 5km：按 1 段计算。
- *   2. 起终点距离超过 5km：按每段不超过 5km 拆分。
- *   3. 所有分段统一合并，只写入一条总航线。
+ *   1. 起终点直线距离不超过 5km：直接调用 gis_astar_3d_flight。
+ *   2. 起终点直线距离超过 5km：调用 gis_flight_paths_plan 做 5km 探测和分段合并。
  */
 CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan(
     p_start_lon        DOUBLE PRECISION,
@@ -840,6 +985,14 @@ CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan(
     total_distance double precision,
     smooth_ratio double precision
 ) AS $$
+DECLARE
+    v_segment_m DOUBLE PRECISION;
+    v_start_pt geometry(PointZ,4326);
+    v_end_pt geometry(PointZ,4326);
+    v_direct_line geometry(LineStringZ,4326);
+    v_waypoints jsonb;
+    v_path_id integer;
+    v_return_msg text;
 BEGIN
     IF p_start_lon IS NULL OR p_start_lat IS NULL OR p_start_alt IS NULL
        OR p_end_lon IS NULL OR p_end_lat IS NULL OR p_end_alt IS NULL THEN
@@ -854,8 +1007,55 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 正常入口统一走汇总函数：
-    -- 5km 内按 1 段计算，超过 5km 自动拆段；最终只插入并返回一条总航线。
+    v_segment_m := SQRT(
+        POWER((p_end_lon - p_start_lon) * 111000.0 * COS(RADIANS((p_start_lat + p_end_lat) / 2.0)), 2)
+        + POWER((p_end_lat - p_start_lat) * 111000.0, 2)
+    );
+
+    IF v_segment_m <= 5000.0 THEN
+        RETURN QUERY
+        SELECT *
+        FROM gis_astar_3d_flight(
+            p_start_lon, p_start_lat, p_start_alt,
+            p_end_lon, p_end_lat, p_end_alt,
+            p_safe_altitude, p_height_mode, p_force_gen,
+            p_project_id, p_create_user
+        );
+        RETURN;
+    END IF;
+
+    v_start_pt := ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_start_alt), 4326);
+    v_end_pt := ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_end_alt), 4326);
+    v_direct_line := ST_MakeLine(v_start_pt, v_end_pt);
+
+    -- 长距离但整条直线不经过禁飞区/管控区时，直接返回一条总航线，避免进入 5km 循环。
+    IF NOT gis_flight_line_intersects_fence(v_direct_line, p_project_id) THEN
+        v_waypoints := jsonb_build_array(
+            jsonb_build_object('lon', p_start_lon, 'lat', p_start_lat, 'alt', p_start_alt),
+            jsonb_build_object('lon', p_end_lon, 'lat', p_end_lat, 'alt', p_end_alt)
+        );
+
+        INSERT INTO gis_flight_paths (
+            project_id, create_user, update_user,
+            start_point, end_point, safe_altitude,
+            path_line, smooth_path_line,
+            waypoints, smooth_waypoints, total_distance, smooth_ratio
+        ) VALUES (
+            p_project_id, p_create_user, p_create_user,
+            v_start_pt, v_end_pt, p_safe_altitude,
+            v_direct_line, v_direct_line,
+            v_waypoints, v_waypoints,
+            gis_linestring_length_m(v_direct_line),
+            p_height_mode
+        ) RETURNING gis_flight_paths.id INTO v_path_id;
+
+        v_return_msg := format('规划成功：长距离直线无围栏冲突，已快速生成直线航线，距离 %s 米', ROUND(v_segment_m::numeric, 2));
+        RETURN QUERY SELECT 200, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
+        RETURN;
+    END IF;
+
+    -- 超过 5km 再走汇总函数：
+    -- 沿直线按 5km 探测，安全段直接合并，遇禁飞区/管控区才调用 A*；最终只插入并返回一条总航线。
     RETURN QUERY
     SELECT *
     FROM gis_flight_paths_plan(
@@ -883,7 +1083,8 @@ COMMENT ON FUNCTION gis_astar_3d_flight_plan(
 SELECT gis_drop_function('gis_flight_paths_plan');
 -- =============================================================================
 -- gis_flight_paths_plan
--- 支持起终点或多点规划。输入点超过 5km 的相邻段会按 5km 自动拆分后逐段规划，
+-- 支持起终点或多点规划。相邻输入点会沿直线按 5km 探测：
+-- 安全直线段直接合并，探测点落围栏内则按 1km 找离开点，线段穿越围栏则调用 A*。
 -- 最后拼接为一条总航线写入 gis_flight_paths。
 --
 -- p_points 支持两种格式：
@@ -923,11 +1124,18 @@ DECLARE
 
     v_input_count INT;
     v_segment_m DOUBLE PRECISION;
-    v_segment_count INT;
     v_input_idx INT;
-    v_segment_idx INT;
     v_ratio1 DOUBLE PRECISION;
     v_ratio2 DOUBLE PRECISION;
+    v_anchor_m DOUBLE PRECISION;
+    v_probe_m DOUBLE PRECISION;
+    v_last_safe_m DOUBLE PRECISION;
+    v_exit_m DOUBLE PRECISION;
+    v_anchor_point geometry(PointZ,4326);
+    v_probe_point geometry(PointZ,4326);
+    v_probe_line geometry(LineStringZ,4326);
+    v_probe_point_blocked boolean;
+    v_probe_line_blocked boolean;
 
     v_lon1 DOUBLE PRECISION;
     v_lat1 DOUBLE PRECISION;
@@ -946,6 +1154,7 @@ DECLARE
     v_part gis_flight_paths%ROWTYPE;
     v_part_count INT := 0;
     v_path_id INT;
+    v_direct_line geometry(LineStringZ,4326);
 
     v_start_pt geometry(PointZ,4326);
     v_end_pt geometry(PointZ,4326);
@@ -1033,8 +1242,8 @@ BEGIN
     FROM tmp_flight_plan_input_points
     WHERE seq = v_input_count;
 
-    -- 相邻输入点逐段处理，单段超过 5km 则继续拆成若干小段。
-    -- gis_astar_3d_flight 只负责计算并返回数据，不写入 gis_flight_paths。
+    -- 相邻输入点逐段处理：沿直线按 5km 探测，安全段合并，遇障碍段才调用 A*。
+    -- gis_astar_3d_flight 只负责计算障碍段并返回数据，不写入 gis_flight_paths。
     -- 本函数统一把所有分段结果合并后，只插入一条总航线。
     FOR v_input_idx IN 1..v_input_count - 1 LOOP
         SELECT lon, lat, alt INTO v_lon1, v_lat1, v_alt1
@@ -1047,55 +1256,170 @@ BEGIN
             POWER((v_lon2 - v_lon1) * 111000.0 * COS(RADIANS((v_lat1 + v_lat2) / 2.0)), 2)
             + POWER((v_lat2 - v_lat1) * 111000.0, 2)
         );
-        v_segment_count := GREATEST(1, CEIL(v_segment_m / 5000.0)::INT);
+        v_anchor_m := 0;
 
-        FOR v_segment_idx IN 1..v_segment_count LOOP
-            v_ratio1 := (v_segment_idx - 1)::DOUBLE PRECISION / v_segment_count;
-            v_ratio2 := v_segment_idx::DOUBLE PRECISION / v_segment_count;
+        WHILE v_anchor_m < v_segment_m LOOP
+            v_last_safe_m := v_anchor_m;
 
-            v_seg_start_lon := v_lon1 + (v_lon2 - v_lon1) * v_ratio1;
-            v_seg_start_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio1;
-            v_seg_end_lon := v_lon1 + (v_lon2 - v_lon1) * v_ratio2;
-            v_seg_end_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio2;
+            LOOP
+                v_probe_m := LEAST(v_last_safe_m + 5000.0, v_segment_m);
+                v_ratio1 := CASE WHEN v_segment_m = 0 THEN 0 ELSE v_anchor_m / v_segment_m END;
+                v_ratio2 := CASE WHEN v_segment_m = 0 THEN 1 ELSE v_probe_m / v_segment_m END;
 
-            v_seg_start_alt := CASE WHEN v_segment_idx = 1 THEN v_alt1 ELSE p_safe_altitude END;
-            v_seg_end_alt := CASE WHEN v_segment_idx = v_segment_count THEN v_alt2 ELSE p_safe_altitude END;
+                v_seg_start_lon := v_lon1 + (v_lon2 - v_lon1) * v_ratio1;
+                v_seg_start_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio1;
+                v_seg_start_alt := CASE WHEN v_anchor_m = 0 THEN v_alt1 ELSE p_safe_altitude END;
 
-            SELECT
-                r.id, r.project_id, r.create_user, r.create_time,
-                r.update_user, r.update_time, r.del_flag,
-                r.start_point, r.end_point, r.safe_altitude,
-                r.path_line, r.smooth_path_line,
-                r.waypoints, r.smooth_waypoints,
-                r.total_distance, r.smooth_ratio
-            INTO v_part
-            FROM gis_astar_3d_flight(
-                v_seg_start_lon, v_seg_start_lat, v_seg_start_alt,
-                v_seg_end_lon, v_seg_end_lat, v_seg_end_alt,
-                p_safe_altitude,
-                p_height_mode,
-                TRUE,
-                p_project_id,
-                p_create_user
-            ) r
-            LIMIT 1;
+                v_seg_end_lon := v_lon1 + (v_lon2 - v_lon1) * v_ratio2;
+                v_seg_end_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio2;
+                v_seg_end_alt := CASE WHEN v_probe_m >= v_segment_m THEN v_alt2 ELSE p_safe_altitude END;
 
-            IF v_part.path_line IS NULL OR v_part.smooth_path_line IS NULL THEN
-                RAISE EXCEPTION '分段路径规划失败：input_seq=%, segment=%', v_input_idx, v_segment_idx;
-            END IF;
+                v_anchor_point := ST_SetSRID(ST_MakePoint(v_seg_start_lon, v_seg_start_lat, v_seg_start_alt), 4326);
+                v_probe_point := ST_SetSRID(ST_MakePoint(v_seg_end_lon, v_seg_end_lat, v_seg_end_alt), 4326);
+                v_probe_line := ST_MakeLine(v_anchor_point, v_probe_point);
 
-            v_part_count := v_part_count + 1;
+                v_probe_point_blocked := gis_flight_point_in_fence(v_probe_point, p_project_id);
+                v_probe_line_blocked := gis_flight_line_intersects_fence(v_probe_line, p_project_id);
 
-            v_point_count := ST_NumPoints(v_part.path_line);
-            v_append_start := CASE WHEN ST_NumPoints(v_merged_path_line) = 0 THEN 1 ELSE 2 END;
-            FOR v_point_idx IN v_append_start..v_point_count LOOP
-                v_merged_path_line := ST_AddPoint(v_merged_path_line, ST_PointN(v_part.path_line, v_point_idx));
-            END LOOP;
+                IF NOT v_probe_point_blocked AND NOT v_probe_line_blocked THEN
+                    v_last_safe_m := v_probe_m;
 
-            v_point_count := ST_NumPoints(v_part.smooth_path_line);
-            v_append_start := CASE WHEN ST_NumPoints(v_merged_smooth_line) = 0 THEN 1 ELSE 2 END;
-            FOR v_point_idx IN v_append_start..v_point_count LOOP
-                v_merged_smooth_line := ST_AddPoint(v_merged_smooth_line, ST_PointN(v_part.smooth_path_line, v_point_idx));
+                    IF v_last_safe_m >= v_segment_m THEN
+                        v_direct_line := ST_MakeLine(v_anchor_point, v_probe_point);
+
+                        v_point_count := ST_NumPoints(v_direct_line);
+                        v_append_start := CASE WHEN ST_NumPoints(v_merged_path_line) = 0 THEN 1 ELSE 2 END;
+                        FOR v_point_idx IN v_append_start..v_point_count LOOP
+                            v_merged_path_line := ST_AddPoint(v_merged_path_line, ST_PointN(v_direct_line, v_point_idx));
+                        END LOOP;
+
+                        v_point_count := ST_NumPoints(v_direct_line);
+                        v_append_start := CASE WHEN ST_NumPoints(v_merged_smooth_line) = 0 THEN 1 ELSE 2 END;
+                        FOR v_point_idx IN v_append_start..v_point_count LOOP
+                            v_merged_smooth_line := ST_AddPoint(v_merged_smooth_line, ST_PointN(v_direct_line, v_point_idx));
+                        END LOOP;
+
+                        v_part_count := v_part_count + 1;
+                        v_anchor_m := v_segment_m;
+                        EXIT;
+                    END IF;
+
+                    CONTINUE;
+                END IF;
+
+                IF v_last_safe_m > v_anchor_m THEN
+                    v_ratio2 := v_last_safe_m / v_segment_m;
+                    v_seg_end_lon := v_lon1 + (v_lon2 - v_lon1) * v_ratio2;
+                    v_seg_end_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio2;
+                    v_seg_end_alt := p_safe_altitude;
+                    v_probe_point := ST_SetSRID(ST_MakePoint(v_seg_end_lon, v_seg_end_lat, v_seg_end_alt), 4326);
+                    v_direct_line := ST_MakeLine(v_anchor_point, v_probe_point);
+
+                    v_point_count := ST_NumPoints(v_direct_line);
+                    v_append_start := CASE WHEN ST_NumPoints(v_merged_path_line) = 0 THEN 1 ELSE 2 END;
+                    FOR v_point_idx IN v_append_start..v_point_count LOOP
+                        v_merged_path_line := ST_AddPoint(v_merged_path_line, ST_PointN(v_direct_line, v_point_idx));
+                    END LOOP;
+
+                    v_point_count := ST_NumPoints(v_direct_line);
+                    v_append_start := CASE WHEN ST_NumPoints(v_merged_smooth_line) = 0 THEN 1 ELSE 2 END;
+                    FOR v_point_idx IN v_append_start..v_point_count LOOP
+                        v_merged_smooth_line := ST_AddPoint(v_merged_smooth_line, ST_PointN(v_direct_line, v_point_idx));
+                    END LOOP;
+
+                    v_part_count := v_part_count + 1;
+                    v_anchor_m := v_last_safe_m;
+                    EXIT;
+                END IF;
+
+                IF v_probe_point_blocked THEN
+                    v_exit_m := v_probe_m;
+                    WHILE v_exit_m < v_segment_m LOOP
+                        v_exit_m := LEAST(v_exit_m + 1000.0, v_segment_m);
+                        v_ratio2 := v_exit_m / v_segment_m;
+                        v_seg_end_lon := v_lon1 + (v_lon2 - v_lon1) * v_ratio2;
+                        v_seg_end_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio2;
+                        v_seg_end_alt := CASE WHEN v_exit_m >= v_segment_m THEN v_alt2 ELSE p_safe_altitude END;
+                        v_probe_point := ST_SetSRID(ST_MakePoint(v_seg_end_lon, v_seg_end_lat, v_seg_end_alt), 4326);
+
+                        IF NOT gis_flight_point_in_fence(v_probe_point, p_project_id) THEN
+                            EXIT;
+                        END IF;
+                    END LOOP;
+                    v_probe_m := v_exit_m;
+                END IF;
+
+                v_ratio1 := v_anchor_m / v_segment_m;
+                v_ratio2 := v_probe_m / v_segment_m;
+
+                v_seg_start_lon := v_lon1 + (v_lon2 - v_lon1) * v_ratio1;
+                v_seg_start_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio1;
+                v_seg_start_alt := CASE WHEN v_anchor_m = 0 THEN v_alt1 ELSE p_safe_altitude END;
+                v_seg_end_lon := v_lon1 + (v_lon2 - v_lon1) * v_ratio2;
+                v_seg_end_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio2;
+                v_seg_end_alt := CASE WHEN v_probe_m >= v_segment_m THEN v_alt2 ELSE p_safe_altitude END;
+
+                IF (v_probe_m - v_anchor_m) <= 5000.0 THEN
+                    SELECT
+                        r.id, r.project_id, r.create_user, r.create_time,
+                        r.update_user, r.update_time, r.del_flag,
+                        r.start_point, r.end_point, r.safe_altitude,
+                        r.path_line, r.smooth_path_line,
+                        r.waypoints, r.smooth_waypoints,
+                        r.total_distance, r.smooth_ratio
+                    INTO v_part
+                    FROM gis_astar_3d_flight_plan(
+                        v_seg_start_lon, v_seg_start_lat, v_seg_start_alt,
+                        v_seg_end_lon, v_seg_end_lat, v_seg_end_alt,
+                        p_safe_altitude,
+                        p_height_mode,
+                        TRUE,
+                        p_project_id,
+                        p_create_user
+                    ) r
+                    LIMIT 1;
+                ELSE
+                    -- 点落入较长围栏时，离开点可能超过 5km；这里直接调用核心函数，避免两点入口再次回到本函数形成递归。
+                    SELECT
+                        r.id, r.project_id, r.create_user, r.create_time,
+                        r.update_user, r.update_time, r.del_flag,
+                        r.start_point, r.end_point, r.safe_altitude,
+                        r.path_line, r.smooth_path_line,
+                        r.waypoints, r.smooth_waypoints,
+                        r.total_distance, r.smooth_ratio
+                    INTO v_part
+                    FROM gis_astar_3d_flight(
+                        v_seg_start_lon, v_seg_start_lat, v_seg_start_alt,
+                        v_seg_end_lon, v_seg_end_lat, v_seg_end_alt,
+                        p_safe_altitude,
+                        p_height_mode,
+                        TRUE,
+                        p_project_id,
+                        p_create_user
+                    ) r
+                    LIMIT 1;
+                END IF;
+
+                IF v_part.path_line IS NULL OR v_part.smooth_path_line IS NULL THEN
+                    RAISE EXCEPTION '分段路径规划失败：input_seq=%, distance_m=%', v_input_idx, v_probe_m;
+                END IF;
+
+                v_part_count := v_part_count + 1;
+
+                v_point_count := ST_NumPoints(v_part.path_line);
+                v_append_start := CASE WHEN ST_NumPoints(v_merged_path_line) = 0 THEN 1 ELSE 2 END;
+                FOR v_point_idx IN v_append_start..v_point_count LOOP
+                    v_merged_path_line := ST_AddPoint(v_merged_path_line, ST_PointN(v_part.path_line, v_point_idx));
+                END LOOP;
+
+                v_point_count := ST_NumPoints(v_part.smooth_path_line);
+                v_append_start := CASE WHEN ST_NumPoints(v_merged_smooth_line) = 0 THEN 1 ELSE 2 END;
+                FOR v_point_idx IN v_append_start..v_point_count LOOP
+                    v_merged_smooth_line := ST_AddPoint(v_merged_smooth_line, ST_PointN(v_part.smooth_path_line, v_point_idx));
+                END LOOP;
+
+                v_anchor_m := v_probe_m;
+                EXIT;
             END LOOP;
         END LOOP;
     END LOOP;
@@ -1131,7 +1455,7 @@ BEGIN
     ) RETURNING gis_flight_paths.id INTO v_path_id;
 
     -- 子分段只在内存中参与合并，不产生分段航线记录。
-    v_return_msg := format('规划成功：多点/长距离分段规划完成，共计算 %s 个分段，执行时间 %s 秒',
+    v_return_msg := format('规划成功：多点/长距离探测规划完成，共处理 %s 个航段，执行时间 %s 秒',
                            v_part_count,
                            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     RETURN QUERY SELECT 200, v_return_msg, p.* FROM gis_flight_paths p WHERE p.id = v_path_id;
