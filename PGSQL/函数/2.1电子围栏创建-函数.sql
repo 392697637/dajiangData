@@ -284,17 +284,6 @@ COMMENT ON FUNCTION gis_electric_fence_project(text, text) IS '生成项目电�
 --   count       bigint      导入围栏数据总条数
 -- ============================================================
  
-SELECT gis_electric_fence_project(
-    'zhengzhou_demo', 
-    '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'
-);
-
--- 示例：按真实项目ID创建项目电子围栏表，并返回创建结果。
-SELECT* FROM gis_electric_fence_project(
-    '2c95908e958f3b75019593551f520126', --  输入参数：项目唯一ID（用于生成表名）
-    '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'  -- 输入参数：项目范围的GeoJSON多边形字符串
-);
-
 ------------------------------------------------------------------------------geoserver 自动调用项目服务------------------------------------------------------
 -- =============================================
 -- 函数名称：gis_get_electric_fence_project
@@ -407,3 +396,17 @@ SELECT * FROM gis_get_electric_fence_project('zhengzhou_demo', '-1');
 
 
 SELECT * FROM gis_get_electric_fence_project('zhengzhou_demo',  '1,2,3');
+
+-- =============================================================================
+-- gis_electric_fence_project 调用示例
+-- =============================================================================
+-- SELECT gis_electric_fence_project(
+--     'zhengzhou_demo',
+--     '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'
+-- );
+
+-- 示例：按真实项目ID创建项目电子围栏表，并返回创建结果。
+-- SELECT * FROM gis_electric_fence_project(
+--     '2c95908e958f3b75019593551f520126',
+--     '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'
+-- );

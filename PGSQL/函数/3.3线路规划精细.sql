@@ -1262,3 +1262,29 @@ COMMENT ON FUNCTION gis_astar_3d_flight_plan_build(
 --     'task001',
 --     true
 -- );
+
+-- SELECT * FROM gis_generate_corridor_fine_grid(
+--     '2c95908e958f3b75019593551f520126',
+--     ST_GeomFromText('LINESTRING Z (112.80 34.30 0, 114.00 34.80 0)', 4326),
+--     0, 300, 30, 500, 'task001', TRUE
+-- );
+
+-- SELECT * FROM gis_mark_electric_fence_on_grid(
+--     '2c95908e958f3b75019593551f520126',
+--     'gis_grid_nodes_fine_task001'
+-- );
+
+-- SELECT * FROM gis_mark_buildings_on_grid(
+--     '2c95908e958f3b75019593551f520126',
+--     'gis_grid_nodes_fine_task001',
+--     30
+-- );
+
+-- SELECT * FROM gis_astar_3d_flight_plan_on_grid(
+--     'gis_grid_nodes_fine_task001',
+--     112.80, 34.30, 0,
+--     114.00, 34.80, 0,
+--     120, 0, TRUE,
+--     '2c95908e958f3b75019593551f520126',
+--     'system'
+-- );

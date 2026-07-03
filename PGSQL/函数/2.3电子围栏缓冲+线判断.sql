@@ -168,9 +168,6 @@ $$;
 COMMENT ON FUNCTION public.gis_electric_fence_buffer(varchar, double precision) IS '生成电子围栏缓冲区';
 
 
--- 函数调用示例-------------------------------------------------------------------------------
--- SELECT * FROM gis_electric_fence_buffer('2052290479526682626', 30);
-
  
 -- ==================================================================================== gis_electric_fence_check_line_buffer  线穿电子围栏检测+缓冲==========================================================
 -- ====================================================================================
@@ -296,15 +293,6 @@ $$;
 COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, double precision) IS '检测航线缓冲区冲突';
 
  
--- 函数调用示例：线穿围栏检测-------------------------------------------------------------------------------
-SELECT * FROM public.gis_electric_fence_check_line_buffer('{
-  "type":"LineString",
-  "coordinates":[
-    [113.405861,34.769437,120],
-    [113.405861,34.769437,120]
-  ]
-}',10);
-
  
  
 -- ==================================================================================== gis_bo_electric_fence_check_line  线穿电子围栏检测==========================================================
@@ -424,14 +412,6 @@ END;
 $$;
 COMMENT ON FUNCTION public.gis_electric_fence_check_line(text) IS '检测航线穿越围栏';
 
----------------------------------------------------------------- 函数调用测试 ---------------------------------------------------------------- 
-SELECT * FROM public.gis_electric_fence_check_line('{
-  "type":"LineString",
-  "coordinates":[
-    [113.405861,34.769437,120],
-    [113.405861,34.769437,120]
-  ]
-}');
 -- ================================================ gis_check_point_in_forbidden_zone  检查点是否在启用的禁飞区内==========================================================
 -- ====================================================================
 -- 函数名称： gis_electric_fence_check_point
@@ -698,26 +678,48 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_point(text, text) IS '检测
  
 -- 函数调用示例=============================================
 -- 示例1：有项目ID，查询项目表，使用Point格式
-SELECT * FROM gis_electric_fence_check_point(
-    '2c95908e958f3b75019593551f520126',
-    '{"type":"Point","coordinates":[113.405861,34.769437,10000]}'
-);
+-- SELECT * FROM gis_electric_fence_check_point(
+--     '2c95908e958f3b75019593551f520126',
+--     '{"type":"Point","coordinates":[113.405861,34.769437,10000]}'
+-- );
 
 -- 示例2：有项目ID，查询项目表，使用Feature格式
-SELECT * FROM gis_electric_fence_check_point(
-    '2c95908e958f3b75019593551f520126',
-    '{"type":"Feature","geometry":{"type":"Point","coordinates":[113.405861,34.769437]},"properties":{"z":10000}}'
-);
+-- SELECT * FROM gis_electric_fence_check_point(
+--     '2c95908e958f3b75019593551f520126',
+--     '{"type":"Feature","geometry":{"type":"Point","coordinates":[113.405861,34.769437]},"properties":{"z":10000}}'
+-- );
 
 -- 示例3：无项目ID，查询公共表
-SELECT * FROM gis_electric_fence_check_point(
-    '',
-    '{"type":"Point","coordinates":[113.405861,34.769437,10000]}'
-);
+-- SELECT * FROM gis_electric_fence_check_point(
+--     '',
+--     '{"type":"Point","coordinates":[113.405861,34.769437,10000]}'
+-- );
 
 -- 示例4：无项目ID（NULL），查询公共表
-SELECT * FROM gis_electric_fence_check_point(
-    NULL,
-    '{"type":"Point","coordinates":[113.405861,34.769437]}'
-);
+-- SELECT * FROM gis_electric_fence_check_point(
+--     NULL,
+--     '{"type":"Point","coordinates":[113.405861,34.769437]}'
+-- );
+
+-- =============================================================================
+-- 调用示例
+-- =============================================================================
+
+-- SELECT * FROM gis_electric_fence_buffer('2052290479526682626', 30);
+
+-- SELECT * FROM public.gis_electric_fence_check_line_buffer('{
+--   "type":"LineString",
+--   "coordinates":[
+--     [113.405861,34.769437,120],
+--     [113.405861,34.769437,120]
+--   ]
+-- }',10);
+
+-- SELECT * FROM public.gis_electric_fence_check_line('{
+--   "type":"LineString",
+--   "coordinates":[
+--     [113.405861,34.769437,120],
+--     [113.405861,34.769437,120]
+--   ]
+-- }');
  

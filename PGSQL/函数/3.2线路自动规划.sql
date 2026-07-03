@@ -1514,6 +1514,26 @@ COMMENT ON FUNCTION gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARC
 -- =============================================================================
 -- 测试函数
 -- =============================================================================
+-- SELECT gis_linestring_length_m(
+--     ST_GeomFromText('LINESTRING Z (113.640409 34.744365 50, 113.657920 34.748111 120)', 4326)
+-- );
+
+-- SELECT gis_flight_point_in_fence(
+--     ST_SetSRID(ST_MakePoint(113.640409, 34.744365, 120), 4326),
+--     'TEST001'
+-- );
+
+-- SELECT gis_flight_line_intersects_fence(
+--     ST_GeomFromText('LINESTRING Z (113.640409 34.744365 50, 113.657920 34.748111 120)', 4326),
+--     'TEST001'
+-- );
+
+-- SELECT * FROM gis_astar_3d_flight(
+--     113.64040905110176, 34.744365280882896, 50,
+--     113.65792057874526, 34.748111106532264, 50,
+--     140, 0, TRUE, 'TEST001', 'admin'
+-- );
+
 SELECT * FROM gis_astar_3d_flight_plan(
     113.64040905110176, 34.744365280882896, 50,
     113.65792057874526, 34.748111106532264, 50,
@@ -1530,4 +1550,12 @@ SELECT gis_astar_3d_flight_plan (
     113.64713158192619, 34.745232119865804, 50.0, 
     120, 0, False, 'project_001', 'user_123'
     );
+
+-- SELECT * FROM gis_flight_paths_plan(
+--     jsonb_build_array(
+--         jsonb_build_object('lon', 113.64040905110176, 'lat', 34.744365280882896, 'alt', 50),
+--         jsonb_build_object('lon', 113.65792057874526, 'lat', 34.748111106532264, 'alt', 50)
+--     ),
+--     140, TRUE, 'TEST001', 'admin', 0
+-- );
 

@@ -335,10 +335,8 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_generate_building_3d(text) IS '生成建筑三维体块';
--- SELECT public.gis_generate_building_3d('aaaaa');
 
 -- DROP TABLE IF EXISTS public.gis_buildings_bbbbb CASCADE;
---   SELECT public.gis_generate_building_3d('bbbb');
  
 
 -- ============================================================
@@ -462,8 +460,6 @@ COMMENT ON FUNCTION public.exec_shell_cmd_capture(TEXT) IS '执行命令并返�
 --   project_id      text  项目ID；实际建筑表名为 gis_buildings_项目ID
 --   p_config_json   text  JSON 字符串；可不传、传 NULL、传空字符串或传 jsonb_build_object()::text。
 --                         所有 JSON 参数均可省略；省略时使用下面默认值，或不启用对应 pg2b3dm 可选参数。
---                         示例：SELECT * FROM public.gis_generate_3dtiles('bbbb');
---                         示例：SELECT * FROM public.gis_generate_3dtiles('bbbb', jsonb_build_object()::text);
 --                         可包含以下参数：
 --                         pg2b3dm_path text，默认 /usr/local/bin/pg2b3dm。
 --                           作用：pg2b3dm 可执行文件路径。
@@ -1405,6 +1401,8 @@ GRANT EXECUTE ON FUNCTION public.gis_generate_3dtiles(TEXT, TEXT) TO zhuoyi;
 -- ============================================================
 
 -- 示例 1：生成项目 aaaaa 的 3D Tiles。
+-- SELECT public.gis_generate_building_3d('aaaaa');
+-- SELECT public.gis_generate_building_3d('bbbb');
 -- SELECT * FROM public.gis_generate_3dtiles('aaaaa');
 
 -- 示例 2：13 万级数据推荐：worker=12，每瓦片最大要素数=500，只输出必要属性，关闭轮廓线。
