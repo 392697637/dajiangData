@@ -270,6 +270,7 @@ EXCEPTION WHEN OTHERS THEN
         SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, v_target_table::varchar, 0::bigint;
 END;
 $$;
+COMMENT ON FUNCTION gis_electric_fence_project(text, text) IS '生成项目电子围栏表';
 -- ============================================================
 -- 函数名称： gis_electric_fence_project
 -- 函数功能： 动态创建项目专属电子围栏表，并自动导入相交的禁飞区、试飞区数据
@@ -374,6 +375,7 @@ BEGIN
     RETURN QUERY EXECUTE v_sql;
 END;
 $$;
+COMMENT ON FUNCTION gis_get_electric_fence_project(text, text) IS '查询项目电子围栏数据';
 -- =============================================
 -- 函数调用示例
 -- 功能：查询项目ID为 taiyuan_demo 的电子围栏数据

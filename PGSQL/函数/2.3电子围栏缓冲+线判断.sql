@@ -165,6 +165,7 @@ EXCEPTION
             NULL::varchar, NULL::json, NULL::json, NULL::json;
 END;
 $$;
+COMMENT ON FUNCTION public.gis_electric_fence_buffer(varchar, double precision) IS '生成电子围栏缓冲区';
 
 
 -- 函数调用示例-------------------------------------------------------------------------------
@@ -292,6 +293,7 @@ EXCEPTION
             NULL::varchar, NULL::json, NULL::json, NULL::json;
 END;
 $$;
+COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, double precision) IS '检测航线缓冲区冲突';
 
  
 -- 函数调用示例：线穿围栏检测-------------------------------------------------------------------------------
@@ -420,6 +422,7 @@ EXCEPTION
             NULL::varchar, NULL::json;
 END;
 $$;
+COMMENT ON FUNCTION public.gis_electric_fence_check_line(text) IS '检测航线穿越围栏';
 
 ---------------------------------------------------------------- 函数调用测试 ---------------------------------------------------------------- 
 SELECT * FROM public.gis_electric_fence_check_line('{
@@ -690,6 +693,7 @@ EXCEPTION
             NULL::varchar, NULL::json;
 END;
 $$;
+COMMENT ON FUNCTION public.gis_electric_fence_check_point(text, text) IS '检测航点落入围栏';
 
  
 -- 函数调用示例=============================================

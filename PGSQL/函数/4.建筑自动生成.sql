@@ -334,8 +334,7 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_generate_building_3d(text) IS
-'根据项目ID处理建筑表 public.gis_buildings_项目ID：校验表存在，自动补齐 id 字段；如果 id 不存在但 gid 存在，则创建与 gid 相同类型的 id 并复制 gid 内容；如果 id 和 gid 都不存在，则创建 SERIAL 自增 id；随后处理 geom 的 SRID 和三维化；每次执行都会删除旧 geom3d 列并重新创建，再根据 height 生成包含底面、侧面和顶面的 MultiPolygonZ 建筑体块。底面反向生成使法线朝下，顶面按 Polygon 生成一次，侧面按边生成一次，避免顶部重复；生成后会将空结果或只有 1 个 Polygon 的单面 geom3d 置空，避免不完整体块进入 3D Tiles。返回 code、msg、modified_count，其中 modified_count 只统计 UPDATE 实际影响行数。';
+COMMENT ON FUNCTION public.gis_generate_building_3d(text) IS '生成建筑三维体块';
 -- SELECT public.gis_generate_building_3d('aaaaa');
 
 -- DROP TABLE IF EXISTS public.gis_buildings_bbbbb CASCADE;
@@ -453,6 +452,7 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NEXT;
 END;
 $$;
+COMMENT ON FUNCTION public.exec_shell_cmd_capture(TEXT) IS '执行命令并返回结果';
 
 
 -- ============================================================
@@ -1392,6 +1392,7 @@ EXCEPTION WHEN OTHERS THEN
         COALESCE(v_file_absolute_path, '');
 END;
 $$;
+COMMENT ON FUNCTION public.gis_generate_3dtiles(TEXT, TEXT) IS '生成建筑三维瓦片文件';
 
 
 -- 授权业务用户执行函数。

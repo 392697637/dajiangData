@@ -322,6 +322,7 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NEXT;
 END;
 $$;
+COMMENT ON FUNCTION gis_generate_3d_grid(VARCHAR, TEXT, NUMERIC, NUMERIC, INT) IS '生成项目三维飞行网格';
  
 -- ========================================== gis_mark_electric_fence  更新三维网格表============================================================
 -- =============================================================================
@@ -594,6 +595,7 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NEXT;
 END;
 $$;
+COMMENT ON FUNCTION gis_mark_electric_fence(VARCHAR) IS '标记网格电子围栏障碍';
  
 
  
@@ -913,6 +915,7 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NEXT;
 END;
 $$;
+COMMENT ON FUNCTION gis_refresh_electric_fence(VARCHAR, VARCHAR) IS '刷新网格电子围栏标记';
  
 
 
@@ -1134,6 +1137,7 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NEXT;
 END;
 $$;
+COMMENT ON FUNCTION gis_mark_buildings(VARCHAR, DOUBLE PRECISION) IS '标记网格建筑物障碍';
 
 -- =============================================================================
 -- 函数调用示例

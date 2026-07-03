@@ -299,8 +299,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_query_poi(text, text, text, double precision, text) IS
-'按项目ID查询高德/天地POI；第三个参数为空时按名称模糊查询；第三个参数传 {''lon'':经度,''lat'':纬度} 或 [经度,纬度] 且第四个参数传半径公里时，按圆心半径查询；第五个参数为数据来源(gd/td，默认gd)。';
+COMMENT ON FUNCTION public.gis_query_poi(text, text, text, double precision, text) IS '按名称和范围查询兴趣点';
 
 -- ============================================================
 -- 调用示例

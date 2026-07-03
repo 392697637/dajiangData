@@ -284,6 +284,7 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NEXT;
 END;
 $$;
+COMMENT ON FUNCTION gis_generate_corridor_fine_grid(VARCHAR, GEOMETRY, NUMERIC, NUMERIC, INT, DOUBLE PRECISION, VARCHAR, BOOLEAN) IS '生成航廊精细飞行网格';
 
 
 -- ============================================================
@@ -502,6 +503,7 @@ BEGIN
     RETURN NEXT;
 END;
 $$;
+COMMENT ON FUNCTION gis_mark_electric_fence_on_grid(VARCHAR, VARCHAR) IS '标记精细网格电子围栏';
 
 
 -- ============================================================
@@ -663,6 +665,7 @@ BEGIN
     RETURN NEXT;
 END;
 $$;
+COMMENT ON FUNCTION gis_mark_buildings_on_grid(VARCHAR, VARCHAR, DOUBLE PRECISION) IS '标记精细网格建筑障碍';
 
 
 -- ============================================================
@@ -976,6 +979,11 @@ EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
 END;
 $$;
+COMMENT ON FUNCTION gis_astar_3d_flight_plan_on_grid(
+    VARCHAR, DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR
+) IS '指定网格精细避障寻路';
 
 
 -- ============================================================
@@ -1230,6 +1238,12 @@ EXCEPTION WHEN OTHERS THEN
     END IF;
 END;
 $$;
+COMMENT ON FUNCTION gis_astar_3d_flight_plan_build(
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    INT, DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR, VARCHAR, BOOLEAN
+) IS '建筑避障精细航线规划';
 
 
 -- 调用示例：

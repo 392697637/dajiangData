@@ -51,7 +51,7 @@ RETURNS DOUBLE PRECISION AS $$
     ), 0)::DOUBLE PRECISION
     FROM segs;
 $$ LANGUAGE SQL IMMUTABLE STRICT;
-COMMENT ON FUNCTION gis_linestring_length_m(geometry) IS '计算线长';
+COMMENT ON FUNCTION gis_linestring_length_m(geometry) IS '计算三维航线实际长度';
 
 -- =============================================================================
 -- 删除函数
@@ -124,7 +124,7 @@ BEGIN
     RETURN false;
 END;
 $$;
-COMMENT ON FUNCTION gis_flight_point_in_fence(geometry, varchar) IS '判断点是否落在禁飞区/管控区内';
+COMMENT ON FUNCTION gis_flight_point_in_fence(geometry, varchar) IS '判断航点是否在围栏';
 
 -- =============================================================================
 -- 删除函数
@@ -197,7 +197,7 @@ BEGIN
     RETURN false;
 END;
 $$;
-COMMENT ON FUNCTION gis_flight_line_intersects_fence(geometry, varchar) IS '判断线段是否穿越禁飞区/管控区';
+COMMENT ON FUNCTION gis_flight_line_intersects_fence(geometry, varchar) IS '判断航线是否穿越围栏';
 
 -- ==================================================================================== gis_astar_3d_flight  单段三维路径规划====================================================================================
 -- =============================================================================
@@ -940,7 +940,7 @@ COMMENT ON FUNCTION gis_astar_3d_flight(
     DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
     DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
     DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR
-) IS '单段航线';
+) IS '规划单段三维避障航线';
 
 -- =============================================================================
 -- 删除函数
@@ -1115,7 +1115,7 @@ COMMENT ON FUNCTION gis_astar_3d_flight_plan(
     DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
     DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
     DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR
-) IS '分段入口';
+) IS '两点自动航线规划入口';
 
 -- =============================================================================
 -- 删除函数
@@ -1508,7 +1508,7 @@ EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
 END;
 $$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR, DOUBLE PRECISION) IS '多点规划';
+COMMENT ON FUNCTION gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR, DOUBLE PRECISION) IS '多点航线自动分段规划';
 
 
 -- =============================================================================
