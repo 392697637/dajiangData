@@ -49,21 +49,10 @@
 --   建议 POI 表 geom 字段建立 GIST 索引，以提升半径查询性能。
 -- ============================================================
 
-DO $drop$
-DECLARE
-    r record;
-BEGIN
-    FOR r IN
-        SELECT p.oid::regprocedure AS func_signature
-        FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname = 'public'
-          AND p.proname = 'gis_query_poi'
-    LOOP
-        EXECUTE format('DROP FUNCTION IF EXISTS %s', r.func_signature);
-    END LOOP;
-END;
-$drop$;
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_query_poi');
 
 CREATE OR REPLACE FUNCTION public.gis_query_poi(
     p_project_id text,

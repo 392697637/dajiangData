@@ -34,8 +34,10 @@
 -- 适用场景： 电子围栏可视化、GIS空间分析、前端地图渲染（2D/3D围栏展示）
 -- ====================================================================================
 
--- 删除已存在的同名函数（避免函数重载冲突）
-DROP FUNCTION IF EXISTS public.gis_electric_fence_buffer(varchar(32), double precision);
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_electric_fence_buffer');
 
 -- 创建/替换函数
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_buffer(
@@ -199,8 +201,10 @@ $$;
 -- 适用场景： 无人机航线规划、飞行轨迹闯入禁飞/管控/试飞区自动检测
 -- ====================================================================================
 
+-- =============================================================================
 -- 删除函数
-DROP FUNCTION IF EXISTS public.gis_electric_fence_check_line_buffer(text, double precision);
+-- =============================================================================
+SELECT gis_drop_function('gis_electric_fence_check_line_buffer');
 
 -- 创建函数
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_line_buffer(
@@ -321,8 +325,10 @@ SELECT * FROM public.gis_electric_fence_check_line_buffer('{
 -- 适用场景： 无人机航线闯入禁飞区/管控区实时检测
 -- ====================================================================================
 
+-- =============================================================================
 -- 删除函数
-DROP FUNCTION IF EXISTS public.gis_electric_fence_check_line(text);
+-- =============================================================================
+SELECT gis_drop_function('gis_electric_fence_check_line');
 
 -- 创建函数
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_line(
@@ -450,8 +456,10 @@ SELECT * FROM public.gis_electric_fence_check_line('{
 -- 适用场景： 无人机实时定位是否闯入禁飞区/管控区
 -- ====================================================================================
 
+-- =============================================================================
 -- 删除函数
-DROP FUNCTION IF EXISTS public.gis_electric_fence_check_point(text, text);
+-- =============================================================================
+SELECT gis_drop_function('gis_electric_fence_check_point');
 
 -- 创建函数
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_point(

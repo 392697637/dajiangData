@@ -1,6 +1,7 @@
--- 删除旧函数（如果存在），避免函数定义冲突
-DROP FUNCTION IF EXISTS gis_check_electric_fence(jsonb, varchar);
-DROP FUNCTION IF EXISTS gis_check_electric_fence(varchar, text, text);
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_check_electric_fence');
 
 -- 返回策略：
 --   code=200 表示函数正常完成。

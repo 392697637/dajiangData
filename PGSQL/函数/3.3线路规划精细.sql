@@ -59,9 +59,10 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 --   msg         执行说明和耗时。
 --   count       生成的网格点数量；估算超限时返回预计数量。
 -- ============================================================
-DROP FUNCTION IF EXISTS gis_generate_corridor_fine_grid(
-    VARCHAR, GEOMETRY, NUMERIC, NUMERIC, INT, DOUBLE PRECISION, VARCHAR, BOOLEAN
-);
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_generate_corridor_fine_grid');
 
 CREATE OR REPLACE FUNCTION gis_generate_corridor_fine_grid(
     p_project_id VARCHAR,
@@ -312,7 +313,10 @@ $$;
 --   msg         执行说明和耗时。
 --   count       更新行数 + 清空旧标记行数。
 -- ============================================================
-DROP FUNCTION IF EXISTS gis_mark_electric_fence_on_grid(VARCHAR, VARCHAR);
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_mark_electric_fence_on_grid');
 
 CREATE OR REPLACE FUNCTION gis_mark_electric_fence_on_grid(
     p_project_id VARCHAR,
@@ -521,7 +525,10 @@ $$;
 --   - height 为空或小于等于0时按 5m 默认高度处理；
 --   - 清除不再命中的旧建筑阻塞位，并按剩余 block_mask 重算 is_flyable。
 -- ============================================================
-DROP FUNCTION IF EXISTS gis_mark_buildings_on_grid(VARCHAR, VARCHAR, DOUBLE PRECISION);
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_mark_buildings_on_grid');
 
 CREATE OR REPLACE FUNCTION gis_mark_buildings_on_grid(
     p_project_id VARCHAR,
@@ -692,11 +699,10 @@ $$;
 --   parent_id  当前点是从哪个上一个点走过来的，用于最后回溯路径。
 --   closed     true 表示这个点已经完成扩展，不再重复处理。
 -- ============================================================
-DROP FUNCTION IF EXISTS gis_astar_3d_flight_plan_on_grid(
-    VARCHAR, DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
-    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
-    DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR
-);
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_astar_3d_flight_plan_on_grid');
 
 CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan_on_grid(
     p_grid_table VARCHAR,
@@ -1013,12 +1019,10 @@ $$;
 --   code/msg             先返回本总控函数状态，再拼接 gis_flight_paths 的完整字段。
 --   其他字段             与 gis_flight_paths 表结构一致，例如 path_line、waypoints、total_distance。
 -- ============================================================
-DROP FUNCTION IF EXISTS gis_astar_3d_flight_plan_build(
-    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
-    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
-    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
-    INT, DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR, VARCHAR, BOOLEAN
-);
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_astar_3d_flight_plan_build');
 
 CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan_build(
     p_start_lon DOUBLE PRECISION,

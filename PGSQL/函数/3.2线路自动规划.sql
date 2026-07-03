@@ -545,6 +545,10 @@ BEGIN
           AND is_flyable = true
     ', v_grid_table, v_min_x, v_max_x, v_min_y, v_max_y);
 
+    CREATE INDEX idx_tmp_grid_xyz ON tmp_grid (x, y, z);
+    CREATE INDEX idx_tmp_grid_geom ON tmp_grid USING GIST (geom);
+    ANALYZE tmp_grid;
+
     -- 在临时表中重新匹配最近的起点/终点网格（确保在搜索范围内）
     SELECT g.id INTO v_start_id FROM tmp_grid g ORDER BY g.geom <-> v_start_pt LIMIT 1;
     SELECT g.id INTO v_goal_id  FROM tmp_grid g ORDER BY g.geom <-> v_end_pt LIMIT 1;
@@ -603,9 +607,9 @@ BEGIN
             FOR v_nid, v_n_geom, v_n_g, v_n_walk IN
                 SELECT g.id, g.geom, g.g_cost, g.is_walkable
                 FROM tmp_grid g
-                    WHERE ABS(g.x - v_curr_x) <= 1      -- X方向相邻（经度）
-                  AND ABS(g.y - v_curr_y) <= 1      -- Y方向相邻（纬度）
-                  AND ABS(g.z - v_curr_z) <= 1      -- Z方向相邻（高度层）
+                    WHERE g.x BETWEEN v_curr_x - 1 AND v_curr_x + 1      -- X方向相邻（经度）
+                  AND g.y BETWEEN v_curr_y - 1 AND v_curr_y + 1      -- Y方向相邻（纬度）
+                  AND g.z BETWEEN v_curr_z - 1 AND v_curr_z + 1      -- Z方向相邻（高度层）
                   AND g.id <> v_curr                -- 排除当前节点自身
                   AND g.is_walkable = TRUE          -- 只考虑可通行的网格
                   AND g.id <> ALL(v_closed)         -- 排除已经处理过的节点
@@ -993,6 +997,7 @@ DECLARE
     v_waypoints jsonb;
     v_path_id integer;
     v_return_msg text;
+    v_calc record;
 BEGIN
     IF p_start_lon IS NULL OR p_start_lat IS NULL OR p_start_alt IS NULL
        OR p_end_lon IS NULL OR p_end_lat IS NULL OR p_end_alt IS NULL THEN
@@ -1013,14 +1018,49 @@ BEGIN
     );
 
     IF v_segment_m <= 5000.0 THEN
-        RETURN QUERY
         SELECT *
+        INTO v_calc
         FROM gis_astar_3d_flight(
             p_start_lon, p_start_lat, p_start_alt,
             p_end_lon, p_end_lat, p_end_alt,
             p_safe_altitude, p_height_mode, p_force_gen,
             p_project_id, p_create_user
-        );
+        )
+        LIMIT 1;
+
+        IF v_calc.code IS DISTINCT FROM 200
+           OR v_calc.id IS NOT NULL
+           OR v_calc.path_line IS NULL
+           OR v_calc.smooth_path_line IS NULL THEN
+            RETURN QUERY SELECT
+                v_calc.code, v_calc.msg,
+                v_calc.id, v_calc.project_id, v_calc.create_user, v_calc.create_time,
+                v_calc.update_user, v_calc.update_time, v_calc.del_flag,
+                v_calc.start_point, v_calc.end_point, v_calc.safe_altitude,
+                v_calc.path_line, v_calc.smooth_path_line,
+                v_calc.waypoints, v_calc.smooth_waypoints,
+                v_calc.total_distance, v_calc.smooth_ratio;
+            RETURN;
+        END IF;
+
+        INSERT INTO gis_flight_paths (
+            project_id, create_user, update_user,
+            start_point, end_point, safe_altitude,
+            path_line, smooth_path_line,
+            waypoints, smooth_waypoints, total_distance, smooth_ratio
+        ) VALUES (
+            p_project_id, p_create_user, p_create_user,
+            v_calc.start_point, v_calc.end_point, v_calc.safe_altitude,
+            v_calc.path_line, v_calc.smooth_path_line,
+            v_calc.waypoints, v_calc.smooth_waypoints,
+            v_calc.total_distance, v_calc.smooth_ratio
+        ) RETURNING gis_flight_paths.id INTO v_path_id;
+
+        v_return_msg := format('规划成功：5km内单段航线已生成并保存，距离 %s 米', ROUND(v_segment_m::numeric, 2));
+        RETURN QUERY
+        SELECT 200, v_return_msg, p.*
+        FROM gis_flight_paths p
+        WHERE p.id = v_path_id;
         RETURN;
     END IF;
 

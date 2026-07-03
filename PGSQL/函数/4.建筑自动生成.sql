@@ -19,7 +19,10 @@
 --   2. 如果没有 id 但有 gid，则新增与 gid 相同类型的 id，并复制 gid 到 id。
 --   3. 如果 id 和 gid 都不存在，则新增 SERIAL 自增 id。
 -- ============================================================
-DROP FUNCTION IF EXISTS public.gis_generate_building_3d(text);
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_generate_building_3d');
 
 CREATE OR REPLACE FUNCTION public.gis_generate_building_3d(p_project_id text)
 RETURNS TABLE (
@@ -349,11 +352,15 @@ COMMENT ON FUNCTION public.gis_generate_building_3d(text) IS
 -- ============================================================
 
 -- 主函数依赖 exec_shell_cmd_capture，先删除主函数，再删除辅助函数。
-DROP FUNCTION IF EXISTS public.gis_generate_3dtiles(TEXT, integer, integer);
-DROP FUNCTION IF EXISTS public.gis_generate_3dtiles(TEXT, integer);
-DROP FUNCTION IF EXISTS public.gis_generate_3dtiles(TEXT);
-DROP FUNCTION IF EXISTS public.gis_generate_3dtiles(TEXT, TEXT);
-DROP FUNCTION IF EXISTS public.exec_shell_cmd_capture(TEXT);
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_generate_3dtiles');
+
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('exec_shell_cmd_capture');
 
 
 -- ============================================================

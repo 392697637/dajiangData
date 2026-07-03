@@ -47,19 +47,10 @@ SET synchronous_commit = OFF;                  -- 关闭同步提交，减少磁
 
 
 -- ================================================================= gis_generate_3d_grid 生成三维网格节点表====================================================================
--- 由于函数可能存在多个重载，这里通过系统表动态删除所有名为 gis_generate_3d_grid 的函数
-DO $$
-DECLARE
-    r RECORD;
-BEGIN
-    FOR r IN (SELECT oid, proname, pg_get_function_identity_arguments(oid) as args
-              FROM pg_proc
-              WHERE proname = 'gis_generate_3d_grid')
-    LOOP
-        EXECUTE 'DROP FUNCTION ' || r.oid::regproc || '(' || r.args || ') CASCADE';
-    END LOOP;
-END;
-$$;
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_generate_3d_grid');
 
 -- ==============================================
 -- 函数名：gis_generate_3d_grid
@@ -314,6 +305,7 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (x, y) WHERE is_flyable = true;', v_idx_prefix || '_fly_xy', v_table);
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I (block_mask) WHERE block_mask <> 0;', v_idx_prefix || '_mask', v_table);
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST(geom2d) WHERE z = 0;', v_idx_prefix || '_geom2d_z0', v_table);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST(geom);', v_idx_prefix || '_geom', v_table);
 
     -- ===================== 恢复autovacuum并更新表统计信息 =====================
     EXECUTE format('ALTER TABLE %I SET (autovacuum_enabled = on); ANALYZE %I;', v_table, v_table);
@@ -330,30 +322,12 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NEXT;
 END;
 $$;
--- ===================== 函数调用示例 =====================
- 
-SELECT * FROM gis_generate_3d_grid(
-    '2c95908e958f3b75019593551f520126',
-    '{"type":"Polygon","coordinates":[[[112.70,34.20],[114.20,34.20],[114.20,35.00],[112.70,35.00],[112.70,34.20]]]}',
-    0,
-    300,
-    100
-);
  
 -- ========================================== gis_mark_electric_fence  更新三维网格表============================================================
--- ===================== 删除可能存在的同名函数（保证幂等性） =====================
-DO $$
-DECLARE
-    r RECORD;
-BEGIN
-    FOR r IN (SELECT oid, proname, pg_get_function_identity_arguments(oid) as args
-              FROM pg_proc
-              WHERE proname = 'gis_mark_electric_fence')
-    LOOP
-        EXECUTE 'DROP FUNCTION ' || r.oid::regproc || '(' || r.args || ') CASCADE';
-    END LOOP;
-END;
-$$;
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_mark_electric_fence');
  
 -- ==============================================
 -- 函数名：gis_mark_electric_fence
@@ -621,24 +595,13 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
  
--- ===================== 标记网格区域类型示例 =====================
- SELECT * FROM gis_mark_electric_fence('2c95908e958f3b75019593551f520126');
 
  
 -- ============================================================ gis_refresh_electric_fence  重置所有网格====================================================================================
--- ===================== 删除可能存在的同名函数（保证幂等性） =====================
-DO $$
-DECLARE
-    r RECORD;
-BEGIN
-    FOR r IN (SELECT oid, proname, pg_get_function_identity_arguments(oid) as args
-              FROM pg_proc
-              WHERE proname = 'gis_refresh_electric_fence')
-    LOOP
-        EXECUTE 'DROP FUNCTION ' || r.oid::regproc || '(' || r.args || ') CASCADE';
-    END LOOP;
-END;
-$$;
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_refresh_electric_fence');
 
 -- ==============================================
 -- 函数名：gis_refresh_electric_fence
@@ -951,12 +914,6 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
  
--- ===================== 刷新电子围栏标记示例 =====================
--- 当围栏数据发生变更（如新增、修改、删除），调用此函数刷新全部区域标记
- -- 示例 刷新指定项目网格表
-SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
--- 示例 只刷新指定围栏影响范围
--- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126', '围栏ID');
 
 
 -- ========================================== gis_mark_buildings  根据建筑表标记三维网格障碍============================================================
@@ -973,18 +930,10 @@ SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
 --   p_building_buffer  建筑缓冲距离，单位米；100m 粗网格建议 30~50，避免小建筑漏标。
 -- 返回：
 --   code/table_name/msg/count，其中 count=更新建筑阻塞位 + 清除旧建筑阻塞位的行数。
-DO $$
-DECLARE
-    r RECORD;
-BEGIN
-    FOR r IN (SELECT oid, proname, pg_get_function_identity_arguments(oid) as args
-              FROM pg_proc
-              WHERE proname = 'gis_mark_buildings')
-    LOOP
-        EXECUTE 'DROP FUNCTION ' || r.oid::regproc || '(' || r.args || ') CASCADE';
-    END LOOP;
-END;
-$$;
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_mark_buildings');
 
 CREATE OR REPLACE FUNCTION gis_mark_buildings(
     p_project_id VARCHAR,
@@ -1185,5 +1134,24 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NEXT;
 END;
 $$;
+
+-- =============================================================================
+-- 函数调用示例
+-- =============================================================================
+-- SELECT * FROM gis_generate_3d_grid(
+--     '2c95908e958f3b75019593551f520126',
+--     '{"type":"Polygon","coordinates":[[[112.70,34.20],[114.20,34.20],[114.20,35.00],[112.70,35.00],[112.70,34.20]]]}',
+--     0,
+--     300,
+--     100
+-- );
+
+-- SELECT * FROM gis_mark_electric_fence('2c95908e958f3b75019593551f520126');
+
+-- 当围栏数据发生变更（如新增、修改、删除），调用此函数刷新全部区域标记。
+-- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
+
+-- 只刷新指定围栏影响范围。
+-- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126', '围栏ID');
 
 -- SELECT * FROM gis_mark_buildings('2c95908e958f3b75019593551f520126');

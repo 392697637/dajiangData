@@ -112,6 +112,10 @@ COMMENT ON INDEX idx_gis_grid_nodes_template_block_mask IS '多源阻塞位索�
 CREATE INDEX IF NOT EXISTS idx_gis_grid_nodes_template_geom2d ON gis_grid_nodes_template USING GIST (geom2d) WHERE z = 0;
 COMMENT ON INDEX idx_gis_grid_nodes_template_geom2d IS '二维网格点空间索引，用于面内判断和二维空间叠加分析';
 
+-- 三维点空间索引，用于 A* 起终点最近网格 KNN 查询（ORDER BY geom <-> point）。
+CREATE INDEX IF NOT EXISTS idx_gis_grid_nodes_template_geom ON gis_grid_nodes_template USING GIST (geom);
+COMMENT ON INDEX idx_gis_grid_nodes_template_geom IS '三维网格点空间索引，用于A*最近点匹配';
+
 
 -- ====================================================================================
 -- 2. block_mask=1 电子围栏/国家空域规则表 bo_electric_fence（先注释）

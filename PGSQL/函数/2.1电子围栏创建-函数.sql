@@ -2,8 +2,10 @@
 -- ==================================================
 -- gis_electric_fence_project 动态创建项目专属电子围栏表
 -- ==================================================
+-- =============================================================================
 -- 删除函数
-DROP FUNCTION IF EXISTS gis_electric_fence_project(text, text);
+-- =============================================================================
+SELECT gis_drop_function('gis_electric_fence_project');
 -- ============================================================
 -- 函数名称： gis_electric_fence_project
 -- 函数功能： 动态创建项目专属电子围栏表，并自动导入相交的禁飞区、试飞区数据
@@ -306,8 +308,10 @@ SELECT* FROM gis_electric_fence_project(
 -- 依赖插件：PostGIS
 -- =============================================
 
--- 如果函数已存在，则先删除
-DROP FUNCTION IF EXISTS gis_get_electric_fence_project(text, text); 
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_get_electric_fence_project');
 
 -- 创建函数
 CREATE OR REPLACE FUNCTION gis_get_electric_fence_project(
