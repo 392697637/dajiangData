@@ -428,3 +428,5 @@ SELECT * FROM gis_get_electric_fence_project('zhengzhou_demo',  '1,2,3');
 --     '2c95908e958f3b75019593551f520126',
 --     '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'
 -- );
+
+ 
