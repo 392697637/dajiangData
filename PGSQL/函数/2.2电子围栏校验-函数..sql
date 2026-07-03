@@ -1,3 +1,12 @@
+-- =============================================================================
+-- 2.2电子围栏校验-函数..sql
+--   gis_check_electric_fence                校验电子围栏冲突
+--   gis_electric_fence_check_point          检测航点落入围栏
+--   gis_electric_fence_check_line           检测航线穿越围栏
+--   gis_electric_fence_buffer               生成电子围栏缓冲区
+--   gis_electric_fence_check_line_buffer    检测航线缓冲区冲突
+--
+-- =============================================================================
 
 -- =============================================
 -- 函数名称： gis_check_electric_fence
