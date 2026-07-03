@@ -64,6 +64,13 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 -- =============================================================================
 SELECT gis_drop_function('gis_generate_corridor_fine_grid');
 
+-- =============================================================================
+-- 函数介绍：gis_generate_corridor_fine_grid
+-- 主要作用：沿粗规划航线生成走廊范围内的精细三维网格，用于二次精细避障。
+-- 入参说明：包含项目ID、中心航线、缓冲宽度、高度范围、分辨率、任务标识和是否重建。
+-- 返回说明：返回精细网格表名、生成数量和执行状态，供后续围栏和建筑标记使用。
+-- 注意事项：只在航线走廊内建网格，适合20米或30米精细分辨率，避免全域高密度建表。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION gis_generate_corridor_fine_grid(
     p_project_id VARCHAR,
     p_path_line GEOMETRY,
@@ -319,6 +326,13 @@ COMMENT ON FUNCTION gis_generate_corridor_fine_grid(VARCHAR, GEOMETRY, NUMERIC, 
 -- =============================================================================
 SELECT gis_drop_function('gis_mark_electric_fence_on_grid');
 
+-- =============================================================================
+-- 函数介绍：gis_mark_electric_fence_on_grid
+-- 主要作用：把电子围栏障碍标记到指定精细网格表中，更新可飞状态。
+-- 入参说明：p_grid_table 为精细网格表名；p_project_id 为项目ID，用于读取项目围栏数据。
+-- 返回说明：返回更新行数和状态信息，用于确认精细网格围栏障碍标记完成。
+-- 注意事项：函数针对指定网格表操作，调用前需确保精细网格已生成且表名正确。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION gis_mark_electric_fence_on_grid(
     p_project_id VARCHAR,
     p_grid_table VARCHAR
@@ -532,6 +546,13 @@ COMMENT ON FUNCTION gis_mark_electric_fence_on_grid(VARCHAR, VARCHAR) IS '标记
 -- =============================================================================
 SELECT gis_drop_function('gis_mark_buildings_on_grid');
 
+-- =============================================================================
+-- 函数介绍：gis_mark_buildings_on_grid
+-- 主要作用：把项目建筑物范围标记到指定精细网格表中，作为精细规划障碍。
+-- 入参说明：p_grid_table 为精细网格表名；p_project_id 为项目ID；p_building_buffer 为建筑缓冲距离。
+-- 返回说明：返回建筑障碍更新行数和执行消息，供精细路径规划前检查。
+-- 注意事项：依赖项目建筑表；缓冲距离按米处理，可根据建筑数据精度适当调整。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION gis_mark_buildings_on_grid(
     p_project_id VARCHAR,
     p_grid_table VARCHAR,
@@ -707,6 +728,13 @@ COMMENT ON FUNCTION gis_mark_buildings_on_grid(VARCHAR, VARCHAR, DOUBLE PRECISIO
 -- =============================================================================
 SELECT gis_drop_function('gis_astar_3d_flight_plan_on_grid');
 
+-- =============================================================================
+-- 函数介绍：gis_astar_3d_flight_plan_on_grid
+-- 主要作用：在指定精细网格表上执行三维A*规划，生成更贴合走廊和障碍的航线。
+-- 入参说明：包含精细网格表名、起终点经纬高、安全高度、项目ID、创建人和高度模式。
+-- 返回说明：返回规划状态、路径线、平滑路径、航点JSON和距离等规划结果。
+-- 注意事项：函数只使用传入网格表寻路，调用前应先完成围栏和建筑障碍标记。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan_on_grid(
     p_grid_table VARCHAR,
     p_start_lon DOUBLE PRECISION,
@@ -1032,6 +1060,13 @@ COMMENT ON FUNCTION gis_astar_3d_flight_plan_on_grid(
 -- =============================================================================
 SELECT gis_drop_function('gis_astar_3d_flight_plan_build');
 
+-- =============================================================================
+-- 函数介绍：gis_astar_3d_flight_plan_build
+-- 主要作用：组合粗规划、走廊精细建网格、障碍标记和精细A*，生成建筑避障优化航线。
+-- 入参说明：包含起终点经纬高、安全高度、项目ID、创建人、精细分辨率和走廊宽度等参数。
+-- 返回说明：返回最终精细规划结果，并保留过程状态信息，便于判断失败环节。
+-- 注意事项：该函数是精细线路规划入口，依赖3.2粗规划、项目网格、围栏和建筑数据完整可用。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan_build(
     p_start_lon DOUBLE PRECISION,
     p_start_lat DOUBLE PRECISION,

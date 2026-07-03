@@ -35,6 +35,13 @@ SELECT gis_drop_function('gis_electric_fence_project');
 --   4. 自动创建空间索引，提升查询效率
 -- 适用场景： 按项目生成独立电子围栏库，用于无人机飞行区域合规校验
 -- ============================================================
+-- =============================================================================
+-- 函数介绍：gis_electric_fence_project
+-- 主要作用：按项目范围生成项目专属电子围栏表，并导入相交的禁飞区、试飞区数据。
+-- 入参说明：p_project_id 为项目ID，用于拼接目标表名；p_geom_json 为项目范围GeoJSON面。
+-- 返回说明：返回状态码、执行消息、生成表名和导入数据条数，便于接口侧判断处理结果。
+-- 注意事项：执行前会删除同名项目围栏表后重建；依赖PostGIS和源围栏、省份试飞区数据表。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION gis_electric_fence_project(
     p_project_id text,  -- 输入：项目唯一ID
     p_geom_json text    -- 输入：项目范围GeoJSON字符串
@@ -304,6 +311,13 @@ COMMENT ON FUNCTION gis_electric_fence_project(text, text) IS '生成项目电�
 SELECT gis_drop_function('gis_get_electric_fence_project');
 
 -- 创建函数
+-- =============================================================================
+-- 函数介绍：gis_get_electric_fence_project
+-- 主要作用：按项目ID动态读取项目专属电子围栏表，并按围栏类型过滤返回。
+-- 入参说明：p_project_id 为项目ID；p_fence_type 支持单个类型、分号或逗号分隔的类型列表。
+-- 返回说明：返回围栏属性、面积和geom几何数据，供GeoServer或业务接口直接查询展示。
+-- 注意事项：函数会动态拼接表名，项目围栏表不存在或类型为空时不返回数据。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION gis_get_electric_fence_project(
     p_project_id TEXT,                                   -- 入参1：项目ID，用于拼接动态表名
     p_fence_type TEXT DEFAULT NULL                       -- 入参2：围栏类型，支持1/1;2/1,2,3格式

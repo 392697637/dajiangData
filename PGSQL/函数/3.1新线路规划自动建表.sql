@@ -74,6 +74,13 @@ SELECT gis_drop_function('gis_generate_3d_grid');
 --   - 建表后会自动创建 (x,y,z) 复合索引和 geom 空间索引。
 --   - 支持直接传入GeoJSON面，自动计算外接矩形范围，无需手动指定经纬度。
 -- ==============================================
+-- =============================================================================
+-- 函数介绍：gis_generate_3d_grid
+-- 主要作用：根据项目范围GeoJSON、高度范围和分辨率，生成项目级三维飞行网格节点表。
+-- 入参说明：p_project_id 为项目ID；p_geojson 为面范围；p_min_alt/p_max_alt 为高度范围；p_resolution 为网格间距。
+-- 返回说明：返回生成表名、状态信息和网格点数量，供后续围栏、建筑标记和路径规划使用。
+-- 注意事项：会删除并重建同名网格表；分辨率越小数据量按三维近似立方增长。
+-- =============================================================================
  CREATE OR REPLACE FUNCTION gis_generate_3d_grid(
     p_project_id VARCHAR,
     p_geojson TEXT,
@@ -358,6 +365,13 @@ SELECT gis_drop_function('gis_mark_electric_fence');
 --   - height 为空或0时表示不限高；否则仅标记 alt <= height 的网格层。
 --   - 如果存在 gis_electric_fence_<project_id> 项目专属围栏表，会与 bo_electric_fence 合并打标。
 -- ==============================================
+-- =============================================================================
+-- 函数介绍：gis_mark_electric_fence
+-- 主要作用：把当前有效电子围栏写入项目三维网格，标记禁飞区、管控区等不可飞节点。
+-- 入参说明：p_project_id 为项目ID；为空时使用默认网格表和全局围栏范围。
+-- 返回说明：返回网格表名、更新数量和执行消息，用于确认围栏障碍标记结果。
+-- 注意事项：函数会维护block_mask、zone_type和is_flyable字段，执行前需先生成网格表。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION gis_mark_electric_fence(p_project_id VARCHAR DEFAULT '')
 RETURNS TABLE (code integer, table_name text, msg text, count bigint)
 LANGUAGE plpgsql AS $$
@@ -621,6 +635,13 @@ SELECT gis_drop_function('gis_refresh_electric_fence');
 --   - 如果围栏已经被物理删除且无法找到原 geom，无法确定影响范围，只能做全量刷新；
 --   - 推荐业务删除围栏时使用软删除，然后调用本函数局部刷新。
 -- ==============================================
+-- =============================================================================
+-- 函数介绍：gis_refresh_electric_fence
+-- 主要作用：刷新网格中的电子围栏标记，可全量刷新，也可按单个围栏局部刷新。
+-- 入参说明：p_project_id 为项目ID；p_fence_id 为空时全量刷新，非空时按围栏影响范围局部刷新。
+-- 返回说明：返回清除和更新后的总影响行数，以及本次刷新状态信息。
+-- 注意事项：局部刷新依赖围栏原始geom确定影响范围；删除围栏后建议保留软删除记录再刷新。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION gis_refresh_electric_fence(
     p_project_id VARCHAR DEFAULT '',
     p_fence_id VARCHAR DEFAULT NULL
@@ -938,6 +959,13 @@ COMMENT ON FUNCTION gis_refresh_electric_fence(VARCHAR, VARCHAR) IS '刷新网�
 -- =============================================================================
 SELECT gis_drop_function('gis_mark_buildings');
 
+-- =============================================================================
+-- 函数介绍：gis_mark_buildings
+-- 主要作用：根据项目建筑表，把建筑占用范围标记到三维网格中，形成建筑障碍。
+-- 入参说明：p_project_id 为项目ID；p_building_buffer 为建筑平面缓冲距离，单位米。
+-- 返回说明：返回网格表名、更新数量和执行消息，供路径规划前确认建筑障碍数据。
+-- 注意事项：依赖gis_buildings_<project_id>和gis_grid_nodes_<project_id>；缓冲值可降低小建筑漏标风险。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION gis_mark_buildings(
     p_project_id VARCHAR,
     p_building_buffer DOUBLE PRECISION DEFAULT 0

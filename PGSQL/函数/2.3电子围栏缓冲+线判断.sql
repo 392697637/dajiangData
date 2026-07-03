@@ -40,6 +40,13 @@
 SELECT gis_drop_function('gis_electric_fence_buffer');
 
 -- 创建/替换函数
+-- =============================================================================
+-- 函数介绍：gis_electric_fence_buffer
+-- 主要作用：根据电子围栏ID和缓冲距离，计算围栏外扩后的缓冲面几何。
+-- 入参说明：p_fence_id 为围栏ID；p_buffer_m 为缓冲距离，单位米。
+-- 返回说明：返回缓冲区GeoJSON、原始围栏信息和执行状态，便于前端展示或后续碰撞判断。
+-- 注意事项：缓冲按米计算，内部会转换到适合平面距离计算的坐标系后再转回WGS84。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_buffer(
     p_fence_id varchar(32),        -- 入参1：围栏ID
     p_buffer_radius double precision -- 入参2：缓冲半径（米）
@@ -205,6 +212,13 @@ COMMENT ON FUNCTION public.gis_electric_fence_buffer(varchar, double precision) 
 SELECT gis_drop_function('gis_electric_fence_check_line_buffer');
 
 -- 创建函数
+-- =============================================================================
+-- 函数介绍：gis_electric_fence_check_line_buffer
+-- 主要作用：对输入航线先做缓冲，再检测缓冲区是否与电子围栏发生冲突。
+-- 入参说明：p_line_json 为航线LineString/LineStringZ GeoJSON；p_buffer_m 为航线安全缓冲半径。
+-- 返回说明：返回冲突状态、命中的围栏信息和相交几何，用于航线安全距离校验。
+-- 注意事项：适合带安全裕度的航线校验；缓冲距离越大，命中范围越宽。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_line_buffer(
     p_line_geojson text,
     p_buffer_radius double precision DEFAULT 0
@@ -321,6 +335,13 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, double pre
 SELECT gis_drop_function('gis_electric_fence_check_line');
 
 -- 创建函数
+-- =============================================================================
+-- 函数介绍：gis_electric_fence_check_line
+-- 主要作用：检测输入航线是否直接穿越或接触启用中的电子围栏区域。
+-- 入参说明：p_line_json 为航线LineString/LineStringZ GeoJSON。
+-- 返回说明：返回是否冲突、命中围栏属性和相交结果，供航线提交前快速校验。
+-- 注意事项：本函数不额外扩航线缓冲，如需安全距离判断请使用带buffer的函数。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_line(
     p_line_geojson text
 )
@@ -445,6 +466,13 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_line(text) IS '检测航线�
 SELECT gis_drop_function('gis_electric_fence_check_point');
 
 -- 创建函数
+-- =============================================================================
+-- 函数介绍：gis_electric_fence_check_point
+-- 主要作用：判断单个航点是否落入启用中的禁飞区、管控区等电子围栏范围。
+-- 入参说明：p_point_json 为航点Point/PointZ GeoJSON；p_project_id 用于限定项目围栏范围。
+-- 返回说明：返回命中状态、围栏类型、围栏名称和提示信息，供航点合法性校验使用。
+-- 注意事项：点位坐标默认WGS84；高度规则需结合围栏数据中的高度字段判断。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_point(
     p_project_id text,
     p_point_geojson text
