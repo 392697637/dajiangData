@@ -122,12 +122,6 @@ BEGIN
         )', v_target_table);
 
     -- =============================================
-    -- 第五步：创建geom空间索引
-    -- =============================================
-    -- 为geom字段创建GIST空间索引，提升空间查询效率
-    EXECUTE format('CREATE INDEX idx_%I_geom ON %I USING GIST (geom)', v_target_table, v_target_table);
-
-    -- =============================================
     -- 第六步：获取禁飞区表字段
     -- =============================================
     -- 查询禁飞区表wrj_jfq_dj的所有字段名，存入数组（使用别名避免与输出列名冲突）
@@ -250,6 +244,23 @@ BEGIN
         GET DIAGNOSTICS v_row_count = ROW_COUNT;
     END IF;
 
+    IF v_row_count > 0 THEN
+        -- 数据写入完成后再创建索引，兼顾建表速度和GeoServer/Cesium查询性能
+        EXECUTE format(
+            'CREATE INDEX %I ON %I USING GIST (geom) WHERE geom IS NOT NULL',
+            'ix_' || v_target_table || '_geom',
+            v_target_table
+        );
+
+        EXECUTE format(
+            'CREATE INDEX %I ON %I (fence_type) WHERE geom IS NOT NULL',
+            'ix_' || v_target_table || '_ft_nn',
+            v_target_table
+        );
+
+        EXECUTE format('ANALYZE %I', v_target_table);
+    END IF;
+
     -- =============================================
     -- 第十步：返回结果
     -- =============================================
@@ -325,40 +336,50 @@ RETURNS TABLE (                                          -- 定义返回结果�
     geom           GEOMETRY                              -- 空间几何数据（PostGIS）
 )
 LANGUAGE plpgsql
+STABLE
 AS $$
 DECLARE
     -- 定义变量：动态拼接项目专属电子围栏表名
     v_table_name TEXT := 'gis_electric_fence_' || p_project_id; 
+    v_types TEXT[];
     -- 定义变量：存储最终要执行的动态SQL语句
     v_sql TEXT;                                                 
 BEGIN
+    IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
+        RETURN;
+    END IF;
+
     -- =============================================
     -- 核心判断逻辑：
     -- 如果传入的围栏类型是 NULL / 空字符串 / -1
     -- 直接返回空结果，不查询数据库
     -- =============================================
-    IF p_fence_type IS NULL OR p_fence_type = '' OR p_fence_type = '-1' THEN
+    IF p_fence_type IS NULL OR btrim(p_fence_type) = '' OR btrim(p_fence_type) = '-1' THEN
         RETURN;  -- 直接返回，无数据
     END IF;
+
+    v_types := regexp_split_to_array(
+        regexp_replace(btrim(p_fence_type), '\s+', '', 'g'),
+        '[,;]+'
+    );
 
     -- =============================================
     -- 正常业务逻辑：
     -- 拼接动态SQL，支持多类型筛选（支持 , 和 ; 分隔）
     -- 使用 format 防止SQL注入，保证安全
     -- =============================================
-    v_sql := format('
-        SELECT 
+    v_sql := format($f$
+        SELECT
             area_id, name, lat, lng, radius, fence_type, level, color,
             city, address, description, height, begin_at, end_at,
             create_time, area, geom
-        FROM %I 
-        WHERE fence_type = ANY (%L)',  -- ANY 用于匹配数组中的任意值
-        v_table_name,                  -- 动态表名，%I 安全转义
-        string_to_array(replace(p_fence_type, ';', ','), ',')  -- 把 1;2 转成数组 {1,2}
-    );
+        FROM %I
+        WHERE fence_type = ANY ($1)
+          AND geom IS NOT NULL
+    $f$, v_table_name);
 
     -- 执行动态SQL并返回查询结果
-    RETURN QUERY EXECUTE v_sql;
+    RETURN QUERY EXECUTE v_sql USING v_types;
 END;
 $$;
 COMMENT ON FUNCTION gis_get_electric_fence_project(text, text) IS '查询项目电子围栏数据';
