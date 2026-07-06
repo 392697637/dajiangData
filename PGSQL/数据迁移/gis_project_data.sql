@@ -78,7 +78,9 @@ DECLARE
 
     -- 是否实际循环到项目，用于最后返回空数据提示。
     v_has_project boolean := false;
+    v_log_sql text; -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_project_data(%L);', p_project_id);
     -- 按项目循环执行；p_project_id 为空时处理全部未删除项目。
     FOR v_project IN
         SELECT bp.id, bp.region_shape
@@ -107,6 +109,10 @@ BEGIN
             v_end_time := clock_timestamp();
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
 
+            IF COALESCE(v_result.code, 500) IN (400, 500) THEN
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (COALESCE(v_result.code, 500)::integer, COALESCE(v_result.msg, '')::text, v_log_sql);
+            END IF;
             RETURN QUERY SELECT
                 COALESCE(v_result.code, 500)::integer,
                 COALESCE(v_result.msg, '')::text,
@@ -120,9 +126,13 @@ BEGIN
         EXCEPTION WHEN OTHERS THEN
             v_end_time := clock_timestamp();
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
+            code := 500;
+            msg := SQLERRM::text;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                500::integer,
-                SQLERRM::text,
+                code,
+                msg,
                 'gis_generate_3d_grid'::text,
                 ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3)::text,
                 ''::text,
@@ -145,6 +155,10 @@ BEGIN
             v_end_time := clock_timestamp();
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
 
+            IF COALESCE(v_result.code, 500) IN (400, 500) THEN
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (COALESCE(v_result.code, 500)::integer, COALESCE(v_result.msg, '')::text, v_log_sql);
+            END IF;
             RETURN QUERY SELECT
                 COALESCE(v_result.code, 500)::integer,
                 COALESCE(v_result.msg, '')::text,
@@ -158,9 +172,13 @@ BEGIN
         EXCEPTION WHEN OTHERS THEN
             v_end_time := clock_timestamp();
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
+            code := 500;
+            msg := SQLERRM::text;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                500::integer,
-                SQLERRM::text,
+                code,
+                msg,
                 'gis_electric_fence_project'::text,
                 ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3)::text,
                 ''::text,
@@ -180,6 +198,10 @@ BEGIN
             v_end_time := clock_timestamp();
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
 
+            IF COALESCE(v_result.code, 500) IN (400, 500) THEN
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (COALESCE(v_result.code, 500)::integer, COALESCE(v_result.msg, '')::text, v_log_sql);
+            END IF;
             RETURN QUERY SELECT
                 COALESCE(v_result.code, 500)::integer,
                 COALESCE(v_result.msg, '')::text,
@@ -193,9 +215,13 @@ BEGIN
         EXCEPTION WHEN OTHERS THEN
             v_end_time := clock_timestamp();
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
+            code := 500;
+            msg := SQLERRM::text;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                500::integer,
-                SQLERRM::text,
+                code,
+                msg,
                 'gis_mark_electric_fence'::text,
                 ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3)::text,
                 ''::text,
@@ -208,9 +234,13 @@ BEGIN
 
     -- 指定项目不存在或没有 region_shape 时，给出明确提示。
     IF NOT v_has_project THEN
+        code := 400;
+        msg := 'bo_project 中没有找到 del_flag=false 且 region_shape 不为空的项目数据'::text;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400::integer,
-            'bo_project 中没有找到 del_flag=false 且 region_shape 不为空的项目数据'::text,
+            code,
+            msg,
             'gis_project_data'::text,
             '0'::text,
             ''::text,
@@ -273,12 +303,19 @@ DECLARE
 
     -- 是否实际循环到项目，用于最后返回空数据提示。
     v_has_project boolean := false;
+    v_log_sql text; -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_project_data_batch(%s, %s);',
+        COALESCE(p_worker_no::text, 'NULL'), COALESCE(p_worker_count::text, 'NULL'));
     -- 参数校验：总分片数必须大于 0。
     IF p_worker_count IS NULL OR p_worker_count <= 0 THEN
+        code := 400;
+        msg := 'p_worker_count 必须大于 0'::text;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400::integer,
-            'p_worker_count 必须大于 0'::text,
+            code,
+            msg,
             'gis_project_data_batch'::text,
             '0'::text,
             ''::text,
@@ -291,9 +328,13 @@ BEGIN
 
     -- 参数校验：当前分片编号必须在合法范围内。
     IF p_worker_no IS NULL OR p_worker_no < 0 OR p_worker_no >= p_worker_count THEN
+        code := 400;
+        msg := 'p_worker_no 必须满足 0 <= p_worker_no < p_worker_count'::text;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400::integer,
-            'p_worker_no 必须满足 0 <= p_worker_no < p_worker_count'::text,
+            code,
+            msg,
             'gis_project_data_batch'::text,
             '0'::text,
             ''::text,
@@ -323,9 +364,13 @@ BEGIN
 
     -- 当前分片没有数据时返回提示，方便检查 worker 是否跑空。
     IF NOT v_has_project THEN
+        code := 400;
+        msg := '当前 worker 分片没有 del_flag=false 且 region_shape 不为空的项目数据'::text;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400::integer,
-            '当前 worker 分片没有 del_flag=false 且 region_shape 不为空的项目数据'::text,
+            code,
+            msg,
             'gis_project_data_batch'::text,
             '0'::text,
             ''::text,
@@ -338,3 +383,40 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_project_data_batch(integer, integer) IS '分片批量生成项目数据';
+
+
+-- =============================================================================
+-- 文件内函数调用示例
+-- 说明：以下示例按需执行，项目ID请替换为实际业务项目ID。
+-- =============================================================================
+
+-- =============================================================================
+-- 1. gis_project_data
+-- 功能：生成项目三维空间数据，包含三维网格、项目围栏和围栏标记。
+-- 入参：p_project_id；为空时处理全部有效项目。
+-- 返回：code, msg, sql_name, sql_time, table_name, table_count, exec_start, exec_end, exec_time
+-- =============================================================================
+
+-- 示例1：处理全部有效项目
+-- SELECT * FROM public.gis_project_data();
+
+-- 示例2：处理指定项目
+-- SELECT * FROM public.gis_project_data(
+--     '2c95908e9aed844e019aeda0440f0455'
+-- );
+
+-- =============================================================================
+-- 2. gis_project_data_batch
+-- 功能：按项目ID哈希分片批量生成项目数据，适合多连接并行执行。
+-- 入参：p_worker_no, p_worker_count
+-- 返回：code, msg, sql_name, sql_time, table_name, table_count, exec_start, exec_end, exec_time
+-- =============================================================================
+
+-- 示例1：单分片执行
+-- SELECT * FROM public.gis_project_data_batch(0, 1);
+
+-- 示例2：四个SQL窗口并行执行
+-- SELECT * FROM public.gis_project_data_batch(0, 4);
+-- SELECT * FROM public.gis_project_data_batch(1, 4);
+-- SELECT * FROM public.gis_project_data_batch(2, 4);
+-- SELECT * FROM public.gis_project_data_batch(3, 4);
