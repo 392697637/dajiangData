@@ -56,6 +56,16 @@ SELECT PostGIS_Version();
 CREATE EXTENSION IF NOT EXISTS postgis;
 
 
+-- =============================================================================
+-- PG相关GIS错误日志
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS public.gis_error_log (
+    code integer,
+    msg text,
+    sqlstring text,
+    create_time timestamp without time zone DEFAULT now()
+);
+COMMENT ON TABLE public.gis_error_log IS 'PG相关GIS错误日志';
 
 
 

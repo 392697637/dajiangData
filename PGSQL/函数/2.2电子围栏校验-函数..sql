@@ -445,23 +445,58 @@ BEGIN
     -- =============================================
     BEGIN
         IF jsonb_typeof(v_geojson_json) = 'array' THEN
-            -- Support coordinate array input: [lng, lat] or [lng, lat, alt].
-            IF jsonb_array_length(v_geojson_json) < 2 THEN
-                RAISE EXCEPTION 'Point coordinate array requires at least lng and lat';
-            ELSIF jsonb_array_length(v_geojson_json) >= 3 THEN
+            -- Support coordinate array input: [lng, lat, alt] or [[lng, lat, alt], ...].
+            IF jsonb_array_length(v_geojson_json) = 0 THEN
+                RAISE EXCEPTION 'Point coordinate array cannot be empty';
+            END IF;
+
+            IF jsonb_typeof(v_geojson_json -> 0) = 'array' THEN
+                IF EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(v_geojson_json) AS p(pt)
+                    WHERE jsonb_typeof(p.pt) <> 'array'
+                       OR jsonb_array_length(p.pt) < 2
+                ) THEN
+                    RAISE EXCEPTION 'Each point coordinate requires at least lng and lat';
+                END IF;
+
+                SELECT ST_Multi(ST_Collect(
+                    ST_MakePoint(
+                        (p.pt ->> 0)::double precision,
+                        (p.pt ->> 1)::double precision,
+                        COALESCE((p.pt ->> 2)::double precision, 0)
+                    )
+                    ORDER BY p.ord
+                ))
+                INTO v_point
+                FROM jsonb_array_elements(v_geojson_json) WITH ORDINALITY AS p(pt, ord);
+                v_z := 0;
+            ELSE
+                IF jsonb_array_length(v_geojson_json) < 2 THEN
+                    RAISE EXCEPTION 'Point coordinate array requires at least lng and lat';
+                END IF;
+
                 v_point := ST_MakePoint(
                     (v_geojson_json ->> 0)::double precision,
                     (v_geojson_json ->> 1)::double precision,
-                    (v_geojson_json ->> 2)::double precision
+                    COALESCE((v_geojson_json ->> 2)::double precision, 0)
                 );
                 v_z := COALESCE((v_geojson_json ->> 2)::double precision, 0);
-            ELSE
-                v_point := ST_MakePoint(
-                    (v_geojson_json ->> 0)::double precision,
-                    (v_geojson_json ->> 1)::double precision
-                );
-                v_z := 0;
             END IF;
+        ELSIF v_geojson_json ->> 'type' = 'FeatureCollection' THEN
+            IF jsonb_typeof(v_geojson_json -> 'features') <> 'array'
+               OR jsonb_array_length(v_geojson_json -> 'features') = 0 THEN
+                RAISE EXCEPTION 'FeatureCollection requires non-empty features';
+            END IF;
+
+            SELECT ST_Multi(ST_Collect(
+                ST_GeomFromGeoJSON(f.feature ->> 'geometry')
+                ORDER BY f.ord
+            ))
+            INTO v_point
+            FROM jsonb_array_elements(v_geojson_json -> 'features') WITH ORDINALITY AS f(feature, ord)
+            WHERE f.feature -> 'geometry' IS NOT NULL;
+            v_z := 0;
         ELSIF v_geojson_json ->> 'type' = 'Feature' THEN
             -- Feature格式
             v_point := ST_GeomFromGeoJSON(v_geojson_json ->> 'geometry');
@@ -469,13 +504,16 @@ BEGIN
             v_z := COALESCE(
                 (v_geojson_json -> 'properties' ->> 'z')::double precision,
                 (v_geojson_json -> 'properties' ->> 'height')::double precision,
-                ST_Z(v_point),
+                CASE WHEN ST_GeometryType(v_point) = 'ST_Point' THEN ST_Z(v_point) END,
                 0
             );
         ELSE
             -- 直接Geometry格式
             v_point := ST_GeomFromGeoJSON(v_geojson_json::text);
-            v_z := COALESCE(ST_Z(v_point), 0);
+            v_z := COALESCE(
+                CASE WHEN ST_GeometryType(v_point) = 'ST_Point' THEN ST_Z(v_point) END,
+                0
+            );
         END IF;
     EXCEPTION
         WHEN OTHERS THEN
@@ -489,7 +527,7 @@ BEGIN
     -- =============================================
     -- 校验点类型
     -- =============================================
-    IF ST_GeometryType(v_point) NOT IN ('ST_Point') THEN
+    IF ST_GeometryType(v_point) NOT IN ('ST_Point', 'ST_MultiPoint') THEN
         RETURN QUERY SELECT
             400, format('GeoJSON必须是Point类型，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
@@ -524,68 +562,100 @@ BEGIN
         IF v_table_exists THEN
             -- 项目表存在，使用UNION ALL连接项目表和公共
             v_sql := format('
+                WITH input_points AS (
+                    SELECT d.path, d.geom AS geom
+                    FROM ST_Dump($1) AS d
+                )
                 SELECT
                     200 AS code,
-                    format(''当前位置在禁飞区内，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
-                    true AS ischeck,
-                    %L::varchar AS table_name,
-                    f.id::varchar(32),
-                    ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
-                FROM %I f
-                WHERE
-                    f.fence_type = ''1''
-                    AND f.height >= 0
-                    AND ST_Covers(ST_SetSRID(f.geom, 4326), $1)
-                    AND (
-                        $2 = 0
-                        OR
-                        ($2 > 0 AND $2 <= COALESCE(f.height, 0))
-                    )
-                UNION ALL
-                SELECT
-                    200 AS code,
-                    format(''当前位置在禁飞区内，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
-                    true AS ischeck,
-                    ''bo_electric_fence''::varchar AS table_name,
-                    f.id::varchar(32),
-                    ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
-                FROM bo_electric_fence f
-                WHERE
-                    f.fence_type = ''1''
-                    AND f.status = ''1''
-                    AND f.del_flag = false
-                    AND f.height >= 0
-                    AND ST_Covers(ST_SetSRID(f.geom, 4326), $1)
-                    AND (
-                        $2 = 0
-                        OR
-                        ($2 > 0 AND $2 <= COALESCE(f.height, 0))
-                    )',
+                    CASE
+                        WHEN hit.id IS NULL THEN format(''当前位置不在禁飞区内，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
+                        ELSE format(''当前位置在禁飞区内，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
+                    END::varchar AS msg,
+                    (hit.id IS NOT NULL) AS ischeck,
+                    COALESCE(hit.table_name, '''')::varchar AS table_name,
+                    hit.id::varchar(32),
+                    hit.geom_geojson
+                FROM input_points ip
+                LEFT JOIN LATERAL (
+                    SELECT h.table_name, h.id, h.geom_geojson
+                    FROM (
+                        SELECT
+                            %L::varchar AS table_name,
+                            f.id::varchar(32) AS id,
+                            ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
+                            1 AS priority
+                        FROM %I f
+                        WHERE f.fence_type = ''1''
+                          AND f.height >= 0
+                          AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
+                          AND (
+                              $2 = 0
+                              OR
+                              ($2 > 0 AND $2 <= COALESCE(f.height, 0))
+                          )
+                        UNION ALL
+                        SELECT
+                            ''bo_electric_fence''::varchar AS table_name,
+                            f.id::varchar(32) AS id,
+                            ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
+                            2 AS priority
+                        FROM bo_electric_fence f
+                        WHERE f.fence_type = ''1''
+                          AND f.status = ''1''
+                          AND f.del_flag = false
+                          AND f.height >= 0
+                          AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
+                          AND (
+                              $2 = 0
+                              OR
+                              ($2 > 0 AND $2 <= COALESCE(f.height, 0))
+                          )
+                    ) h
+                    ORDER BY h.priority
+                    LIMIT 1
+                ) hit ON true
+                ORDER BY ip.path',
                 v_table_name,
                 v_table_name
             );
         ELSE
             -- 项目表不存在，只查询公共
             v_sql := '
+                WITH input_points AS (
+                    SELECT d.path, d.geom AS geom
+                    FROM ST_Dump($1) AS d
+                )
                 SELECT
                     200 AS code,
-                    format(''当前位置在禁飞区内，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
-                    true AS ischeck,
-                    ''bo_electric_fence''::varchar AS table_name,
-                    f.id::varchar(32),
-                    ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
-                FROM bo_electric_fence f
-                WHERE
-                    f.fence_type = ''1''
-                    AND f.status = ''1''
-                    AND f.del_flag = false
-                    AND f.height >= 0
-                    AND ST_Covers(ST_SetSRID(f.geom, 4326), $1)
-                    AND (
-                        $2 = 0
-                        OR
-                        ($2 > 0 AND $2 <= COALESCE(f.height, 0))
-                    )';
+                    CASE
+                        WHEN hit.id IS NULL THEN format(''当前位置不在禁飞区内，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
+                        ELSE format(''当前位置在禁飞区内，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
+                    END::varchar AS msg,
+                    (hit.id IS NOT NULL) AS ischeck,
+                    COALESCE(hit.table_name, '''')::varchar AS table_name,
+                    hit.id::varchar(32),
+                    hit.geom_geojson
+                FROM input_points ip
+                LEFT JOIN LATERAL (
+                    SELECT
+                        ''bo_electric_fence''::varchar AS table_name,
+                        f.id::varchar(32) AS id,
+                        ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
+                    FROM bo_electric_fence f
+                    WHERE f.fence_type = ''1''
+                      AND f.status = ''1''
+                      AND f.del_flag = false
+                      AND f.height >= 0
+                      AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
+                      AND (
+                          $2 = 0
+                          OR
+                          ($2 > 0 AND $2 <= COALESCE(f.height, 0))
+                      )
+                    LIMIT 1
+                ) hit ON true
+                ORDER BY ip.path';
         END IF;
 
         -- 执行统一的查
@@ -600,24 +670,39 @@ BEGIN
         RETURN QUERY
         SELECT
             200 AS code,
-            format('当前位置在禁飞区内，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar AS msg,
-            true AS ischeck,
-            'bo_electric_fence'::varchar AS table_name,
-            f.id::varchar(32),
-            ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
-        FROM bo_electric_fence f
-        WHERE
-            f.fence_type = '1'        -- 围栏类型：禁飞区
-            AND f.status = '1'        -- 状态：启用
-            AND f.del_flag = false    -- 未删
-            AND f.height >= 0         -- 围栏高度合法
-            AND ST_Covers(ST_SetSRID(f.geom, 4326), v_point) -- 平面包含判断，包含边界点
-            AND (
-                v_z = 0
-                OR
-                (v_z > 0 AND v_z <= COALESCE(f.height, 0))
-            );
+            CASE
+                WHEN hit.id IS NULL THEN format('当前位置不在禁飞区内，执行时间 %s 秒',
+                    ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
+                ELSE format('当前位置在禁飞区内，执行时间 %s 秒',
+                    ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
+            END::varchar AS msg,
+            (hit.id IS NOT NULL) AS ischeck,
+            COALESCE(hit.table_name, '')::varchar AS table_name,
+            hit.id::varchar(32),
+            hit.geom_geojson
+        FROM (
+            SELECT d.path, d.geom AS geom
+            FROM ST_Dump(v_point) AS d
+        ) ip
+        LEFT JOIN LATERAL (
+            SELECT
+                'bo_electric_fence'::varchar AS table_name,
+                f.id::varchar(32) AS id,
+                ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
+            FROM bo_electric_fence f
+            WHERE f.fence_type = '1'        -- 围栏类型：禁飞区
+              AND f.status = '1'            -- 状态：启用
+              AND f.del_flag = false        -- 未删
+              AND f.height >= 0             -- 围栏高度合法
+              AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
+              AND (
+                  v_z = 0
+                  OR
+                  (v_z > 0 AND v_z <= COALESCE(f.height, 0))
+              )
+            LIMIT 1
+        ) hit ON true
+        ORDER BY ip.path;
 
         -- 检查是否找到结果
         IF FOUND THEN
@@ -719,16 +804,41 @@ BEGIN
         v_line_json := p_line_geojson::jsonb;
 
         IF jsonb_typeof(v_line_json) = 'array' THEN
-            -- 支持坐标数组输入：[[lng,lat,alt], [lng,lat,alt]]
+            -- 支持单线 [[lng,lat,alt], ...] 和多线 [[[lng,lat,alt], ...], ...].
             IF jsonb_array_length(v_line_json) < 2 THEN
                 RAISE EXCEPTION 'Line coordinate array requires at least two points';
             END IF;
-            v_line := ST_GeomFromGeoJSON(
-                jsonb_build_object(
-                    'type', 'LineString',
-                    'coordinates', v_line_json
-                )::text
-            );
+
+            IF jsonb_typeof(v_line_json -> 0) = 'array'
+               AND jsonb_array_length(v_line_json -> 0) > 0
+               AND jsonb_typeof((v_line_json -> 0) -> 0) = 'array' THEN
+                v_line := ST_GeomFromGeoJSON(
+                    jsonb_build_object(
+                        'type', 'MultiLineString',
+                        'coordinates', v_line_json
+                    )::text
+                );
+            ELSE
+                v_line := ST_GeomFromGeoJSON(
+                    jsonb_build_object(
+                        'type', 'LineString',
+                        'coordinates', v_line_json
+                    )::text
+                );
+            END IF;
+        ELSIF v_line_json ->> 'type' = 'FeatureCollection' THEN
+            IF jsonb_typeof(v_line_json -> 'features') <> 'array'
+               OR jsonb_array_length(v_line_json -> 'features') = 0 THEN
+                RAISE EXCEPTION 'FeatureCollection requires non-empty features';
+            END IF;
+
+            SELECT ST_Multi(ST_Collect(
+                ST_GeomFromGeoJSON(f.feature ->> 'geometry')
+                ORDER BY f.ord
+            ))
+            INTO v_line
+            FROM jsonb_array_elements(v_line_json -> 'features') WITH ORDINALITY AS f(feature, ord)
+            WHERE f.feature -> 'geometry' IS NOT NULL;
         ELSIF v_line_json ->> 'type' = 'Feature' THEN
             -- Feature格式：几何数据位于geometry节点。
             v_line := ST_GeomFromGeoJSON(v_line_json ->> 'geometry');
@@ -768,82 +878,133 @@ BEGIN
 
         IF v_table_exists THEN
             v_sql := format('
+                WITH input_lines AS (
+                    SELECT d.path, d.geom AS geom
+                    FROM ST_Dump($1) AS d
+                )
                 SELECT
                     200 AS code,
-                    format(''检测到航线闯入电子围栏，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))::varchar AS msg,
-                    true AS ischeck,
-                    %L::varchar AS table_name,
-                    f.id::varchar(32),
-                    ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
-                FROM %I f
-                WHERE f.height > 0
-                  AND ST_3DIntersects(
-                      $1,
-                      ST_Extrude(
-                          ST_Force3DZ(ST_SetSRID(f.geom, 4326), 0),
-                          0, 0, COALESCE(f.height, 0)
-                      )
-                  )
-                UNION ALL
-                SELECT
-                    200 AS code,
-                    format(''检测到航线闯入电子围栏，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))::varchar AS msg,
-                    true AS ischeck,
-                    ''bo_electric_fence''::varchar AS table_name,
-                    f.id::varchar(32),
-                    ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
-                FROM bo_electric_fence f
-                WHERE f.del_flag = false
-                  AND f.height > 0
-                  AND ST_3DIntersects(
-                      $1,
-                      ST_Extrude(
-                          ST_Force3DZ(ST_SetSRID(f.geom, 4326), 0),
-                          0, 0, COALESCE(f.height, 0)
-                      )
-                  )',
+                    CASE
+                        WHEN hit.id IS NULL THEN format(''航线未闯入任何电子围栏，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                        ELSE format(''检测到航线闯入电子围栏，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                    END::varchar AS msg,
+                    (hit.id IS NOT NULL) AS ischeck,
+                    COALESCE(hit.table_name, '''')::varchar AS table_name,
+                    hit.id::varchar(32),
+                    hit.geom_geojson
+                FROM input_lines il
+                LEFT JOIN LATERAL (
+                    SELECT h.table_name, h.id, h.geom_geojson
+                    FROM (
+                        SELECT
+                            %L::varchar AS table_name,
+                            f.id::varchar(32) AS id,
+                            ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
+                            1 AS priority
+                        FROM %I f
+                        WHERE f.height > 0
+                          AND ST_3DIntersects(
+                              il.geom,
+                              ST_Extrude(
+                                  ST_Force3DZ(ST_SetSRID(f.geom, 4326), 0),
+                                  0, 0, COALESCE(f.height, 0)
+                              )
+                          )
+                        UNION ALL
+                        SELECT
+                            ''bo_electric_fence''::varchar AS table_name,
+                            f.id::varchar(32) AS id,
+                            ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
+                            2 AS priority
+                        FROM bo_electric_fence f
+                        WHERE f.del_flag = false
+                          AND f.height > 0
+                          AND ST_3DIntersects(
+                              il.geom,
+                              ST_Extrude(
+                                  ST_Force3DZ(ST_SetSRID(f.geom, 4326), 0),
+                                  0, 0, COALESCE(f.height, 0)
+                              )
+                          )
+                    ) h
+                    ORDER BY h.priority
+                    LIMIT 1
+                ) hit ON true
+                ORDER BY il.path',
                 v_table_name,
                 v_table_name
             );
         ELSE
             v_sql := '
+                WITH input_lines AS (
+                    SELECT d.path, d.geom AS geom
+                    FROM ST_Dump($1) AS d
+                )
                 SELECT
                     200 AS code,
-                    format(''检测到航线闯入电子围栏，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))::varchar AS msg,
-                    true AS ischeck,
+                    CASE
+                        WHEN hit.id IS NULL THEN format(''航线未闯入任何电子围栏，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                        ELSE format(''检测到航线闯入电子围栏，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                    END::varchar AS msg,
+                    (hit.id IS NOT NULL) AS ischeck,
+                    COALESCE(hit.table_name, '''')::varchar AS table_name,
+                    hit.id::varchar(32),
+                    hit.geom_geojson
+                FROM input_lines il
+                LEFT JOIN LATERAL (
+                    SELECT
+                        ''bo_electric_fence''::varchar AS table_name,
+                        f.id::varchar(32) AS id,
+                        ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
+                    FROM bo_electric_fence f
+                    WHERE f.del_flag = false
+                      AND f.height > 0
+                      AND ST_3DIntersects(
+                          il.geom,
+                          ST_Extrude(
+                              ST_Force3DZ(ST_SetSRID(f.geom, 4326), 0),
+                              0, 0, COALESCE(f.height, 0)
+                          )
+                      )
+                    LIMIT 1
+                ) hit ON true
+                ORDER BY il.path';
+        END IF;
+    ELSE
+        v_sql := '
+            WITH input_lines AS (
+                SELECT d.path, d.geom AS geom
+                FROM ST_Dump($1) AS d
+            )
+            SELECT
+                200 AS code,
+                CASE
+                    WHEN hit.id IS NULL THEN format(''航线未闯入任何电子围栏，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                    ELSE format(''检测到航线闯入电子围栏，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                END::varchar AS msg,
+                (hit.id IS NOT NULL) AS ischeck,
+                COALESCE(hit.table_name, '''')::varchar AS table_name,
+                hit.id::varchar(32),
+                hit.geom_geojson
+            FROM input_lines il
+            LEFT JOIN LATERAL (
+                SELECT
                     ''bo_electric_fence''::varchar AS table_name,
-                    f.id::varchar(32),
+                    f.id::varchar(32) AS id,
                     ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
                   AND f.height > 0
                   AND ST_3DIntersects(
-                      $1,
+                      il.geom,
                       ST_Extrude(
                           ST_Force3DZ(ST_SetSRID(f.geom, 4326), 0),
                           0, 0, COALESCE(f.height, 0)
                       )
-                  )';
-        END IF;
-    ELSE
-        v_sql := '
-            SELECT
-                200 AS code,
-                format(''检测到航线闯入电子围栏，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))::varchar AS msg,
-                true AS ischeck,
-                ''bo_electric_fence''::varchar AS table_name,
-                f.id::varchar(32),
-                ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
-            FROM bo_electric_fence f
-            WHERE f.del_flag = false
-              AND f.height > 0
-              AND ST_3DIntersects(
-                  $1,
-                  ST_Extrude(
-                      ST_Force3DZ(ST_SetSRID(f.geom, 4326), 0),
-                      0, 0, COALESCE(f.height, 0)
                   )
-              )';
+                LIMIT 1
+            ) hit ON true
+            ORDER BY il.path';
     END IF;
 
     RETURN QUERY EXECUTE v_sql USING v_line, v_start_time;

@@ -242,9 +242,6 @@ SELECT gis_drop_function('public.gis_project_data_batch');
 --   3. 每个项目仍然按顺序执行：
 --      gis_generate_3d_grid -> gis_electric_fence_project -> gis_mark_electric_fence。
 -- ============================================================
-
-
-
 CREATE OR REPLACE FUNCTION public.gis_project_data_batch(
     p_worker_no integer,
     p_worker_count integer

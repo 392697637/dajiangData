@@ -11,9 +11,9 @@
 -- 功能：检测航点是否落入电子围栏，不做缓冲；边界点算命中。
 -- 参数：
 --   p_project_id      text     项目ID；为空时只查公共表
---   p_point_geojson   text     Point/PointZ GeoJSON、Feature，或 [lng,lat,alt]
+--   p_point_geojson   text     Point/PointZ/MultiPoint GeoJSON、Feature，或 [lng,lat,alt] / [[lng,lat,alt], ...]
 -- 返回：
---   code, msg, ischeck, table_name, id, geom_geojson
+--   code, msg, ischeck, table_name, id, geom_geojson；多点按点数返回多行
 -- ============================================================================
 SELECT * FROM public.gis_electric_fence_check_point(
     '2c95908e958f3b75019593551f520126',
@@ -25,14 +25,22 @@ SELECT * FROM public.gis_electric_fence_check_point(
     '[113.405861,34.769437,10]'
 );
 
+SELECT * FROM public.gis_electric_fence_check_point(
+    '2c95908e958f3b75019593551f520126',
+    '[
+        [113.405861,34.769437,10],
+        [113.4654075,34.8085025,120]
+    ]'
+);
+
 -- ============================================================================
 -- 2.2-2 gis_electric_fence_check_line
 -- 功能：检测航线/轨迹是否直接穿越电子围栏，不做缓冲。
 -- 参数：
 --   p_project_id     text     项目ID；为空时只查公共表
---   p_line_geojson   text     LineString/MultiLineString GeoJSON、Feature，或 [[lng,lat,alt], ...]
+--   p_line_geojson   text     LineString/MultiLineString GeoJSON、Feature，或 [[lng,lat,alt], ...] / [[[lng,lat,alt], ...], ...]
 -- 返回：
---   code, msg, ischeck, table_name, id, geom_geojson
+--   code, msg, ischeck, table_name, id, geom_geojson；多线按线数返回多行
 -- ============================================================================
 SELECT * FROM public.gis_electric_fence_check_line(
     '2c95908e958f3b75019593551f520126',
@@ -50,5 +58,19 @@ SELECT * FROM public.gis_electric_fence_check_line(
     '[
         [113.405861,34.769437,120],
         [113.4654075,34.8085025,120]
+    ]'
+);
+
+SELECT * FROM public.gis_electric_fence_check_line(
+    '2c95908e958f3b75019593551f520126',
+    '[
+        [
+            [113.405861,34.769437,120],
+            [113.4654075,34.8085025,120]
+        ],
+        [
+            [113.4654075,34.8085025,120],
+            [113.499782,34.856890,120]
+        ]
     ]'
 );
