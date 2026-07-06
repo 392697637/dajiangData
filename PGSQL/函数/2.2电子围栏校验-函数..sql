@@ -75,7 +75,11 @@ DECLARE
   v_is_contains boolean;     -- 是否为包含关系标记
   v_conflict_name text;       -- 冲突围栏中文名称
   v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
+  v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_check_electric_fence(%L, %L, %L);',
+        p_project_id, p_fence_type, p_lng_lat_alt);
+
   -- 初始化冲突标记：默认无冲突
   v_has_conflict := false;
 
@@ -95,6 +99,8 @@ BEGIN
     conflict_fence_type := '';       -- 无冲突类型
     msg := format('参数校验失败：围栏类型不能为空，执行时间 %s 秒',
       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)); -- 错误提示
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code,msg,v_log_sql);
     new_geom := null;                -- 无几何数据
     conflict_geom := null;           -- 无冲突几何
     RETURN NEXT;  -- 返回结果
@@ -109,6 +115,9 @@ BEGIN
     conflict_fence_type := '';
     msg := format('参数校验失败：坐标信息不能为空，执行时间 %s 秒',
       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code,        msg,        v_log_sql
+    );
     new_geom := null;
     conflict_geom := null;
     RETURN NEXT;
@@ -310,6 +319,12 @@ BEGIN
     conflict_fence_type := '';
     msg := format('参数校验失败：不支持的围栏类型，执行时间 %s 秒',
       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (
+        code,
+        msg,
+        v_log_sql
+    );
     new_geom := null;
     conflict_geom := null;
     RETURN NEXT;
@@ -339,6 +354,12 @@ EXCEPTION WHEN OTHERS THEN
   conflict_fence_type := '';
   msg := format('系统异常：%s | 错误码：%s，执行时间 %s 秒',
     SQLERRM, SQLSTATE, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+  INSERT INTO public.gis_error_log(code, msg, sqlstring)
+  VALUES (
+      code,
+      msg,
+      v_log_sql
+  );
   new_geom := null;
   conflict_geom := null;
   RETURN NEXT;
@@ -403,7 +424,7 @@ RETURNS TABLE (
     geom_geojson json
 )
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 AS $$
 DECLARE
     v_point geometry;          -- 存储生成的空间点几何对象
@@ -414,14 +435,27 @@ DECLARE
     v_table_exists boolean;    -- 表是否存
     v_found boolean;           -- 是否找到匹配的围栏
     v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_point(%L, %L);',
+        p_project_id, p_point_geojson);
+
     -- =============================================
     -- 00 参数错误】第一步：校验点GeoJSON是否为空
     -- =============================================
     IF p_point_geojson IS NULL OR p_point_geojson = '' THEN
+        code := 400;
+        msg := format('点的GeoJSON不能为空，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('点的GeoJSON不能为空，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             false, ''::varchar, NULL::varchar, NULL::json;
         RETURN;
     END IF;
@@ -433,9 +467,18 @@ BEGIN
         v_geojson_json := p_point_geojson::jsonb;
     EXCEPTION
         WHEN OTHERS THEN
+            code := 400;
+            msg := format('点的GeoJSON格式错误，执行时间 %s 秒',
+                    ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (
+                code,
+                msg,
+                v_log_sql
+            );
+
             RETURN QUERY SELECT
-                400, format('点的GeoJSON格式错误，执行时间 %s 秒',
-                    ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+                code, msg::varchar,
                 false, ''::varchar, NULL::varchar, NULL::json;
             RETURN;
     END;
@@ -517,9 +560,18 @@ BEGIN
         END IF;
     EXCEPTION
         WHEN OTHERS THEN
+            code := 400;
+            msg := format('点的GeoJSON解析失败，执行时间 %s 秒',
+                    ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (
+                code,
+                msg,
+                v_log_sql
+            );
+
             RETURN QUERY SELECT
-                400, format('点的GeoJSON解析失败，执行时间 %s 秒',
-                    ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+                code, msg::varchar,
                 false, ''::varchar, NULL::varchar, NULL::json;
             RETURN;
     END;
@@ -528,9 +580,18 @@ BEGIN
     -- 校验点类型
     -- =============================================
     IF ST_GeometryType(v_point) NOT IN ('ST_Point', 'ST_MultiPoint') THEN
+        code := 400;
+        msg := format('GeoJSON必须是Point类型，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('GeoJSON必须是Point类型，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             false, ''::varchar, NULL::varchar, NULL::json;
         RETURN;
     END IF;
@@ -726,9 +787,18 @@ BEGIN
 -- =============================================
 EXCEPTION
     WHEN OTHERS THEN
+        code := 500;
+        msg := format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            500, format('服务异常：%s，执行时间 %s 秒',
-                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             false, ''::varchar, NULL::varchar, NULL::json;
 END;
 $$;
@@ -779,7 +849,7 @@ RETURNS TABLE (
     geom_geojson json
 )
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 AS $$
 DECLARE
     v_line geometry;
@@ -789,12 +859,25 @@ DECLARE
     v_sql text;
     v_table_exists boolean;
     v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_line(%L, %L);',
+        p_project_id, p_line_geojson);
+
     -- 1. 参数校验
     IF p_line_geojson IS NULL OR p_line_geojson = '' THEN
+        code := 400;
+        msg := format('航线GeoJSON不能为空，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('航线GeoJSON不能为空，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             false, ''::varchar, NULL::varchar, NULL::json;
         RETURN;
     END IF;
@@ -850,18 +933,36 @@ BEGIN
         v_line := ST_SetSRID(v_line, 4326);
     EXCEPTION
         WHEN OTHERS THEN
+            code := 400;
+            msg := format('航线GeoJSON/坐标数组解析失败：%s，执行时间 %s 秒',
+                    SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (
+                code,
+                msg,
+                v_log_sql
+            );
+
             RETURN QUERY SELECT
-                400, format('航线GeoJSON/坐标数组解析失败：%s，执行时间 %s 秒',
-                    SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+                code, msg::varchar,
                 false, ''::varchar, NULL::varchar, NULL::json;
             RETURN;
     END;
 
     -- 3. 校验输入必须是线要素(LineString/MultiLineString)
     IF ST_GeometryType(v_line) NOT IN ('ST_LineString', 'ST_MultiLineString') THEN
+        code := 400;
+        msg := format('输入几何体必须是线类型(LineString)，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('输入几何体必须是线类型(LineString)，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             false, ''::varchar, NULL::varchar, NULL::json;
         RETURN;
     END IF;
@@ -1020,9 +1121,18 @@ BEGIN
 -- 异常捕获
 EXCEPTION
     WHEN OTHERS THEN
+        code := 500;
+        msg := format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            500, format('服务异常：%s，执行时间 %s 秒',
-                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             false, ''::varchar, NULL::varchar, NULL::json;
 END;
 $$;
@@ -1092,8 +1202,8 @@ RETURNS TABLE (
 )
 -- 函数语言：PL/pgSQL（PostgreSQL过程语言
 LANGUAGE plpgsql
--- 稳定性声明：STABLE 表示函数在同一事务中，相同入参返回相同结果（无写入操作
-STABLE
+-- 易变性声明：VOLATILE 表示函数可能写入错误日志表
+VOLATILE
 AS $$
 DECLARE
     -- 定义变量：存D缓冲后的几何对象
@@ -1103,15 +1213,28 @@ DECLARE
     -- 定义变量：存D立体几何对象
     v_3d_geom geometry;
     v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_buffer(%L, %s);',
+        p_fence_id, COALESCE(p_buffer_radius::text, 'NULL'));
+
     -- ==============================================
     -- 1. 入参合法性校验：围栏ID 不能为空/空字符串
     -- ==============================================
     IF p_fence_id IS NULL OR p_fence_id = '' THEN
         -- 返回400：参数错误，所有几何字段置
+        code := 400;
+        msg := format('围栏ID不能为空，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('围栏ID不能为空，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
         -- 终止函数执行
         RETURN;
@@ -1131,9 +1254,18 @@ BEGIN
     -- ==============================================
     IF v_fence_record.id IS NULL THEN
         -- 返回400：无数据，所有几何字段置
+        code := 400;
+        msg := format('未查询到有效围栏数据，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('未查询到有效围栏数据，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
@@ -1195,10 +1327,18 @@ BEGIN
 -- ==============================================
 EXCEPTION
     WHEN OTHERS THEN
+        code := 500;
+        msg := format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            500,                                -- 状态码：服务异常
-            format('服务异常：%s，执行时间 %s 秒',
-                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,  -- 异常信息（SQLERRM=系统错误描述
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
 END;
 $$;
@@ -1219,14 +1359,18 @@ RETURNS TABLE (
     solid_3d_geojson json
 )
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 AS $$
 DECLARE
     v_table_name text;
     v_table_exists boolean;
     v_sql text;
     v_start_time timestamptz := clock_timestamp();
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_buffer(%L, %L, %s);',
+        p_project_id, p_fence_id, COALESCE(p_buffer_radius::text, 'NULL'));
+
     IF p_project_id IS NOT NULL AND trim(p_project_id) <> '' THEN
         v_table_name := 'gis_electric_fence_' || trim(p_project_id);
 
@@ -1355,18 +1499,35 @@ BEGIN
     RETURN QUERY EXECUTE v_sql USING p_fence_id, p_project_id, p_buffer_radius, v_start_time;
 
     IF NOT FOUND THEN
+        code := 400;
+        msg := format('未查询到有效围栏数据，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('未查询到有效围栏数据，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
     END IF;
 
 EXCEPTION
     WHEN OTHERS THEN
+        code := 500;
+        msg := format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            500,
-            format('服务异常：%s，执行时间 %s 秒',
-                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
 END;
 $$;
@@ -1392,7 +1553,7 @@ RETURNS TABLE (
     solid_3d_geojson json
 )
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 AS $$
 DECLARE
     v_point geometry;
@@ -1402,11 +1563,24 @@ DECLARE
     v_table_exists boolean;
     v_sql text;
     v_start_time timestamptz := clock_timestamp();
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_point_buffer(%L, %L, %s);',
+        p_project_id, p_point_geojson, COALESCE(p_buffer_radius::text, 'NULL'));
+
     IF p_point_geojson IS NULL OR p_point_geojson = '' THEN
+        code := 400;
+        msg := format('点的GeoJSON不能为空，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('点的GeoJSON不能为空，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
@@ -1444,17 +1618,35 @@ BEGIN
         END IF;
     EXCEPTION
         WHEN OTHERS THEN
+            code := 400;
+            msg := format('点GeoJSON解析失败：%s，执行时间 %s 秒',
+                    SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (
+                code,
+                msg,
+                v_log_sql
+            );
+
             RETURN QUERY SELECT
-                400, format('点GeoJSON解析失败：%s，执行时间 %s 秒',
-                    SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+                code, msg::varchar,
                 NULL::varchar, NULL::json, NULL::json, NULL::json;
             RETURN;
     END;
 
     IF ST_GeometryType(v_point) NOT IN ('ST_Point') THEN
+        code := 400;
+        msg := format('GeoJSON必须是Point类型，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('GeoJSON必须是Point类型，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
@@ -1550,9 +1742,18 @@ BEGIN
 
 EXCEPTION
     WHEN OTHERS THEN
+        code := 500;
+        msg := format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            500, format('服务异常：%s，执行时间 %s 秒',
-                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
 END;
 $$;
@@ -1614,20 +1815,33 @@ RETURNS TABLE (
     solid_3d_geojson json
 )
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 AS $$
 DECLARE
     v_line geometry; -- 存储转换后的线路几何对象
     v_line_json jsonb;
     v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_line_buffer(%L, %s);',
+        p_line_geojson, COALESCE(p_buffer_radius::text, 'NULL'));
+
     -- ==============================================
     -- 1. GeoJSON线路解析：转换为PostGIS几何对象，强制设326坐标记
     -- ==============================================
     IF p_line_geojson IS NULL OR p_line_geojson = '' THEN
+        code := 400;
+        msg := format('航线GeoJSON不能为空，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('航线GeoJSON不能为空，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
@@ -1654,9 +1868,18 @@ BEGIN
         v_line := ST_SetSRID(v_line, 4326);
     EXCEPTION
         WHEN OTHERS THEN
+            code := 400;
+            msg := format('航线GeoJSON/坐标数组解析失败：%s，执行时间 %s 秒',
+                    SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (
+                code,
+                msg,
+                v_log_sql
+            );
+
             RETURN QUERY SELECT
-                400, format('航线GeoJSON/坐标数组解析失败：%s，执行时间 %s 秒',
-                    SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+                code, msg::varchar,
                 NULL::varchar, NULL::json, NULL::json, NULL::json;
             RETURN;
     END;
@@ -1699,9 +1922,18 @@ BEGIN
 
 EXCEPTION
     WHEN OTHERS THEN
+        code := 500;
+        msg := format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            500, format('服务异常：%s，执行时间 %s 秒',
-                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
 END;
 $$;
@@ -1722,7 +1954,7 @@ RETURNS TABLE (
     solid_3d_geojson json
 )
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 AS $$
 DECLARE
     v_line geometry;
@@ -1731,11 +1963,24 @@ DECLARE
     v_table_exists boolean;
     v_sql text;
     v_start_time timestamptz := clock_timestamp();
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_line_buffer(%L, %L, %s);',
+        p_project_id, p_line_geojson, COALESCE(p_buffer_radius::text, 'NULL'));
+
     IF p_line_geojson IS NULL OR p_line_geojson = '' THEN
+        code := 400;
+        msg := format('航线GeoJSON不能为空，执行时间 %s 秒',
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            400, format('航线GeoJSON不能为空，执行时间 %s 秒',
-                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
@@ -1762,9 +2007,18 @@ BEGIN
         v_line := ST_SetSRID(v_line, 4326);
     EXCEPTION
         WHEN OTHERS THEN
+            code := 400;
+            msg := format('航线GeoJSON/坐标数组解析失败：%s，执行时间 %s 秒',
+                    SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (
+                code,
+                msg,
+                v_log_sql
+            );
+
             RETURN QUERY SELECT
-                400, format('航线GeoJSON/坐标数组解析失败：%s，执行时间 %s 秒',
-                    SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+                code, msg::varchar,
                 NULL::varchar, NULL::json, NULL::json, NULL::json;
             RETURN;
     END;
@@ -1862,9 +2116,18 @@ BEGIN
 
 EXCEPTION
     WHEN OTHERS THEN
+        code := 500;
+        msg := format('服务异常：%s，执行时间 %s 秒',
+                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (
+            code,
+            msg,
+            v_log_sql
+        );
+
         RETURN QUERY SELECT
-            500, format('服务异常：%s，执行时间 %s 秒',
-                SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
+            code, msg::varchar,
             NULL::varchar, NULL::json, NULL::json, NULL::json;
 END;
 $$;
@@ -2079,4 +2342,3 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, doub
 --     ]',
 --     10
 -- );
-

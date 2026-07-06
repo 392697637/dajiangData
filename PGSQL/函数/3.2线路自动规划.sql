@@ -328,13 +328,22 @@ DECLARE
     
     -- ====================== 边检查辅助变量 ======================
     v_edge_line     geometry(LineStringZ,4326);   -- 节点间的线段几何
+    v_log_sql      text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_astar_3d_flight(%s, %s, %s, %s, %s, %s, %s, %s, %L, %L, %L);',
+        COALESCE(p_start_lon::text, 'NULL'), COALESCE(p_start_lat::text, 'NULL'), COALESCE(p_start_alt::text, 'NULL'),
+        COALESCE(p_end_lon::text, 'NULL'), COALESCE(p_end_lat::text, 'NULL'), COALESCE(p_end_alt::text, 'NULL'),
+        COALESCE(p_safe_altitude::text, 'NULL'), COALESCE(p_height_mode::text, 'NULL'),
+        p_force_gen, p_project_id, p_create_user);
+
     -- ====================== 0. 基础参数校验 ======================
     IF p_start_lon IS NULL OR p_start_lat IS NULL OR p_start_alt IS NULL
        OR p_end_lon IS NULL OR p_end_lat IS NULL OR p_end_alt IS NULL THEN
         code := 400;
         msg := format('参数错误：起点/终点经纬度和高度不能为空，执行时间 %s 秒',
                       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -343,6 +352,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：安全高度必须大于0，执行时间 %s 秒',
                       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -351,6 +362,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：高度平滑模式必须满足 0 <= p_height_mode < 1，执行时间 %s 秒',
                       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -892,6 +905,8 @@ EXCEPTION WHEN OTHERS THEN
     v_return_msg := format('执行异常：%s，已返回直线兜底航线，执行时间 %s 秒',
                            SQLERRM,
                            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (500, v_return_msg, v_log_sql);
     RETURN QUERY
     SELECT
         500, v_return_msg,
@@ -961,7 +976,14 @@ DECLARE
     v_path_id integer;
     v_return_msg text;
     v_calc record;
+    v_log_sql      text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_astar_3d_flight_plan(%s, %s, %s, %s, %s, %s, %s, %s, %L, %L, %L);',
+        COALESCE(p_start_lon::text, 'NULL'), COALESCE(p_start_lat::text, 'NULL'), COALESCE(p_start_alt::text, 'NULL'),
+        COALESCE(p_end_lon::text, 'NULL'), COALESCE(p_end_lat::text, 'NULL'), COALESCE(p_end_alt::text, 'NULL'),
+        COALESCE(p_safe_altitude::text, 'NULL'), COALESCE(p_height_mode::text, 'NULL'),
+        p_force_gen, p_project_id, p_create_user);
+
     IF p_start_lon IS NULL OR p_start_lat IS NULL OR p_start_alt IS NULL
        OR p_end_lon IS NULL OR p_end_lat IS NULL OR p_end_alt IS NULL THEN
         RETURN QUERY
@@ -1166,11 +1188,17 @@ DECLARE
     v_point_idx INT;
     v_point_count INT;
     v_append_start INT;
+    v_log_sql      text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_flight_paths_plan(%L, %s, %L, %L, %L, %s);',
+        p_points::text, COALESCE(p_safe_altitude::text, 'NULL'), p_force_gen, p_project_id, p_create_user, COALESCE(p_height_mode::text, 'NULL'));
+
     IF p_points IS NULL OR jsonb_typeof(p_points) <> 'array' THEN
         code := 400;
         msg := format('参数错误：p_points 必须是 JSONB 数组，执行时间 %s 秒',
                       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -1179,6 +1207,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：安全高度必须大于0，执行时间 %s 秒',
                       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -1216,6 +1246,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：p_points 至少需要包含 2 个坐标点，执行时间 %s 秒',
                       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -1228,6 +1260,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：p_points 中存在无效坐标点，必须包含 lon/lat/alt 或 [lon,lat,alt]，执行时间 %s 秒',
                       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -1465,6 +1499,8 @@ EXCEPTION WHEN OTHERS THEN
     msg := format('执行异常：%s，执行时间 %s 秒',
                   SQLERRM,
                   ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code, msg, v_log_sql);
     RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
 END;
 $$ LANGUAGE plpgsql;

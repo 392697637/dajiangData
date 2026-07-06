@@ -68,13 +68,20 @@ DECLARE
     v_row_count BIGINT := 0;                                       -- 插入数据的总行数
     v_columns text[];                                              -- 存储源表的字段名数组
     v_start_time timestamptz := clock_timestamp();                  -- 函数开始时间，用于统一返回耗时
+    v_log_sql text;                                               -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_project(%L, %L);',
+        p_project_id, p_geom_json);
+
     -- =============================================
     -- 第一步：必填参数合法性校验
     -- =============================================
     -- 判断项目ID和GeoJSON是否为空
     IF p_project_id IS NULL OR p_project_id = '' OR p_geom_json IS NULL OR p_geom_json = '' THEN
         -- 为空则返回参数错误
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (400, format('项目ID或地理范围GeoJSON不能为空，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), v_log_sql);
         RETURN QUERY SELECT 400, format('项目ID或地理范围GeoJSON不能为空，执行时间 %s 秒',
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, ''::varchar, 0::bigint;
         RETURN;
@@ -88,6 +95,9 @@ BEGIN
         v_geom := ST_SetSRID(ST_GeomFromGeoJSON(p_geom_json), 4326);
     -- 捕获GeoJSON解析异常
     EXCEPTION WHEN OTHERS THEN
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (400, format('GeoJSON格式错误：%s，执行时间 %s 秒',
+            SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), v_log_sql);
         RETURN QUERY SELECT 400, format('GeoJSON格式错误：%s，执行时间 %s 秒',
             SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, ''::varchar, 0::bigint;
         RETURN;
@@ -275,6 +285,9 @@ BEGIN
         RETURN QUERY SELECT 200, format('执行成功，电子围栏已生成，执行时间 %s 秒',
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, v_target_table::varchar, v_row_count;
     ELSE
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (400, format('未查询到相交电子围栏数据，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), v_log_sql);
         RETURN QUERY SELECT 400, format('未查询到相交电子围栏数据，执行时间 %s 秒',
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, v_target_table::varchar, 0::bigint;
     END IF;
@@ -284,6 +297,9 @@ BEGIN
 -- =============================================
 -- 捕获所有未处理异常，返回500错误
 EXCEPTION WHEN OTHERS THEN
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (500, format('执行异常：%s，执行时间 %s 秒',
+        SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), v_log_sql);
     -- 兜底异常处理：保留数据库原始错误信息，便于接口调用方定位失败原因。
     RETURN QUERY SELECT 500, format('执行异常：%s，执行时间 %s 秒',
         SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar, v_target_table::varchar, 0::bigint;

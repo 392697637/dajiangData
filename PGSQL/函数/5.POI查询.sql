@@ -110,22 +110,43 @@ DECLARE
 
     v_sql_parts text[] := ARRAY[]::text[];
     v_sql text;
+    v_log_sql text; -- 当前函数调用SQL，用于错误日志
+    v_code integer; -- 当前错误状态码，用于错误日志
+    v_msg text; -- 当前错误提示信息，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_query_poi(%L, %L, %L, %s, %L);',
+        p_project_id, p_name, p_lng_lat, COALESCE(p_radius_km::text, 'NULL'), p_source);
     -- 1. 基础参数校验。
     IF v_project_id IS NULL OR v_project_id = '' THEN
-        RAISE EXCEPTION '参数错误：项目ID不能为空';
+        v_code := 400;
+        v_msg := '参数错误：项目ID不能为空';
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (v_code, v_msg, v_log_sql);
+        RAISE EXCEPTION USING MESSAGE = v_msg;
     END IF;
 
     IF v_project_id !~ '^[a-zA-Z0-9_]+$' THEN
-        RAISE EXCEPTION '参数错误：项目ID只能包含字母、数字、下划线，当前值为 %', p_project_id;
+        v_code := 400;
+        v_msg := format('参数错误：项目ID只能包含字母、数字、下划线，当前值为 %s', p_project_id);
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (v_code, v_msg, v_log_sql);
+        RAISE EXCEPTION USING MESSAGE = v_msg;
     END IF;
 
     IF v_name IS NULL OR v_name = '' THEN
-        RAISE EXCEPTION '参数错误：名称不能为空';
+        v_code := 400;
+        v_msg := '参数错误：名称不能为空';
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (v_code, v_msg, v_log_sql);
+        RAISE EXCEPTION USING MESSAGE = v_msg;
     END IF;
 
     IF v_source NOT IN ('gd', 'td') THEN
-        RAISE EXCEPTION '参数错误：数据来源只能是 gd、td，当前值为 %', p_source;
+        v_code := 400;
+        v_msg := format('参数错误：数据来源只能是 gd、td，当前值为 %s', p_source);
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (v_code, v_msg, v_log_sql);
+        RAISE EXCEPTION USING MESSAGE = v_msg;
     END IF;
 
     -- 2. 解析经纬度和半径；未传经纬度时跳过空间过滤。
@@ -133,47 +154,81 @@ BEGIN
         BEGIN
             v_lng_lat_json := replace(v_lng_lat, '''', '"')::jsonb;
         EXCEPTION WHEN others THEN
-            RAISE EXCEPTION
-                '参数错误：经纬度必须是对象或数组，例如 {''lon'':113.531770706177,''lat'':34.818162918091} 或 [113.531770706177,34.818162918091]，当前值为 %',
-                p_lng_lat;
+            v_code := 400;
+            v_msg := format('参数错误：经纬度必须是对象或数组，例如 {''''lon'''':113.531770706177,''''lat'''':34.818162918091} 或 [113.531770706177,34.818162918091]，当前值为 %s', p_lng_lat);
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (v_code, v_msg, v_log_sql);
+            RAISE EXCEPTION USING MESSAGE = v_msg;
         END;
 
         IF jsonb_typeof(v_lng_lat_json) = 'object' THEN
             IF NOT (v_lng_lat_json ? 'lon') OR NOT (v_lng_lat_json ? 'lat') THEN
-                RAISE EXCEPTION '参数错误：经纬度对象必须包含 lon、lat 两个字段，当前值为 %', p_lng_lat;
+                v_code := 400;
+                v_msg := format('参数错误：经纬度对象必须包含 lon、lat 两个字段，当前值为 %s', p_lng_lat);
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (v_code, v_msg, v_log_sql);
+                RAISE EXCEPTION USING MESSAGE = v_msg;
             END IF;
 
             BEGIN
                 v_lng := (v_lng_lat_json ->> 'lon')::double precision;
                 v_lat := (v_lng_lat_json ->> 'lat')::double precision;
             EXCEPTION WHEN others THEN
-                RAISE EXCEPTION '参数错误：经纬度对象中的 lon、lat 必须是数字，当前值为 %', p_lng_lat;
+                v_code := 400;
+                v_msg := format('参数错误：经纬度对象中的 lon、lat 必须是数字，当前值为 %s', p_lng_lat);
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (v_code, v_msg, v_log_sql);
+                RAISE EXCEPTION USING MESSAGE = v_msg;
             END;
         ELSIF jsonb_typeof(v_lng_lat_json) = 'array' THEN
             IF jsonb_array_length(v_lng_lat_json) <> 2 THEN
-                RAISE EXCEPTION '参数错误：经纬度数组必须是 [经度,纬度] 两个元素，当前值为 %', p_lng_lat;
+                v_code := 400;
+                v_msg := format('参数错误：经纬度数组必须是 [经度,纬度] 两个元素，当前值为 %s', p_lng_lat);
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (v_code, v_msg, v_log_sql);
+                RAISE EXCEPTION USING MESSAGE = v_msg;
             END IF;
 
             BEGIN
                 v_lng := (v_lng_lat_json ->> 0)::double precision;
                 v_lat := (v_lng_lat_json ->> 1)::double precision;
             EXCEPTION WHEN others THEN
-                RAISE EXCEPTION '参数错误：经纬度数组中的经度、纬度必须是数字，当前值为 %', p_lng_lat;
+                v_code := 400;
+                v_msg := format('参数错误：经纬度数组中的经度、纬度必须是数字，当前值为 %s', p_lng_lat);
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (v_code, v_msg, v_log_sql);
+                RAISE EXCEPTION USING MESSAGE = v_msg;
             END;
         ELSE
-            RAISE EXCEPTION '参数错误：经纬度必须是对象或数组，当前值为 %', p_lng_lat;
+            v_code := 400;
+            v_msg := format('参数错误：经纬度必须是对象或数组，当前值为 %s', p_lng_lat);
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (v_code, v_msg, v_log_sql);
+            RAISE EXCEPTION USING MESSAGE = v_msg;
         END IF;
 
         IF v_lng < -180 OR v_lng > 180 THEN
-            RAISE EXCEPTION '参数错误：经度必须在 -180 到 180 之间，当前值为 %', v_lng;
+            v_code := 400;
+            v_msg := format('参数错误：经度必须在 -180 到 180 之间，当前值为 %s', v_lng);
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (v_code, v_msg, v_log_sql);
+            RAISE EXCEPTION USING MESSAGE = v_msg;
         END IF;
 
         IF v_lat < -90 OR v_lat > 90 THEN
-            RAISE EXCEPTION '参数错误：纬度必须在 -90 到 90 之间，当前值为 %', v_lat;
+            v_code := 400;
+            v_msg := format('参数错误：纬度必须在 -90 到 90 之间，当前值为 %s', v_lat);
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (v_code, v_msg, v_log_sql);
+            RAISE EXCEPTION USING MESSAGE = v_msg;
         END IF;
 
         IF coalesce(p_radius_km, 5) <= 0 THEN
-            RAISE EXCEPTION '参数错误：传入经纬度时，半径必须大于 0 公里，当前值为 %', p_radius_km;
+            v_code := 400;
+            v_msg := format('参数错误：传入经纬度时，半径必须大于 0 公里，当前值为 %s', p_radius_km);
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (v_code, v_msg, v_log_sql);
+            RAISE EXCEPTION USING MESSAGE = v_msg;
         END IF;
 
         v_radius_m := coalesce(p_radius_km, 5) * 1000.0;
@@ -184,7 +239,11 @@ BEGIN
     IF v_source = 'gd' THEN
         IF to_regclass(format('%I.%I', 'public', v_gd_table)) IS NULL THEN
             IF v_source = 'gd' THEN
-                RAISE EXCEPTION '参数错误：表 public.% 不存在', v_gd_table;
+                v_code := 400;
+                v_msg := format('参数错误：表 public.%s 不存在', v_gd_table);
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (v_code, v_msg, v_log_sql);
+                RAISE EXCEPTION USING MESSAGE = v_msg;
             END IF;
         ELSIF v_radius_m > 0 THEN
             v_sql_parts := array_append(v_sql_parts, format($sql$
@@ -236,7 +295,11 @@ BEGIN
     IF v_source = 'td' THEN
         IF to_regclass(format('%I.%I', 'public', v_td_table)) IS NULL THEN
             IF v_source = 'td' THEN
-                RAISE EXCEPTION '参数错误：表 public.% 不存在', v_td_table;
+                v_code := 400;
+                v_msg := format('参数错误：表 public.%s 不存在', v_td_table);
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (v_code, v_msg, v_log_sql);
+                RAISE EXCEPTION USING MESSAGE = v_msg;
             END IF;
         ELSIF v_radius_m > 0 THEN
             v_sql_parts := array_append(v_sql_parts, format($sql$
@@ -286,7 +349,11 @@ BEGIN
     END IF;
 
     IF array_length(v_sql_parts, 1) IS NULL THEN
-        RAISE EXCEPTION '参数错误：项目 % 未找到可查询的 POI 表', v_project_id;
+        v_code := 400;
+        v_msg := format('参数错误：项目 %s 未找到可查询的 POI 表', v_project_id);
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (v_code, v_msg, v_log_sql);
+        RAISE EXCEPTION USING MESSAGE = v_msg;
     END IF;
 
     -- 4. 生成最终 SQL、排序并执行。

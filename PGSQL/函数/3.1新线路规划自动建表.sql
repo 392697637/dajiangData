@@ -126,7 +126,11 @@ DECLARE
     v_max_lon DOUBLE PRECISION;            -- 从GeoJSON解析出的最大经度
     v_min_lat DOUBLE PRECISION;            -- 从GeoJSON解析出的最小纬度
     v_max_lat DOUBLE PRECISION;            -- 从GeoJSON解析出的最大纬度
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_generate_3d_grid(%L, %L, %s, %s, %s);',
+        p_project_id, p_geojson, COALESCE(p_min_alt::text, 'NULL'), COALESCE(p_max_alt::text, 'NULL'), COALESCE(p_resolution::text, 'NULL'));
+
     -- 初始化返回参数，默认成功状态
     code := 200;
     table_name := '';
@@ -161,6 +165,8 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
         code := 400;
         msg := format('参数错误：GeoJSON格式非法，无法解析空间范围，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END;
@@ -170,6 +176,8 @@ BEGIN
     IF v_min_lon >= v_max_lon OR v_min_lat >= v_max_lat OR p_min_alt >= p_max_alt THEN
         code := 400;
         msg := format('参数错误：最小坐标不能大于等于最大坐标，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -178,6 +186,8 @@ BEGIN
     IF p_resolution <= 0 THEN
         code := 400;
         msg := format('参数错误：分辨率必须大于0，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -185,6 +195,8 @@ BEGIN
     IF GeometryType(v_geom) NOT IN ('POLYGON', 'MULTIPOLYGON') THEN
         code := 400;
         msg := format('参数错误：GeoJSON必须是Polygon或MultiPolygon面数据，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -197,6 +209,8 @@ BEGIN
     IF abs(v_lon_meter) < 1 THEN
         code := 400;
         msg := format('参数错误：区域纬度过高，无法按经纬度生成稳定网格，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -216,6 +230,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：预计最多生成 %s 个网格点，超过单次上限 %s，请提高分辨率或缩小范围，执行时间 %s 秒', v_estimated_count, v_max_grid_count, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := v_estimated_count;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -335,6 +351,8 @@ EXCEPTION WHEN OTHERS THEN
     code := 500;
     msg := format('生成失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     count := 0;
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code, msg, v_log_sql);
     RETURN NEXT;
 END;
 $$;
@@ -396,7 +414,11 @@ DECLARE
     v_geom_col TEXT;
     v_project_fence_table TEXT;
     v_project_fence_regclass REGCLASS;
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_mark_electric_fence(%L);',
+        p_project_id);
+
     v_step_start := clock_timestamp();
     IF p_project_id = '' OR p_project_id IS NULL THEN
         v_table := 'gis_grid_nodes';
@@ -412,6 +434,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：网格表不存在：%s，执行时间 %s 秒', v_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start)::numeric, 3));
         count := 0;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -615,6 +639,8 @@ EXCEPTION WHEN OTHERS THEN
     count := 0;
     table_name := v_table;
     RAISE NOTICE '[gis_mark_electric_fence] error: %', SQLERRM;
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code, msg, v_log_sql);
     RETURN NEXT;
 END;
 $$;
@@ -672,7 +698,11 @@ DECLARE
     v_project_fence_regclass REGCLASS;
     v_scope_extent box3d;
     v_is_partial boolean := COALESCE(NULLIF(btrim(p_fence_id), ''), '') <> '';
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_refresh_electric_fence(%L, %L);',
+        p_project_id, p_fence_id);
+
     IF p_project_id = '' OR p_project_id IS NULL THEN
         v_table := 'gis_grid_nodes';
         v_project_fence_table := NULL;
@@ -686,6 +716,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：网格表不存在：%s，执行时间 %s 秒', v_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -752,6 +784,8 @@ BEGIN
             code := 400;
             msg := format('参数错误：未找到可刷新的电子围栏或围栏无geom：%s，执行时间 %s 秒', p_fence_id, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
             count := 0;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN NEXT;
             RETURN;
         END IF;
@@ -942,6 +976,8 @@ EXCEPTION WHEN OTHERS THEN
     table_name := v_table;
     msg := format('刷新失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     count := 0;
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code, msg, v_log_sql);
     RETURN NEXT;
 END;
 $$;
@@ -994,12 +1030,18 @@ DECLARE
     v_idx_prefix TEXT;
     v_building_idx_prefix TEXT;
     v_extent box3d;
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_mark_buildings(%L, %s);',
+        p_project_id, COALESCE(p_building_buffer::text, 'NULL'));
+
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         code := 400;
         table_name := NULL;
         msg := format('参数错误：项目ID不能为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -1017,6 +1059,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：网格表不存在：%s，执行时间 %s 秒', v_grid_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -1025,6 +1069,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：建筑表不存在：%s，执行时间 %s 秒', v_building_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -1171,6 +1217,8 @@ EXCEPTION WHEN OTHERS THEN
     table_name := v_grid_table;
     msg := format('建筑打标失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     count := 0;
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code, msg, v_log_sql);
     RETURN NEXT;
 END;
 $$;

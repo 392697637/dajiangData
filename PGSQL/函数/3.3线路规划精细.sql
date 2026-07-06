@@ -116,7 +116,11 @@ DECLARE
     v_alt_max_idx INT;                             -- 高度方向 generate_series 的最大下标。
     v_estimated_count BIGINT;                      -- 按外包框预估的最大三维网格数量，用于提前拦截超大任务。
     v_cnt BIGINT;                                  -- 实际写入精细网格表的行数。
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_generate_corridor_fine_grid(%L, %L, %s, %s, %s, %s, %L, %L);',
+        p_project_id, ST_AsText(p_path_line), COALESCE(p_min_alt::text, 'NULL'), COALESCE(p_max_alt::text, 'NULL'), COALESCE(p_resolution::text, 'NULL'), COALESCE(p_corridor_width::text, 'NULL'), p_task_id, p_drop_old);
+
     code := 200;
     table_name := NULL;
     msg := '';
@@ -125,6 +129,8 @@ BEGIN
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         code := 400;
         msg := format('参数错误：项目ID不能为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -132,6 +138,8 @@ BEGIN
     IF p_path_line IS NULL OR ST_IsEmpty(p_path_line) THEN
         code := 400;
         msg := format('参数错误：粗航线不能为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -139,6 +147,8 @@ BEGIN
     IF p_resolution <= 0 OR p_corridor_width <= 0 THEN
         code := 400;
         msg := format('参数错误：分辨率和走廊宽度必须大于0，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -146,6 +156,8 @@ BEGIN
     IF p_min_alt >= p_max_alt THEN
         code := 400;
         msg := format('参数错误：最小高度不能大于等于最大高度，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -174,6 +186,8 @@ BEGIN
     IF abs(v_lon_meter) < 1 THEN
         code := 400;
         msg := format('参数错误：区域纬度过高，无法生成精细网格，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -193,6 +207,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：走廊精细网格预计 %s 条，超过3000万，请增大分辨率或缩小走廊宽度，执行时间 %s 秒', v_estimated_count, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := v_estimated_count;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -298,6 +314,8 @@ EXCEPTION WHEN OTHERS THEN
     table_name := v_table;
     msg := format('生成走廊精细网格失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     count := 0;
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code, msg, v_log_sql);
     RETURN NEXT;
 END;
 $$;
@@ -360,13 +378,19 @@ DECLARE
     v_extent box3d;                                -- 所有有效围栏的总外包框，用于先裁剪网格范围。
     v_updated BIGINT := 0;                         -- 本次命中围栏并更新的网格点数量。
     v_cleared BIGINT := 0;                         -- 本次清除旧围栏标记的网格点数量。
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_mark_electric_fence_on_grid(%L, %L);',
+        p_project_id, p_grid_table);
+
     table_name := p_grid_table;
     SELECT to_regclass(format('%I.%I', current_schema(), p_grid_table)) INTO v_grid_reg;
     IF v_grid_reg IS NULL THEN
         code := 400;
         msg := format('参数错误：网格表不存在：%s，执行时间 %s 秒', p_grid_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -580,7 +604,11 @@ DECLARE
     v_geom_col TEXT;                               -- 网格平面判断使用的几何列；优先 geom2d。
     v_updated BIGINT := 0;                         -- 本次命中建筑并设置阻塞的网格点数。
     v_cleared BIGINT := 0;                         -- 本次清理旧建筑阻塞的网格点数。
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_mark_buildings_on_grid(%L, %L, %s);',
+        p_project_id, p_grid_table, COALESCE(p_building_buffer::text, 'NULL'));
+
     table_name := p_grid_table;
     v_project_key := regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
     v_building_table := 'gis_buildings_' || v_project_key;
@@ -591,6 +619,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：网格表不存在：%s，执行时间 %s 秒', p_grid_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -598,6 +628,8 @@ BEGIN
         code := 400;
         msg := format('参数错误：建筑表不存在：%s，执行时间 %s 秒', v_building_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -811,11 +843,17 @@ DECLARE
     v_waypoints JSONB;                                   -- path_line 拆出来的航点 JSON。
     v_smooth_waypoints JSONB;                            -- smooth_path_line 拆出来的航点 JSON。
     v_path_id INT;                                       -- 写入 gis_flight_paths 后生成的记录 id。
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_astar_3d_flight_plan_on_grid(%L, %s, %s, %s, %s, %s, %s, %s, %s, %L, %L, %L);',
+        p_grid_table, COALESCE(p_start_lon::text, 'NULL'), COALESCE(p_start_lat::text, 'NULL'), COALESCE(p_start_alt::text, 'NULL'), COALESCE(p_end_lon::text, 'NULL'), COALESCE(p_end_lat::text, 'NULL'), COALESCE(p_end_alt::text, 'NULL'), COALESCE(p_safe_altitude::text, 'NULL'), COALESCE(p_height_mode::text, 'NULL'), p_force_gen, p_project_id, p_create_user);
+
     SELECT to_regclass(format('%I.%I', current_schema(), p_grid_table)) INTO v_grid_reg;
     IF v_grid_reg IS NULL THEN
         code := 400;
         msg := format('参数错误：网格表不存在：%s，执行时间 %s 秒', p_grid_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -824,6 +862,8 @@ BEGIN
        OR p_end_lon IS NULL OR p_end_lat IS NULL OR p_end_alt IS NULL THEN
         code := 400;
         msg := format('参数错误：起点/终点经纬度和高度不能为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -831,6 +871,8 @@ BEGIN
     IF p_safe_altitude IS NULL OR p_safe_altitude <= 0 THEN
         code := 400;
         msg := format('参数错误：安全高度必须大于0，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -848,6 +890,8 @@ BEGIN
     IF v_start_id IS NULL OR v_goal_id IS NULL THEN
         code := 400;
         msg := format('参数错误：精细网格中找不到可飞起点或终点，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
         RETURN;
     END IF;
@@ -1014,6 +1058,8 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
     code := 500;
     msg := format('执行异常：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code, msg, v_log_sql);
     RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
 END;
 $$;
@@ -1130,7 +1176,16 @@ DECLARE
     v_task_key TEXT;                               -- 清洗后的任务 key，用于生成精细网格表名。
     v_fine_table TEXT;                             -- 本次生成的精细网格表名。
     v_path_line geometry(LineStringZ,4326);        -- 粗规划航线，用它来生成精细走廊。
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_astar_3d_flight_plan_build(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %L, %L, %L, %L, %L);',
+        COALESCE(p_start_lon::text, 'NULL'), COALESCE(p_start_lat::text, 'NULL'), COALESCE(p_start_alt::text, 'NULL'),
+        COALESCE(p_end_lon::text, 'NULL'), COALESCE(p_end_lat::text, 'NULL'), COALESCE(p_end_alt::text, 'NULL'),
+        COALESCE(p_safe_altitude::text, 'NULL'), COALESCE(p_height_mode::text, 'NULL'),
+        COALESCE(p_coarse_resolution::text, 'NULL'), COALESCE(p_fine_resolution::text, 'NULL'),
+        COALESCE(p_corridor_width::text, 'NULL'), COALESCE(p_building_buffer::text, 'NULL'),
+        p_force_gen, p_project_id, p_create_user, p_task_id, p_drop_fine_grid);
+
     -- task_id 参与精细表名 hash；没有传 task_id 时生成一个短随机 key，避免不同任务互相覆盖。
     v_task_key := COALESCE(NULLIF(regexp_replace(COALESCE(p_task_id, ''), '[^0-9a-zA-Z_]', '', 'g'), ''), substr(md5(clock_timestamp()::text), 1, 12));
 
@@ -1253,6 +1308,9 @@ EXCEPTION WHEN OTHERS THEN
     END IF;
 
     RAISE NOTICE '精细规划失败，返回粗规划或直线兜底：%', SQLERRM;
+
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (500, format('执行异常：%s', SQLERRM), v_log_sql);
 
     -- 如果粗规划已经成功，则返回粗规划航线作为兜底；否则再调用一次 3.2，让 3.2 自己兜底。
     IF v_coarse.id IS NOT NULL THEN

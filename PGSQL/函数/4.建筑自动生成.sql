@@ -58,29 +58,45 @@ DECLARE
     v_row_count      integer := 0;                              -- 最近一条 UPDATE 影响的行数。
     v_modified_count integer := 0;                              -- 本次函数累计 UPDATE 实际影响行数。
     v_has_height     boolean;                                   -- 目标表是否存在 height 字段。
+    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_generate_building_3d(%L);',
+        p_project_id);
+
     -- 0. 参数校验：项目 ID 不能为空，且只能包含字母、数字、下划线。
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
+        code := 400;
+        msg := '参数错误：项目ID不能为空';
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：项目ID不能为空',
+            code,
+            msg,
             0;
         RETURN;
     END IF;
 
     IF p_project_id !~ '^[a-zA-Z0-9_]+$' THEN
+        code := 400;
+        msg := '参数错误：项目ID只能包含字母、数字、下划线，当前值为 ' || p_project_id;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：项目ID只能包含字母、数字、下划线，当前值为 ' || p_project_id,
+            code,
+            msg,
             0;
         RETURN;
     END IF;
 
     -- 1. 检查目标建筑表是否存在；不存在时直接抛出异常，避免后续动态 SQL 误操作。
     IF NOT EXISTS (SELECT 1 FROM pg_tables WHERE tablename = v_table AND schemaname = 'public') THEN
+        code := 400;
+        msg := format('参数错误：表 %s 不存在', v_table);
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            format('参数错误：表 %s 不存在', v_table),
+            code,
+            msg,
             0;
         RETURN;
     END IF;
@@ -342,9 +358,13 @@ BEGIN
 
 -- 未预料 SQL 异常统一返回 500，便于调用方按 code 判断结果。
 EXCEPTION WHEN OTHERS THEN
+    code := 500;
+    msg := '执行异常：' || SQLERRM || ' | 错误码：' || SQLSTATE;
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code, msg, v_log_sql);
     RETURN QUERY SELECT
-        500,
-        '执行异常：' || SQLERRM || ' | 错误码：' || SQLSTATE,
+        code,
+        msg,
         COALESCE(v_modified_count, 0);
 END;
 $$;
@@ -627,12 +647,20 @@ DECLARE
     v_connection_base    text := 'Host=localhost;Port=5432;Database=ktd_lx_2026gis;Username=zhuoyi;Password=Ktd@postSQL@2026!@#;CommandTimeOut=3600'; -- pg2b3dm 基础数据库连接字符串。
     v_connection_options text;                                                     -- 追加到 pg2b3dm 连接串的 PostgreSQL Options 参数。
     v_connection         text;                                                     -- pg2b3dm 数据库连接字符串。
+    v_log_sql            text;                                                     -- 当前函数调用SQL，用于错误日志
 BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_generate_3dtiles(%L, %L);',
+        project_id, p_config_json);
+
     -- 1. 参数校验：project_id 不能为空。
     IF project_id IS NULL OR btrim(project_id) = '' THEN
+        code := 400;
+        msg := '参数错误：项目ID不能为空';
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：项目ID不能为空',
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -640,9 +668,13 @@ BEGIN
 
     -- 2. 参数校验：只允许字母、数字、下划线，避免动态 SQL 和 shell 注入。
     IF project_id !~ '^[a-zA-Z0-9_]+$' THEN
+        code := 400;
+        msg := '参数错误：项目ID只能包含字母、数字、下划线，当前值为 ' || project_id;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：项目ID只能包含字母、数字、下划线，当前值为 ' || project_id,
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -653,9 +685,13 @@ BEGIN
         BEGIN
             v_config := p_config_json::jsonb;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：p_config_json 不是合法 JSON 字符串：' || SQLERRM;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：p_config_json 不是合法 JSON 字符串：' || SQLERRM,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -668,18 +704,26 @@ BEGIN
     END IF;
 
     IF v_pg2b3dm_path IS NULL OR v_pg2b3dm_path = '' THEN
+        code := 400;
+        msg := '参数错误：pg2b3dm_path 不能为空';
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：pg2b3dm_path 不能为空',
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
     END IF;
 
     IF v_pg2b3dm_path !~ '^/[A-Za-z0-9_./-]+$' THEN
+        code := 400;
+        msg := '参数错误：pg2b3dm_path 必须是绝对路径，且只能包含字母、数字、下划线、点、斜杠和短横线，当前值为 ' || v_pg2b3dm_path;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：pg2b3dm_path 必须是绝对路径，且只能包含字母、数字、下划线、点、斜杠和短横线，当前值为 ' || v_pg2b3dm_path,
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -690,18 +734,26 @@ BEGIN
     END IF;
 
     IF v_geom_column IS NULL OR v_geom_column = '' THEN
+        code := 400;
+        msg := '参数错误：geom_column 不能为空';
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：geom_column 不能为空',
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
     END IF;
 
     IF v_geom_column !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' THEN
+        code := 400;
+        msg := '参数错误：geom_column 只能是合法字段名，当前值为 ' || v_geom_column;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：geom_column 只能是合法字段名，当前值为 ' || v_geom_column,
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -714,18 +766,26 @@ BEGIN
     END IF;
 
     IF v_outdir IS NULL OR v_outdir = '' THEN
+        code := 400;
+        msg := '参数错误：output_dir 不能为空';
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：output_dir 不能为空',
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
     END IF;
 
     IF v_outdir !~ '^/[A-Za-z0-9_./-]+$' THEN
+        code := 400;
+        msg := '参数错误：output_dir 必须是绝对路径，且只能包含字母、数字、下划线、点、斜杠和短横线，当前值为 ' || v_outdir;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：output_dir 必须是绝对路径，且只能包含字母、数字、下划线、点、斜杠和短横线，当前值为 ' || v_outdir,
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -740,9 +800,13 @@ BEGIN
         BEGIN
             v_parallel_workers := (v_config ->> 'worker')::integer;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：worker 必须是整数';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：worker 必须是整数',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -750,9 +814,13 @@ BEGIN
     END IF;
 
     IF v_parallel_workers < 1 OR v_parallel_workers > 16 THEN
+        code := 400;
+        msg := '参数错误：worker 取值范围为 1 到 16，当前值为 ' || v_parallel_workers;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：worker 取值范围为 1 到 16，当前值为 ' || v_parallel_workers,
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -764,9 +832,13 @@ BEGIN
         BEGIN
             v_max_features := (v_config ->> 'max_features_tile')::integer;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：max_features_tile 必须是整数';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：max_features_tile 必须是整数',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -774,9 +846,13 @@ BEGIN
     END IF;
 
     IF v_max_features < 30 OR v_max_features > 2000 THEN
+        code := 400;
+        msg := '参数错误：max_features_tile 取值范围为 30 到 2000，当前值为 ' || v_max_features;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：max_features_tile 取值范围为 30 到 2000，当前值为 ' || v_max_features,
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -792,9 +868,13 @@ BEGIN
     END IF;
 
     IF v_attributes !~ '^[a-zA-Z0-9_,]+$' THEN
+        code := 400;
+        msg := '参数错误：attributes 只能包含字母、数字、下划线和英文逗号，当前值为 ' || v_attributes;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：attributes 只能包含字母、数字、下划线和英文逗号，当前值为 ' || v_attributes,
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -804,9 +884,13 @@ BEGIN
         BEGIN
             v_close_outlines := (v_config ->> 'close_outlines')::boolean;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：close_outlines 必须是 true 或 false';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：close_outlines 必须是 true 或 false',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -817,9 +901,13 @@ BEGIN
         BEGIN
             v_add_outlines := ((v_config ->> 'add_outlines')::boolean)::text;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：add_outlines 必须是 true 或 false';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：add_outlines 必须是 true 或 false',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -833,9 +921,13 @@ BEGIN
         BEGIN
             v_geometricerror := (v_config ->> 'geometricerror')::integer;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：geometricerror 必须是整数';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：geometricerror 必须是整数',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -843,9 +935,13 @@ BEGIN
     END IF;
 
     IF v_geometricerror < 1 OR v_geometricerror > 100000 THEN
+        code := 400;
+        msg := '参数错误：geometricerror 取值范围为 1 到 100000，当前值为 ' || v_geometricerror;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：geometricerror 取值范围为 1 到 100000，当前值为 ' || v_geometricerror,
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -855,17 +951,25 @@ BEGIN
         BEGIN
             v_geometricerrorfactor := (v_config ->> 'geometricerrorfactor')::numeric;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：geometricerrorfactor 必须是数字';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：geometricerrorfactor 必须是数字',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
         END;
         IF v_geometricerrorfactor < 1 OR v_geometricerrorfactor > 100 THEN
+            code := 400;
+            msg := '参数错误：geometricerrorfactor 取值范围为 1 到 100，当前值为 ' || v_geometricerrorfactor;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：geometricerrorfactor 取值范围为 1 到 100，当前值为 ' || v_geometricerrorfactor,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -873,9 +977,13 @@ BEGIN
     END IF;
     IF v_geometricerrorfactor IS NOT NULL THEN
         IF v_geometricerrorfactor < 1 OR v_geometricerrorfactor > 100 THEN
+            code := 400;
+            msg := '参数错误：geometricerrorfactor 取值范围为 1 到 100，当前值为 ' || v_geometricerrorfactor;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：geometricerrorfactor 取值范围为 1 到 100，当前值为 ' || v_geometricerrorfactor,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -887,9 +995,13 @@ BEGIN
         v_subdivision := upper(btrim(v_config ->> 'subdivision'));
     END IF;
     IF v_subdivision NOT IN ('QUADTREE', 'OCTREE') THEN
+        code := 400;
+        msg := '参数错误：subdivision 只能是 QUADTREE 或 OCTREE，当前值为 ' || v_subdivision;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：subdivision 只能是 QUADTREE 或 OCTREE，当前值为 ' || v_subdivision,
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -899,9 +1011,13 @@ BEGIN
         v_default_color := btrim(v_config ->> 'default_color');
     END IF;
     IF v_default_color !~ '^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$' THEN
+        code := 400;
+        msg := '参数错误：default_color 必须是 #RRGGBB 或 #AARRGGBB，当前值为 ' || v_default_color;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：default_color 必须是 #RRGGBB 或 #AARRGGBB，当前值为 ' || v_default_color,
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -910,9 +1026,13 @@ BEGIN
     IF v_config ? 'default_metallic_roughness' THEN
         v_metallic_roughness := btrim(v_config ->> 'default_metallic_roughness');
         IF v_metallic_roughness !~ '^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$' THEN
+            code := 400;
+            msg := '参数错误：default_metallic_roughness 必须是 #RRGGBB 或 #AARRGGBB，当前值为 ' || v_metallic_roughness;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：default_metallic_roughness 必须是 #RRGGBB 或 #AARRGGBB，当前值为 ' || v_metallic_roughness,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -924,9 +1044,13 @@ BEGIN
         BEGIN
             v_double_sided := ((v_config ->> 'double_sided')::boolean)::text;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：double_sided 必须是 true 或 false';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：double_sided 必须是 true 或 false',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -939,9 +1063,13 @@ BEGIN
     IF v_config ? 'refinement' THEN
         v_refinement := upper(btrim(v_config ->> 'refinement'));
         IF v_refinement NOT IN ('ADD', 'REPLACE') THEN
+            code := 400;
+            msg := '参数错误：refinement 只能是 ADD 或 REPLACE，当前值为 ' || v_refinement;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：refinement 只能是 ADD 或 REPLACE，当前值为 ' || v_refinement,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -949,9 +1077,13 @@ BEGIN
     END IF;
     IF v_refinement IS NOT NULL THEN
         IF v_refinement NOT IN ('ADD', 'REPLACE') THEN
+            code := 400;
+            msg := '参数错误：refinement 只能是 ADD 或 REPLACE，当前值为 ' || v_refinement;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：refinement 只能是 ADD 或 REPLACE，当前值为 ' || v_refinement,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -963,9 +1095,13 @@ BEGIN
         BEGIN
             v_use_implicit := ((v_config ->> 'use_implicit_tiling')::boolean)::text;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：use_implicit_tiling 必须是 true 或 false';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：use_implicit_tiling 必须是 true 或 false',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -978,9 +1114,13 @@ BEGIN
     IF v_config ? 'default_alpha_mode' THEN
         v_alpha_mode := upper(btrim(v_config ->> 'default_alpha_mode'));
         IF v_alpha_mode NOT IN ('OPAQUE', 'BLEND', 'MASK') THEN
+            code := 400;
+            msg := '参数错误：default_alpha_mode 只能是 OPAQUE、BLEND 或 MASK，当前值为 ' || v_alpha_mode;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：default_alpha_mode 只能是 OPAQUE、BLEND 或 MASK，当前值为 ' || v_alpha_mode,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -988,9 +1128,13 @@ BEGIN
     END IF;
     IF v_alpha_mode IS NOT NULL THEN
         IF v_alpha_mode NOT IN ('OPAQUE', 'BLEND', 'MASK') THEN
+            code := 400;
+            msg := '参数错误：default_alpha_mode 只能是 OPAQUE、BLEND 或 MASK，当前值为 ' || v_alpha_mode;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：default_alpha_mode 只能是 OPAQUE、BLEND 或 MASK，当前值为 ' || v_alpha_mode,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -1002,17 +1146,25 @@ BEGIN
         BEGIN
             v_alpha_cutoff := (v_config ->> 'alpha_cutoff')::numeric;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：alpha_cutoff 必须是数字';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：alpha_cutoff 必须是数字',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
         END;
         IF v_alpha_cutoff < 0 OR v_alpha_cutoff > 1 THEN
+            code := 400;
+            msg := '参数错误：alpha_cutoff 取值范围为 0 到 1，当前值为 ' || v_alpha_cutoff;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：alpha_cutoff 取值范围为 0 到 1，当前值为 ' || v_alpha_cutoff,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -1024,9 +1176,13 @@ BEGIN
         BEGIN
             v_keep_projection := ((v_config ->> 'keep_projection')::boolean)::text;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：keep_projection 必须是 true 或 false';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：keep_projection 必须是 true 或 false',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -1040,9 +1196,13 @@ BEGIN
         v_tileset_version := btrim(v_config ->> 'tileset_version');
     END IF;
     IF v_tileset_version IS NULL OR v_tileset_version = '' OR v_tileset_version ~ '[\r\n]' THEN
+        code := 400;
+        msg := '参数错误：tileset_version 不能为空且不能包含换行符';
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：tileset_version 不能为空且不能包含换行符',
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -1052,9 +1212,13 @@ BEGIN
     IF v_config ? 'copyright' THEN
         v_copyright := btrim(v_config ->> 'copyright');
         IF v_copyright IS NULL OR v_copyright = '' OR v_copyright ~ '[\r\n]' THEN
+            code := 400;
+            msg := '参数错误：copyright 不能为空且不能包含换行符';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：copyright 不能为空且不能包含换行符',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -1065,9 +1229,13 @@ BEGIN
     IF v_config ? 'query' THEN
         v_query := btrim(v_config ->> 'query');
         IF v_query IS NULL OR v_query = '' OR v_query ~ '[\r\n;]' THEN
+            code := 400;
+            msg := '参数错误：query 不能为空，且不能包含换行符或分号';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：query 不能为空，且不能包含换行符或分号',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -1078,9 +1246,13 @@ BEGIN
         v_query := regexp_replace(v_query, '^[[:space:]]*WHERE[[:space:]]+', '', 'i');
         v_query := btrim(v_query);
         IF v_query = '' THEN
+            code := 400;
+            msg := '参数错误：query 去掉 WHERE 后不能为空，例如 geom3d IS NOT NULL';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：query 去掉 WHERE 后不能为空，例如 geom3d IS NOT NULL',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -1091,9 +1263,13 @@ BEGIN
     IF v_config ? 'lod_column' THEN
         v_lod_column := btrim(v_config ->> 'lod_column');
         IF v_lod_column !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' THEN
+            code := 400;
+            msg := '参数错误：lod_column 只能是合法字段名，当前值为 ' || v_lod_column;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：lod_column 只能是合法字段名，当前值为 ' || v_lod_column,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -1104,9 +1280,13 @@ BEGIN
     IF v_config ? 'radius_column' THEN
         v_radius_column := btrim(v_config ->> 'radius_column');
         IF v_radius_column !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' THEN
+            code := 400;
+            msg := '参数错误：radius_column 只能是合法字段名，当前值为 ' || v_radius_column;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：radius_column 只能是合法字段名，当前值为 ' || v_radius_column,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -1117,9 +1297,13 @@ BEGIN
     IF v_config ? 'shaders_column' THEN
         v_shaders_column := btrim(v_config ->> 'shaders_column');
         IF v_shaders_column !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' THEN
+            code := 400;
+            msg := '参数错误：shaders_column 只能是合法字段名，当前值为 ' || v_shaders_column;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：shaders_column 只能是合法字段名，当前值为 ' || v_shaders_column,
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -1131,9 +1315,13 @@ BEGIN
         BEGIN
             v_skip_create_tiles := ((v_config ->> 'skip_create_tiles')::boolean)::text;
         EXCEPTION WHEN OTHERS THEN
+            code := 400;
+            msg := '参数错误：skip_create_tiles 必须是 true 或 false';
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                400,
-                '参数错误：skip_create_tiles 必须是 true 或 false',
+                code,
+                msg,
                 ''::text,
                 ''::text;
             RETURN;
@@ -1148,18 +1336,26 @@ BEGIN
     END IF;
 
     IF v_connection_base IS NULL OR v_connection_base = '' THEN
+        code := 400;
+        msg := '参数错误：connection 不能为空';
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：connection 不能为空',
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
     END IF;
 
     IF v_connection_base ~ '[\r\n]' THEN
+        code := 400;
+        msg := '参数错误：connection 不能包含换行符';
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            '参数错误：connection 不能包含换行符',
+            code,
+            msg,
             ''::text,
             ''::text;
         RETURN;
@@ -1180,9 +1376,13 @@ BEGIN
         WHERE schemaname = 'public'
           AND tablename = v_table
     ) THEN
+        code := 400;
+        msg := format('参数错误：表 %s 不存在', v_table);
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            format('参数错误：表 %s 不存在', v_table),
+            code,
+            msg,
             v_file_relative_path,
             v_file_absolute_path;
         RETURN;
@@ -1196,9 +1396,13 @@ BEGIN
           AND table_name = v_table
           AND column_name = v_geom_column
     ) AND v_geom_column <> 'geom3d' THEN
+        code := 400;
+        msg := format('参数错误：几何列 %s 不存在', v_geom_column);
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            format('参数错误：几何列 %s 不存在', v_geom_column),
+            code,
+            msg,
             v_file_relative_path,
             v_file_absolute_path;
         RETURN;
@@ -1211,9 +1415,13 @@ BEGIN
           AND table_name = v_table
           AND column_name = v_lod_column
     ) THEN
+        code := 400;
+        msg := format('参数错误：LOD 字段 %s 不存在', v_lod_column);
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            format('参数错误：LOD 字段 %s 不存在', v_lod_column),
+            code,
+            msg,
             v_file_relative_path,
             v_file_absolute_path;
         RETURN;
@@ -1226,9 +1434,13 @@ BEGIN
           AND table_name = v_table
           AND column_name = v_radius_column
     ) THEN
+        code := 400;
+        msg := format('参数错误：半径字段 %s 不存在', v_radius_column);
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            format('参数错误：半径字段 %s 不存在', v_radius_column),
+            code,
+            msg,
             v_file_relative_path,
             v_file_absolute_path;
         RETURN;
@@ -1241,9 +1453,13 @@ BEGIN
           AND table_name = v_table
           AND column_name = v_shaders_column
     ) THEN
+        code := 400;
+        msg := format('参数错误：shader 字段 %s 不存在', v_shaders_column);
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            400,
-            format('参数错误：shader 字段 %s 不存在', v_shaders_column),
+            code,
+            msg,
             v_file_relative_path,
             v_file_absolute_path;
         RETURN;
@@ -1303,9 +1519,13 @@ BEGIN
     v_cmd := '/bin/rm -rf ' || v_outdir;
     SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
     IF v_rec.code != 200 THEN
+        code := 500;
+        msg := '删除旧目录失败：' || v_rec.msg;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            500,
-            '删除旧目录失败：' || v_rec.msg,
+            code,
+            msg,
             v_file_relative_path,
             v_file_absolute_path;
         RETURN;
@@ -1316,9 +1536,13 @@ BEGIN
     v_cmd := '/usr/bin/id; /bin/ls -ld /home/postgres/ktd-pgdata 2>/dev/null; /bin/mkdir -p /home/postgres/ktd-pgdata/3dtiles; /bin/chmod 755 /home/postgres/ktd-pgdata /home/postgres/ktd-pgdata/3dtiles';
     SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
     IF v_rec.code != 200 THEN
+        code := 500;
+        msg := '创建父目录 /home/postgres/ktd-pgdata/3dtiles 或设置权限失败：' || v_rec.msg;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            500,
-            '创建父目录 /home/postgres/ktd-pgdata/3dtiles 或设置权限失败：' || v_rec.msg,
+            code,
+            msg,
             v_file_relative_path,
             v_file_absolute_path;
         RETURN;
@@ -1330,9 +1554,13 @@ BEGIN
     v_cmd := format('/bin/mkdir -p %L; /usr/bin/find %L -exec /bin/chmod 755 {} \;', v_outdir, v_outdir);
     SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
     IF v_rec.code != 200 THEN
+        code := 500;
+        msg := format('创建目录 %s 或设置权限失败：%s', v_outdir, v_rec.msg);
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            500,
-            format('创建目录 %s 或设置权限失败：%s', v_outdir, v_rec.msg),
+            code,
+            msg,
             v_file_relative_path,
             v_file_absolute_path;
         RETURN;
@@ -1387,9 +1615,13 @@ BEGIN
         v_cmd := format('/usr/bin/find %L -exec /bin/chmod 755 {} \;', v_outdir);
         SELECT * INTO v_rec FROM exec_shell_cmd_capture(v_cmd);
         IF v_rec.code != 200 THEN
+            code := 500;
+            msg := '3D Tiles 已生成，但设置输出文件权限失败：' || v_rec.msg;
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
-                500,
-                '3D Tiles 已生成，但设置输出文件权限失败：' || v_rec.msg,
+                code,
+                msg,
                 v_file_relative_path,
                 v_file_absolute_path;
             RETURN;
@@ -1401,18 +1633,26 @@ BEGIN
             v_file_relative_path,
             v_file_absolute_path;
     ELSE
+        code := 500;
+        msg := 'pg2b3dm 执行失败：' || v_rec.msg;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
-            500,
-            'pg2b3dm 执行失败：' || v_rec.msg,
+            code,
+            msg,
             v_file_relative_path,
             v_file_absolute_path;
     END IF;
 
 -- 未预料 SQL 异常统一返回 500。
 EXCEPTION WHEN OTHERS THEN
+    code := 500;
+    msg := '执行异常：' || SQLERRM || ' | 错误码：' || SQLSTATE;
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code, msg, v_log_sql);
     RETURN QUERY SELECT
-        500,
-        '执行异常：' || SQLERRM || ' | 错误码：' || SQLSTATE,
+        code,
+        msg,
         COALESCE(v_file_relative_path, ''),
         COALESCE(v_file_absolute_path, '');
 END;
