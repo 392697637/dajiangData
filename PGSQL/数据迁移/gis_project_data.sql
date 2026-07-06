@@ -1,4 +1,12 @@
 -- =============================================================================
+-- gis_project_data.sql
+--   gis_project_data                     生成项目三维空间数据
+--   gis_project_data_batch               分片批量生成项目数据
+--
+-- 说明：用于按项目生成三维网格、电子围栏和围栏标记数据。
+-- =============================================================================
+
+-- =============================================================================
 -- 删除函数
 -- =============================================================================
 SELECT gis_drop_function('gis_project_data');
@@ -214,8 +222,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_project_data(text) IS
-'循环读取 bo_project.id 和 region_shape，生成三维网格、项目电子围栏并刷新围栏标记';
+COMMENT ON FUNCTION public.gis_project_data(text) IS '生成项目三维空间数据';
 
 -- =============================================================================
 -- 删除函数
@@ -330,5 +337,4 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_project_data_batch(integer, integer) IS
-'按 bo_project.id 哈希分片处理项目数据，用于多个数据库连接并行生成三维网格、电子围栏和围栏标记';
+COMMENT ON FUNCTION public.gis_project_data_batch(integer, integer) IS '分片批量生成项目数据';

@@ -1,3 +1,12 @@
+-- =============================================================================
+-- 11校验空间数据.sql
+--   gis_geojson_to_geom                  解析GeoJSON为空间几何
+--   gis_validate_write_error             写入空间校验错误记录
+--   gis_validate_table                   校验数据表空间字段质量
+--
+-- 说明：用于迁移后检查空间字段、几何类型和面闭合问题。
+-- =============================================================================
+
 -- ====================================================================================
 -- GIS 空间数据校验
 -- ====================================================================================
@@ -219,7 +228,7 @@ BEGIN
     RETURN ST_GeomFromGeoJSON(v_geom_json::text);
 END;
 $$;
-COMMENT ON FUNCTION gis_geojson_to_geom(text, text) IS 'GeoJSON转几何';
+COMMENT ON FUNCTION gis_geojson_to_geom(text, text) IS '解析GeoJSON为空间几何';
 
 -- =============================================================================
 -- 删除函数
@@ -284,7 +293,7 @@ END;
 $$;
 COMMENT ON FUNCTION gis_validate_write_error(
     text, text, text, text, text, text, text, text, jsonb, text, jsonb, text, boolean, text, text
-) IS '写校验错误';
+) IS '写入空间校验错误记录';
 
 -- =============================================================================
 -- 删除函数
@@ -676,7 +685,7 @@ BEGIN
         )::text;
 END;
 $$;
-COMMENT ON FUNCTION gis_validate_table(text, text) IS '校验空间数据';
+COMMENT ON FUNCTION gis_validate_table(text, text) IS '校验数据表空间字段质量';
 
 -- ====================================================================================
 -- 使用示例

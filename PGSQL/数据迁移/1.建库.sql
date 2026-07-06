@@ -1,3 +1,15 @@
+-- =============================================================================
+-- 1.建库.sql
+--   ktd_lx_2026gis                       创建GIS业务数据库
+--   plpgsql/postgis/postgis_sfcgal       安装空间与过程语言扩展
+--   timescaledb                          安装时序数据库扩展
+--   gis_error_log                        创建PG相关GIS错误日志
+--   gis_drop_function                    删除同名重载函数
+--   gis_refresh_all_tables               刷新所有用户表统计信息
+--
+-- 说明：用于数据库初始化、基础扩展安装、错误日志表和通用工具函数创建。
+-- =============================================================================
+
 -- -- 强制断开所有连接 + 删除数据库
 -- 
 DROP DATABASE IF EXISTS ktd_lx_2026gis WITH (FORCE);
@@ -59,13 +71,25 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 -- =============================================================================
 -- PG相关GIS错误日志
 -- =============================================================================
+DROP TABLE IF EXISTS public.gis_error_log;
+
 CREATE TABLE IF NOT EXISTS public.gis_error_log (
+    id bigserial PRIMARY KEY,
     code integer,
     msg text,
     sqlstring text,
     create_time timestamp without time zone DEFAULT now()
 );
 COMMENT ON TABLE public.gis_error_log IS 'PG相关GIS错误日志';
+COMMENT ON COLUMN public.gis_error_log.id IS '日志主键ID';
+COMMENT ON COLUMN public.gis_error_log.code IS '错误状态码：400=参数/业务错误，500=系统异常';
+COMMENT ON COLUMN public.gis_error_log.msg IS '错误提示信息';
+COMMENT ON COLUMN public.gis_error_log.sqlstring IS '触发错误时的SQL语句';
+COMMENT ON COLUMN public.gis_error_log.create_time IS '日志创建时间';
+
+CREATE INDEX IF NOT EXISTS idx_gis_error_log_create_time
+ON public.gis_error_log(create_time DESC);
+COMMENT ON INDEX public.idx_gis_error_log_create_time IS 'PG相关GIS错误日志创建时间倒序查询索引';
 
 
 
@@ -128,8 +152,45 @@ BEGIN
     END LOOP;
 END;
 $$;
-COMMENT ON FUNCTION gis_drop_function(text) IS '按函数名称删除所有同名重载函数';
+COMMENT ON FUNCTION gis_drop_function(text) IS '按名称删除同名重载函数';
 
  
 
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_refresh_all_tables');
 
+-- =============================================================================
+-- 刷新所有用户表统计信息
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.gis_refresh_all_tables()
+RETURNS integer
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    r RECORD;
+    v_count integer := 0;
+BEGIN
+    FOR r IN (
+        SELECT schemaname, tablename
+        FROM pg_tables
+        WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+          AND schemaname NOT LIKE 'pg_%'
+        ORDER BY schemaname, tablename
+    )
+    LOOP
+        EXECUTE format('ANALYZE %I.%I', r.schemaname, r.tablename);
+        RAISE NOTICE '已分析: %.%', r.schemaname, r.tablename;
+        v_count := v_count + 1;
+    END LOOP;
+
+    RETURN v_count;
+END;
+$$;
+COMMENT ON FUNCTION public.gis_refresh_all_tables() IS '刷新所有用户表统计信息';
+
+-- =============================================================================
+-- 刷新所有用户表统计信息
+-- =============================================================================
+SELECT gis_refresh_all_tables();

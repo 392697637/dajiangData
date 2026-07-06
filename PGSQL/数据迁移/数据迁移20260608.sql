@@ -1,3 +1,14 @@
+-- =============================================================================
+-- 数据迁移20260608.sql
+--   mysql_fdw                            MySQL到PostgreSQL同步示例
+--   lx_gis_base_common_columns           统一整理基础公共字段
+--   lx_gis_string_columns_varchar        清洗字符串并转换类型
+--   gis_geojson_to_closed_geom           闭合空间JSON并转几何
+--   update_geom_columns                  整理并重命名空间字段
+--
+-- 说明：用于历史业务数据迁移后的字段整理、空间转换和数据修复。
+-- =============================================================================
+
 ------------------------------------------------------------------ 方案一sql同步给 PG17 安装 mysql_fdw
 -- -- 1. 安装 MySQL 连接扩展（PG 专用）
 -- CREATE EXTENSION IF NOT EXISTS mysql_fdw;
@@ -165,7 +176,7 @@ BEGIN
     RAISE NOTICE '✅ 表 % 公共字段处理完成', tbl_name;
 END;
 $$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION lx_gis_base_common_columns(text) IS '统一公共字段';
+COMMENT ON FUNCTION lx_gis_base_common_columns(text) IS '统一整理基础公共字段';
 
 -- =============================================
 ------------------------------------------------------------------------------------------ 函数：char 直接改为 varchar(32) + 清除字符串前后空格
@@ -209,7 +220,7 @@ BEGIN
     RAISE NOTICE '==================================================';
 END;
 $$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION lx_gis_string_columns_varchar(text) IS '字符串清洗';
+COMMENT ON FUNCTION lx_gis_string_columns_varchar(text) IS '清洗字符串并转换类型';
  
 
 -- =============================================
@@ -408,7 +419,7 @@ BEGIN
     END;
 END;
 $$;
-COMMENT ON FUNCTION gis_geojson_to_closed_geom(text) IS 'GeoJSON转几何';
+COMMENT ON FUNCTION gis_geojson_to_closed_geom(text) IS '闭合空间JSON并转几何';
 
 
 ------------------------------------------------------------------------------------------空间数据创建bo_electric_fence
@@ -529,7 +540,7 @@ BEGIN
     RAISE NOTICE '✅ 表 % 字段处理完成：已删除 geom、lng_lat_alt，geom_3d → geom', p_table_name;
 END;
 $$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION update_geom_columns(text) IS '整理空间字段';
+COMMENT ON FUNCTION update_geom_columns(text) IS '整理并重命名空间字段';
 
 
 SELECT update_geom_columns('bo_electric_fence');
