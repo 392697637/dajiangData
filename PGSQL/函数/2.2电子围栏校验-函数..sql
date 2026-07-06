@@ -677,7 +677,7 @@ SELECT gis_drop_function('gis_electric_fence_check_line');
 -- =============================================================================
 -- 函数介绍：gis_electric_fence_check_line
 -- 主要作用：检测输入航线是否直接穿越或接触启用中的电子围栏区域
--- 入参说明：p_line_json 为航线LineString/LineStringZ GeoJSON
+-- 入参说明：p_line_json 为航线LineString/LineStringZ GeoJSON、Feature或坐标数组
 -- 返回说明：返回是否冲突、命中围栏属性和相交结果，供航线提交前快速校验
 -- 注意事项：本函数不额外扩航线缓冲，如需安全距离判断请使用带buffer的函数据
 -- =============================================================================
@@ -698,6 +698,7 @@ STABLE
 AS $$
 DECLARE
     v_line geometry;
+    v_line_json jsonb;
     v_fence_3d geometry;
     v_table_name text;
     v_sql text;
@@ -713,13 +714,34 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 2. 解析GeoJSON为几何体，并设置坐标系WGS84(4326)
+    -- 2. 解析航线输入，并设置坐标系WGS84(4326)
     BEGIN
-        v_line := ST_SetSRID(ST_GeomFromGeoJSON(p_line_geojson), 4326);
+        v_line_json := p_line_geojson::jsonb;
+
+        IF jsonb_typeof(v_line_json) = 'array' THEN
+            -- 支持坐标数组输入：[[lng,lat,alt], [lng,lat,alt]]
+            IF jsonb_array_length(v_line_json) < 2 THEN
+                RAISE EXCEPTION 'Line coordinate array requires at least two points';
+            END IF;
+            v_line := ST_GeomFromGeoJSON(
+                jsonb_build_object(
+                    'type', 'LineString',
+                    'coordinates', v_line_json
+                )::text
+            );
+        ELSIF v_line_json ->> 'type' = 'Feature' THEN
+            -- Feature格式：几何数据位于geometry节点。
+            v_line := ST_GeomFromGeoJSON(v_line_json ->> 'geometry');
+        ELSE
+            -- Geometry格式：LineString/MultiLineString。
+            v_line := ST_GeomFromGeoJSON(v_line_json::text);
+        END IF;
+
+        v_line := ST_SetSRID(v_line, 4326);
     EXCEPTION
         WHEN OTHERS THEN
             RETURN QUERY SELECT
-                400, format('GeoJSON格式解析失败：%s，执行时间 %s 秒',
+                400, format('航线GeoJSON/坐标数组解析失败：%s，执行时间 %s 秒',
                     SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
                 false, ''::varchar, NULL::varchar, NULL::json;
             RETURN;
@@ -1435,6 +1457,7 @@ STABLE
 AS $$
 DECLARE
     v_line geometry; -- 存储转换后的线路几何对象
+    v_line_json jsonb;
     v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
 BEGIN
     -- ==============================================
@@ -1449,11 +1472,29 @@ BEGIN
     END IF;
 
     BEGIN
-        v_line := ST_SetSRID(ST_GeomFromGeoJSON(p_line_geojson), 4326);
+        v_line_json := p_line_geojson::jsonb;
+
+        IF jsonb_typeof(v_line_json) = 'array' THEN
+            IF jsonb_array_length(v_line_json) < 2 THEN
+                RAISE EXCEPTION 'Line coordinate array requires at least two points';
+            END IF;
+            v_line := ST_GeomFromGeoJSON(
+                jsonb_build_object(
+                    'type', 'LineString',
+                    'coordinates', v_line_json
+                )::text
+            );
+        ELSIF v_line_json ->> 'type' = 'Feature' THEN
+            v_line := ST_GeomFromGeoJSON(v_line_json ->> 'geometry');
+        ELSE
+            v_line := ST_GeomFromGeoJSON(v_line_json::text);
+        END IF;
+
+        v_line := ST_SetSRID(v_line, 4326);
     EXCEPTION
         WHEN OTHERS THEN
             RETURN QUERY SELECT
-                400, format('GeoJSON格式解析失败：%s，执行时间 %s 秒',
+                400, format('航线GeoJSON/坐标数组解析失败：%s，执行时间 %s 秒',
                     SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
                 NULL::varchar, NULL::json, NULL::json, NULL::json;
             RETURN;
@@ -1524,6 +1565,7 @@ STABLE
 AS $$
 DECLARE
     v_line geometry;
+    v_line_json jsonb;
     v_table_name text;
     v_table_exists boolean;
     v_sql text;
@@ -1538,11 +1580,29 @@ BEGIN
     END IF;
 
     BEGIN
-        v_line := ST_SetSRID(ST_GeomFromGeoJSON(p_line_geojson), 4326);
+        v_line_json := p_line_geojson::jsonb;
+
+        IF jsonb_typeof(v_line_json) = 'array' THEN
+            IF jsonb_array_length(v_line_json) < 2 THEN
+                RAISE EXCEPTION 'Line coordinate array requires at least two points';
+            END IF;
+            v_line := ST_GeomFromGeoJSON(
+                jsonb_build_object(
+                    'type', 'LineString',
+                    'coordinates', v_line_json
+                )::text
+            );
+        ELSIF v_line_json ->> 'type' = 'Feature' THEN
+            v_line := ST_GeomFromGeoJSON(v_line_json ->> 'geometry');
+        ELSE
+            v_line := ST_GeomFromGeoJSON(v_line_json::text);
+        END IF;
+
+        v_line := ST_SetSRID(v_line, 4326);
     EXCEPTION
         WHEN OTHERS THEN
             RETURN QUERY SELECT
-                400, format('GeoJSON格式解析失败：%s，执行时间 %s 秒',
+                400, format('航线GeoJSON/坐标数组解析失败：%s，执行时间 %s 秒',
                     SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
                 NULL::varchar, NULL::json, NULL::json, NULL::json;
             RETURN;
@@ -1738,6 +1798,21 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, doub
 --     }'
 -- );
 
+-- 示例2：坐标数组格式 [[lng,lat,alt], [lng,lat,alt]]
+-- SELECT * FROM public.gis_electric_fence_check_line(
+--     '2c95908e958f3b75019593551f520126',
+--     '[
+--         [113.405861,34.769437,120],
+--         [113.4654075,34.8085025,120]
+--     ]'
+-- );
+
+-- 示例3：Feature格式
+-- SELECT * FROM public.gis_electric_fence_check_line(
+--     '2c95908e958f3b75019593551f520126',
+--     '{"type":"Feature","geometry":{"type":"LineString","coordinates":[[113.405861,34.769437,120],[113.4654075,34.8085025,120]]},"properties":{}}'
+-- );
+
 -- =============================================================================
 -- 4. gis_electric_fence_buffer
 -- 功能：生成围栏缓冲区/3D立体几何。
@@ -1831,6 +1906,16 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, doub
 --             [113.4654075,34.8085025,120]
 --         ]
 --     }',
+--     10
+-- );
+
+-- 示例3：新版调用，坐标数组格式 [[lng,lat,alt], [lng,lat,alt]]
+-- SELECT * FROM public.gis_electric_fence_check_line_buffer(
+--     '2c95908e958f3b75019593551f520126',
+--     '[
+--         [113.405861,34.769437,120],
+--         [113.4654075,34.8085025,120]
+--     ]',
 --     10
 -- );
 
