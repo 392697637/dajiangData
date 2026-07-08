@@ -295,6 +295,8 @@ DECLARE
     -- ====================== 线路几何 ======================
     -- A*算法生成的原始三维线路（未做高度平滑）
     v_path_line     geometry(LineStringZ,4326);
+    -- A*算法生成的初始三维线路（未做可视连线简化）
+    v_raw_path_line geometry(LineStringZ,4326);
     -- 高度平滑后的最终可执行飞行线路
     v_final_path    geometry(LineStringZ,4326);
     
@@ -700,7 +702,8 @@ BEGIN
     v_path_line := ST_AddPoint(v_path_line, v_start_pt);
 
     -- 2. 如果高度模式为直升直降（p_height_mode = 0），则在起点位置添加一个安全高度点（原地爬升）
-    IF p_height_mode = 0 THEN
+    IF p_height_mode = 0
+       AND abs(p_start_alt - p_safe_altitude) > 0.001 THEN
         v_path_line := ST_AddPoint(v_path_line,
             ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_safe_altitude), 4326)
         );
@@ -717,7 +720,8 @@ BEGIN
     END LOOP;
 
     -- 4. 如果高度模式为直升直降，则在终点位置添加一个安全高度点（终点上空悬停）
-    IF p_height_mode = 0 THEN
+    IF p_height_mode = 0
+       AND abs(p_end_alt - p_safe_altitude) > 0.001 THEN
         v_path_line := ST_AddPoint(v_path_line,
             ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_safe_altitude), 4326)
         );
@@ -725,6 +729,7 @@ BEGIN
 
     -- 5. 添加真实终点
     v_path_line := ST_AddPoint(v_path_line, v_end_pt);
+    v_raw_path_line := v_path_line;
 
     -- ====================== 原始路径可视连线简化 ======================
     -- 规则：
@@ -771,104 +776,25 @@ BEGIN
         END LOOP;
     END;
 
- -- ====================== 路径平滑插值（生成实际可飞行的平滑轨迹） ======================
-    v_final_path := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
-    DECLARE
-        -- 每段路径之间插值的点数（值越大轨迹越平滑，但点数越多）
-        v_interp_steps INT := 1;
-        -- 原始路径的总段数（点数-1）
-        v_seg_cnt INT;
-        -- 当前线段的起点和终点几何对象
-        v_p1 geometry; v_p2 geometry;
-        -- 线段起点的经纬度
-        v_lon1 DOUBLE PRECISION; v_lat1 DOUBLE PRECISION;
-        -- 线段终点的经纬度
-        v_lon2 DOUBLE PRECISION; v_lat2 DOUBLE PRECISION;
-        -- 线性插值比例（0~1之间）
-        v_t DOUBLE PRECISION;
-        -- 循环变量：v_ix 为插值步数，s 为线段索引
-        v_ix INT; s INT;
-        -- 当前插值点的经纬度
-        v_curr_lon DOUBLE PRECISION; v_curr_lat DOUBLE PRECISION;
-    BEGIN
-        -- 先添加真实起点
-        v_final_path := ST_AddPoint(v_final_path, v_start_pt);
-        v_seg_cnt := ST_NumPoints(v_path_line) - 1;  -- 原始路径的总段数
-
-        -- 对于直升直降模式，在起点后直接添加一个安全高度点（原地垂直爬升）
-        IF NOT (p_height_mode > 0 AND p_height_mode < 1) THEN
-            v_final_path := ST_AddPoint(v_final_path,
-                ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_safe_altitude), 4326)
-            );
-        END IF;
-
-        -- 遍历原始路径的所有线段，对每段进行线性插值
-        FOR s IN 1..v_seg_cnt LOOP
-            v_p1 := ST_PointN(v_path_line, s);
-            v_p2 := ST_PointN(v_path_line, s+1);
-            v_lon1 := ST_X(v_p1); v_lat1 := ST_Y(v_p1);
-            v_lon2 := ST_X(v_p2); v_lat2 := ST_Y(v_p2);
-
-            -- 在当前线段内生成 v_interp_steps-1 个插值点（两端点已存在，所以减1）
-            FOR v_ix IN 1..v_interp_steps - 1 LOOP
-                v_t := v_ix::DOUBLE PRECISION / v_interp_steps;
-                -- 经纬度线性插值
-                v_curr_lon := v_lon1 + (v_lon2 - v_lon1) * v_t;
-                v_curr_lat := v_lat1 + (v_lat2 - v_lat1) * v_t;
-
-                -- 高度插值逻辑：根据高度模式决定当前点的高度
-                IF p_height_mode > 0 AND p_height_mode < 1 THEN
-                    -- 三段式平滑模式：计算当前点在整条路径中的比例位置
-                    ratio := ((s-1) * v_interp_steps + v_ix)::DOUBLE PRECISION / (v_seg_cnt * v_interp_steps);
-                    IF ratio <= p_height_mode THEN
-                        -- 前 p_height_mode 比例：从起点高度平滑爬升到安全高度
-                        new_z := p_start_alt + (p_safe_altitude - p_start_alt) * (ratio / p_height_mode);
-                    ELSIF ratio >= 1 - p_height_mode THEN
-                        -- 后 p_height_mode 比例：从安全高度平滑下降到终点高度
-                        new_z := p_safe_altitude - (p_safe_altitude - p_end_alt) * ((ratio - (1 - p_height_mode)) / p_height_mode);
-                    ELSE
-                        -- 中间段：保持安全高度平飞
-                        new_z := p_safe_altitude;
-                    END IF;
-                ELSE
-                    -- 直升直降模式：全程使用安全高度（起点/终点高度已在起点/终点点中处理）
-                    new_z := p_safe_altitude;
-                END IF;
-
-                -- 将插值点加入最终路径
-                v_final_path := ST_AddPoint(v_final_path,
-                    ST_SetSRID(ST_MakePoint(v_curr_lon, v_curr_lat, new_z), 4326)
-                );
-            END LOOP;
-        END LOOP;
-
-        -- 对于直升直降模式，在终点前添加一个安全高度点（终点上空悬停）
-        IF NOT (p_height_mode > 0 AND p_height_mode < 1) THEN
-            v_final_path := ST_AddPoint(v_final_path,
-                ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_safe_altitude), 4326)
-            );
-        END IF;
-
-        -- 最后加入真实终点
-        v_final_path := ST_AddPoint(v_final_path, v_end_pt);
-    END;
+    -- 平滑路径当前直接使用简化后的 v_path_line。
+    v_final_path := v_path_line;
 
     -- ====================== 生成原始航点JSON数组 ======================
-    -- 将原始路径（v_path_line）中的每个点转换为JSON对象，包含经度、纬度、高度
+    -- 将A*初始路径（v_raw_path_line）中的每个点转换为JSON对象，包含经度、纬度、高度
     SELECT jsonb_agg(
         jsonb_build_object('lon', ST_X(pt), 'lat', ST_Y(pt), 'alt', ST_Z(pt))
         ORDER BY idx
     ) INTO v_waypoints
     FROM (
-        SELECT (ST_DumpPoints(v_path_line)).geom AS pt,
-               generate_series(1, ST_NumPoints(v_path_line)) AS idx
+        SELECT (ST_DumpPoints(v_raw_path_line)).geom AS pt,
+               generate_series(1, ST_NumPoints(v_raw_path_line)) AS idx
     ) t;
 
     -- ====================== 生成平滑航点JSON数组 ======================
-    -- 将平滑路径（v_final_path）中的每个点转换为JSON对象
+    -- 将简化路径（v_path_line）中的每个点转换为JSON对象
     SELECT jsonb_agg(jsonb_build_object('lon', ST_X(p), 'lat', ST_Y(p), 'alt', ST_Z(p)))
     INTO v_smooth_waypoints
-    FROM (SELECT (ST_DumpPoints(v_final_path)).geom AS p) AS t;
+    FROM (SELECT (ST_DumpPoints(v_path_line)).geom AS p) AS t;
 
     -- 单段核心函数只返回计算结果，最终入库由 gis_flight_paths_plan 汇总后处理。
     DROP TABLE IF EXISTS tmp_grid;
