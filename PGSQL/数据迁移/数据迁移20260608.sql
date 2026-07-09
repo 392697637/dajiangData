@@ -550,6 +550,25 @@ SELECT update_geom_columns('bo_ground_ele');
 ALTER TABLE bo_ground_ele RENAME COLUMN enable TO enabled; 
 ALTER TABLE bo_ground_ele RENAME COLUMN position TO location; 
 
+
+--   修改enabled字段 varchar(10) → bool
+ALTER TABLE "public"."bo_ground_ele"
+ALTER COLUMN "enabled" TYPE boolean USING CASE WHEN "enabled" = '1' THEN true ELSE false END;
+
+--  修改is_hot字段 varchar(10) → bool（允许为空）
+ALTER TABLE "public"."bo_ground_ele"
+ALTER COLUMN "is_hot" TYPE boolean USING CASE WHEN "is_hot" = '1' THEN true WHEN "is_hot" = '0' THEN false ELSE null END;
+
+ 
+
+--  删除旧复制生成的超长主键约束
+ALTER TABLE "public"."bo_ground_ele"
+DROP CONSTRAINT IF EXISTS "bo_ground_ele_copy1_copy1_copy1_copy1_pkey";
+
+-- 创建标准主键约束
+ALTER TABLE "public"."bo_ground_ele"
+ADD CONSTRAINT "bo_ground_ele_pkey" PRIMARY KEY ("id");
+
 ------------------------------------------------------------------------------------------ --   Navicat同步数据
  
 
@@ -587,5 +606,9 @@ ALTER TABLE bo_ground_ele RENAME COLUMN position TO location;
 -- -----------------------------------------------geoserver 自动调用项目服务------------------------------------------
 -- -- PG库调用
 -- SELECT * FROM gis_get_electric_fence_project('%project_id%', '%fence_type%')
+
+
+
+
 
 
