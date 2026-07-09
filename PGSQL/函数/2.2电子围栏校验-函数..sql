@@ -421,6 +421,7 @@ RETURNS TABLE (
     ischeck boolean,
     table_name varchar,
     id varchar(32),
+    geom geometry,
     geom_geojson json
 )
 LANGUAGE plpgsql
@@ -456,7 +457,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            false, ''::varchar, NULL::varchar, NULL::json;
+            false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
         RETURN;
     END IF;
 
@@ -479,7 +480,7 @@ BEGIN
 
             RETURN QUERY SELECT
                 code, msg::varchar,
-                false, ''::varchar, NULL::varchar, NULL::json;
+                false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
             RETURN;
     END;
 
@@ -572,7 +573,7 @@ BEGIN
 
             RETURN QUERY SELECT
                 code, msg::varchar,
-                false, ''::varchar, NULL::varchar, NULL::json;
+                false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
             RETURN;
     END;
 
@@ -592,7 +593,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            false, ''::varchar, NULL::varchar, NULL::json;
+            false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
         RETURN;
     END IF;
 
@@ -636,14 +637,16 @@ BEGIN
                     (hit.id IS NOT NULL) AS ischeck,
                     COALESCE(hit.table_name, '''')::varchar AS table_name,
                     hit.id::varchar(32),
+                    hit.geom,
                     hit.geom_geojson
                 FROM input_points ip
                 LEFT JOIN LATERAL (
-                    SELECT h.table_name, h.id, h.geom_geojson
+                    SELECT h.table_name, h.id, h.geom, h.geom_geojson
                     FROM (
                         SELECT
                             %L::varchar AS table_name,
                             f.id::varchar(32) AS id,
+                            f.geom AS geom,
                             ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
                             1 AS priority
                         FROM %I f
@@ -659,6 +662,7 @@ BEGIN
                         SELECT
                             ''bo_electric_fence''::varchar AS table_name,
                             f.id::varchar(32) AS id,
+                            f.geom AS geom,
                             ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
                             2 AS priority
                         FROM bo_electric_fence f
@@ -696,12 +700,14 @@ BEGIN
                     (hit.id IS NOT NULL) AS ischeck,
                     COALESCE(hit.table_name, '''')::varchar AS table_name,
                     hit.id::varchar(32),
+                    hit.geom,
                     hit.geom_geojson
                 FROM input_points ip
                 LEFT JOIN LATERAL (
                     SELECT
                         ''bo_electric_fence''::varchar AS table_name,
                         f.id::varchar(32) AS id,
+                        f.geom AS geom,
                         ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                     FROM bo_electric_fence f
                     WHERE f.fence_type = ''1''
@@ -740,6 +746,7 @@ BEGIN
             (hit.id IS NOT NULL) AS ischeck,
             COALESCE(hit.table_name, '')::varchar AS table_name,
             hit.id::varchar(32),
+            hit.geom,
             hit.geom_geojson
         FROM (
             SELECT d.path, d.geom AS geom
@@ -749,6 +756,7 @@ BEGIN
             SELECT
                 'bo_electric_fence'::varchar AS table_name,
                 f.id::varchar(32) AS id,
+                f.geom AS geom,
                 ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
             FROM bo_electric_fence f
             WHERE f.fence_type = '1'        -- 围栏类型：禁飞区
@@ -778,7 +786,7 @@ BEGIN
         RETURN QUERY SELECT
             200, format('当前位置不在禁飞区内，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
-            false, ''::varchar, NULL::varchar, NULL::json;
+            false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
         RETURN;
     END IF;
 
@@ -799,7 +807,7 @@ EXCEPTION
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            false, ''::varchar, NULL::varchar, NULL::json;
+            false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
 END;
 $$;
 COMMENT ON FUNCTION public.gis_electric_fence_check_point(text, text) IS '检测航点落入围栏';
@@ -846,6 +854,7 @@ RETURNS TABLE (
     ischeck boolean,
     table_name varchar,
     id varchar(32),
+    geom geometry,
     geom_geojson json
 )
 LANGUAGE plpgsql
@@ -878,7 +887,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            false, ''::varchar, NULL::varchar, NULL::json;
+            false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
         RETURN;
     END IF;
 
@@ -945,7 +954,7 @@ BEGIN
 
             RETURN QUERY SELECT
                 code, msg::varchar,
-                false, ''::varchar, NULL::varchar, NULL::json;
+                false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
             RETURN;
     END;
 
@@ -963,7 +972,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            false, ''::varchar, NULL::varchar, NULL::json;
+            false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
         RETURN;
     END IF;
 
@@ -992,14 +1001,16 @@ BEGIN
                     (hit.id IS NOT NULL) AS ischeck,
                     COALESCE(hit.table_name, '''')::varchar AS table_name,
                     hit.id::varchar(32),
+                    hit.geom,
                     hit.geom_geojson
                 FROM input_lines il
                 LEFT JOIN LATERAL (
-                    SELECT h.table_name, h.id, h.geom_geojson
+                    SELECT h.table_name, h.id, h.geom, h.geom_geojson
                     FROM (
                         SELECT
                             %L::varchar AS table_name,
                             f.id::varchar(32) AS id,
+                            f.geom AS geom,
                             ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
                             1 AS priority
                         FROM %I f
@@ -1015,6 +1026,7 @@ BEGIN
                         SELECT
                             ''bo_electric_fence''::varchar AS table_name,
                             f.id::varchar(32) AS id,
+                            f.geom AS geom,
                             ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
                             2 AS priority
                         FROM bo_electric_fence f
@@ -1050,12 +1062,14 @@ BEGIN
                     (hit.id IS NOT NULL) AS ischeck,
                     COALESCE(hit.table_name, '''')::varchar AS table_name,
                     hit.id::varchar(32),
+                    hit.geom,
                     hit.geom_geojson
                 FROM input_lines il
                 LEFT JOIN LATERAL (
                     SELECT
                         ''bo_electric_fence''::varchar AS table_name,
                         f.id::varchar(32) AS id,
+                        f.geom AS geom,
                         ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                     FROM bo_electric_fence f
                     WHERE f.del_flag = false
@@ -1086,12 +1100,14 @@ BEGIN
                 (hit.id IS NOT NULL) AS ischeck,
                 COALESCE(hit.table_name, '''')::varchar AS table_name,
                 hit.id::varchar(32),
+                hit.geom,
                 hit.geom_geojson
             FROM input_lines il
             LEFT JOIN LATERAL (
                 SELECT
                     ''bo_electric_fence''::varchar AS table_name,
                     f.id::varchar(32) AS id,
+                    f.geom AS geom,
                     ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
@@ -1115,7 +1131,7 @@ BEGIN
         RETURN QUERY SELECT
             200, format('航线未闯入任何电子围栏，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
-            false, ''::varchar, NULL::varchar, NULL::json;
+            false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
     END IF;
 
 -- 异常捕获
@@ -1133,7 +1149,7 @@ EXCEPTION
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            false, ''::varchar, NULL::varchar, NULL::json;
+            false, ''::varchar, NULL::varchar, NULL::geometry, NULL::json;
 END;
 $$;
 COMMENT ON FUNCTION public.gis_electric_fence_check_line(text, text) IS '检测航线穿越围栏';
@@ -1196,6 +1212,7 @@ RETURNS TABLE (
     code integer,
     msg varchar,
     id varchar(32),
+    geom geometry,
     geom_geojson json,
     buffer_2d_geojson json,
     solid_3d_geojson json
@@ -1235,7 +1252,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
         -- 终止函数执行
         RETURN;
     END IF;
@@ -1266,7 +1283,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
 
@@ -1315,6 +1332,7 @@ BEGIN
         format('成功，执行时间 %s 秒',
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,            -- 提示信息
         v_fence_record.id::varchar, -- 围栏ID
+        v_fence_record.geom,
         -- 原始围栏几何 GeoJSON
         ST_AsGeoJSON(ST_SetSRID(v_fence_record.geom, 4326))::json,
         -- 2D缓冲几何 GeoJSON
@@ -1339,7 +1357,7 @@ EXCEPTION
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
 END;
 $$;
 COMMENT ON FUNCTION public.gis_electric_fence_buffer(varchar, double precision) IS '生成电子围栏缓冲区';
@@ -1354,6 +1372,7 @@ RETURNS TABLE (
     code integer,
     msg varchar,
     id varchar(32),
+    geom geometry,
     geom_geojson json,
     buffer_2d_geojson json,
     solid_3d_geojson json
@@ -1384,14 +1403,16 @@ BEGIN
             v_sql := format('
                 WITH src AS (
                     SELECT f.id::varchar AS id,
-                           ST_SetSRID(f.geom, 4326) AS geom,
+                           f.geom AS geom,
+                           ST_SetSRID(f.geom, 4326) AS calc_geom,
                            COALESCE(f.height, 0)::double precision AS height
                     FROM %I f
                     WHERE f.geom IS NOT NULL
                       AND ($1 IS NULL OR btrim($1) = '''' OR f.id::varchar = btrim($1))
                     UNION ALL
                     SELECT f.id::varchar AS id,
-                           ST_SetSRID(f.geom, 4326) AS geom,
+                           f.geom AS geom,
+                           ST_SetSRID(f.geom, 4326) AS calc_geom,
                            COALESCE(f.height, 0)::double precision AS height
                     FROM bo_electric_fence f
                     WHERE f.del_flag = false
@@ -1403,15 +1424,16 @@ BEGIN
                     200 AS code,
                     format(''成功，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $4)::numeric, 3))::varchar AS msg,
                     src.id::varchar(32),
-                    ST_AsGeoJSON(src.geom)::json AS geom_geojson,
+                    src.geom,
+                    ST_AsGeoJSON(src.calc_geom)::json AS geom_geojson,
                     ST_AsGeoJSON(buf.buffer_geom)::json AS buffer_2d_geojson,
                     ST_AsGeoJSON(solid.solid_geom)::json AS solid_3d_geojson
                 FROM src
                 CROSS JOIN LATERAL (
                     SELECT CASE
-                        WHEN COALESCE($3, 0) = 0 THEN ST_Force2D(src.geom)
+                        WHEN COALESCE($3, 0) = 0 THEN ST_Force2D(src.calc_geom)
                         ELSE ST_Transform(
-                            ST_Buffer(ST_Transform(ST_Force2D(src.geom), 3857), COALESCE($3, 0)),
+                            ST_Buffer(ST_Transform(ST_Force2D(src.calc_geom), 3857), COALESCE($3, 0)),
                             4326
                         )
                     END AS buffer_geom
@@ -1428,7 +1450,8 @@ BEGIN
             v_sql := '
                 WITH src AS (
                     SELECT f.id::varchar AS id,
-                           ST_SetSRID(f.geom, 4326) AS geom,
+                           f.geom AS geom,
+                           ST_SetSRID(f.geom, 4326) AS calc_geom,
                            COALESCE(f.height, 0)::double precision AS height
                     FROM bo_electric_fence f
                     WHERE f.del_flag = false
@@ -1440,15 +1463,16 @@ BEGIN
                     200 AS code,
                     format(''成功，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $4)::numeric, 3))::varchar AS msg,
                     src.id::varchar(32),
-                    ST_AsGeoJSON(src.geom)::json AS geom_geojson,
+                    src.geom,
+                    ST_AsGeoJSON(src.calc_geom)::json AS geom_geojson,
                     ST_AsGeoJSON(buf.buffer_geom)::json AS buffer_2d_geojson,
                     ST_AsGeoJSON(solid.solid_geom)::json AS solid_3d_geojson
                 FROM src
                 CROSS JOIN LATERAL (
                     SELECT CASE
-                        WHEN COALESCE($3, 0) = 0 THEN ST_Force2D(src.geom)
+                        WHEN COALESCE($3, 0) = 0 THEN ST_Force2D(src.calc_geom)
                         ELSE ST_Transform(
-                            ST_Buffer(ST_Transform(ST_Force2D(src.geom), 3857), COALESCE($3, 0)),
+                            ST_Buffer(ST_Transform(ST_Force2D(src.calc_geom), 3857), COALESCE($3, 0)),
                             4326
                         )
                     END AS buffer_geom
@@ -1464,7 +1488,8 @@ BEGIN
         v_sql := '
             WITH src AS (
                 SELECT f.id::varchar AS id,
-                       ST_SetSRID(f.geom, 4326) AS geom,
+                       f.geom AS geom,
+                       ST_SetSRID(f.geom, 4326) AS calc_geom,
                        COALESCE(f.height, 0)::double precision AS height
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
@@ -1475,15 +1500,16 @@ BEGIN
                 200 AS code,
                 format(''成功，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $4)::numeric, 3))::varchar AS msg,
                 src.id::varchar(32),
-                ST_AsGeoJSON(src.geom)::json AS geom_geojson,
+                src.geom,
+                ST_AsGeoJSON(src.calc_geom)::json AS geom_geojson,
                 ST_AsGeoJSON(buf.buffer_geom)::json AS buffer_2d_geojson,
                 ST_AsGeoJSON(solid.solid_geom)::json AS solid_3d_geojson
             FROM src
             CROSS JOIN LATERAL (
                 SELECT CASE
-                    WHEN COALESCE($3, 0) = 0 THEN ST_Force2D(src.geom)
+                    WHEN COALESCE($3, 0) = 0 THEN ST_Force2D(src.calc_geom)
                     ELSE ST_Transform(
-                        ST_Buffer(ST_Transform(ST_Force2D(src.geom), 3857), COALESCE($3, 0)),
+                        ST_Buffer(ST_Transform(ST_Force2D(src.calc_geom), 3857), COALESCE($3, 0)),
                         4326
                     )
                 END AS buffer_geom
@@ -1511,7 +1537,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
     END IF;
 
 EXCEPTION
@@ -1528,7 +1554,7 @@ EXCEPTION
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
 END;
 $$;
 COMMENT ON FUNCTION public.gis_electric_fence_buffer(text, varchar, double precision) IS '生成电子围栏缓冲区';
@@ -1548,6 +1574,7 @@ RETURNS TABLE (
     code integer,
     msg varchar,
     id varchar(32),
+    geom geometry,
     geom_geojson json,
     buffer_2d_geojson json,
     solid_3d_geojson json
@@ -1581,7 +1608,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
 
@@ -1630,7 +1657,7 @@ BEGIN
 
             RETURN QUERY SELECT
                 code, msg::varchar,
-                NULL::varchar, NULL::json, NULL::json, NULL::json;
+                NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
             RETURN;
     END;
 
@@ -1647,7 +1674,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
 
@@ -1667,12 +1694,12 @@ BEGIN
     IF v_table_exists THEN
         v_sql := format('
             WITH fences AS (
-                SELECT f.id::varchar AS id, ST_SetSRID(f.geom, 4326) AS geom,
+                SELECT f.id::varchar AS id, f.geom AS geom, ST_SetSRID(f.geom, 4326) AS calc_geom,
                        COALESCE(f.height, 0)::double precision AS height
                 FROM %I f
                 WHERE f.geom IS NOT NULL
                 UNION ALL
-                SELECT f.id::varchar AS id, ST_SetSRID(f.geom, 4326) AS geom,
+                SELECT f.id::varchar AS id, f.geom AS geom, ST_SetSRID(f.geom, 4326) AS calc_geom,
                        COALESCE(f.height, 0)::double precision AS height
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
@@ -1683,7 +1710,8 @@ BEGIN
                 200 AS code,
                 format(''检测到航点闯入电子围栏缓冲区，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $4)::numeric, 3))::varchar AS msg,
                 f.id::varchar(32),
-                ST_AsGeoJSON(f.geom)::json AS geom_geojson,
+                f.geom,
+                ST_AsGeoJSON(f.calc_geom)::json AS geom_geojson,
                 ST_AsGeoJSON(buf.buffer_geom)::json AS buffer_2d_geojson,
                 ST_AsGeoJSON(ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
@@ -1692,8 +1720,8 @@ BEGIN
             FROM fences f
             CROSS JOIN LATERAL (
                 SELECT CASE
-                    WHEN COALESCE($2, 0) = 0 THEN ST_Force2D(f.geom)
-                    ELSE ST_Transform(ST_Buffer(ST_Transform(ST_Force2D(f.geom), 3857), COALESCE($2, 0)), 4326)
+                    WHEN COALESCE($2, 0) = 0 THEN ST_Force2D(f.calc_geom)
+                    ELSE ST_Transform(ST_Buffer(ST_Transform(ST_Force2D(f.calc_geom), 3857), COALESCE($2, 0)), 4326)
                 END AS buffer_geom
             ) buf
             WHERE ST_Covers(buf.buffer_geom, $1)
@@ -1703,7 +1731,7 @@ BEGIN
     ELSE
         v_sql := '
             WITH fences AS (
-                SELECT f.id::varchar AS id, ST_SetSRID(f.geom, 4326) AS geom,
+                SELECT f.id::varchar AS id, f.geom AS geom, ST_SetSRID(f.geom, 4326) AS calc_geom,
                        COALESCE(f.height, 0)::double precision AS height
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
@@ -1714,7 +1742,8 @@ BEGIN
                 200 AS code,
                 format(''检测到航点闯入电子围栏缓冲区，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $4)::numeric, 3))::varchar AS msg,
                 f.id::varchar(32),
-                ST_AsGeoJSON(f.geom)::json AS geom_geojson,
+                f.geom,
+                ST_AsGeoJSON(f.calc_geom)::json AS geom_geojson,
                 ST_AsGeoJSON(buf.buffer_geom)::json AS buffer_2d_geojson,
                 ST_AsGeoJSON(ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
@@ -1723,8 +1752,8 @@ BEGIN
             FROM fences f
             CROSS JOIN LATERAL (
                 SELECT CASE
-                    WHEN COALESCE($2, 0) = 0 THEN ST_Force2D(f.geom)
-                    ELSE ST_Transform(ST_Buffer(ST_Transform(ST_Force2D(f.geom), 3857), COALESCE($2, 0)), 4326)
+                    WHEN COALESCE($2, 0) = 0 THEN ST_Force2D(f.calc_geom)
+                    ELSE ST_Transform(ST_Buffer(ST_Transform(ST_Force2D(f.calc_geom), 3857), COALESCE($2, 0)), 4326)
                 END AS buffer_geom
             ) buf
             WHERE ST_Covers(buf.buffer_geom, $1)
@@ -1737,7 +1766,7 @@ BEGIN
         RETURN QUERY SELECT
             200, format('航点未闯入任何电子围栏缓冲区，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
     END IF;
 
 EXCEPTION
@@ -1754,7 +1783,7 @@ EXCEPTION
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
 END;
 $$;
 COMMENT ON FUNCTION public.gis_electric_fence_check_point_buffer(text, text, double precision) IS '检测航点缓冲区冲突';
@@ -1810,6 +1839,7 @@ RETURNS TABLE (
     code integer,
     msg varchar,
     id varchar(32),
+    geom geometry,
     geom_geojson json,
     buffer_2d_geojson json,
     solid_3d_geojson json
@@ -1842,7 +1872,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
 
@@ -1880,7 +1910,7 @@ BEGIN
 
             RETURN QUERY SELECT
                 code, msg::varchar,
-                NULL::varchar, NULL::json, NULL::json, NULL::json;
+                NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
             RETURN;
     END;
 
@@ -1894,6 +1924,7 @@ BEGIN
             res.msg,
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar AS msg,
         res.id,
+        res.geom,
         res.geom_geojson,
         res.buffer_2d_geojson,
         res.solid_3d_geojson
@@ -1917,7 +1948,7 @@ BEGIN
         RETURN QUERY SELECT
             200, format('航线未闯入任何电子围栏，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
     END IF;
 
 EXCEPTION
@@ -1934,7 +1965,7 @@ EXCEPTION
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
 END;
 $$;
 COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, double precision) IS '检测航线缓冲区冲突';
@@ -1949,6 +1980,7 @@ RETURNS TABLE (
     code integer,
     msg varchar,
     id varchar(32),
+    geom geometry,
     geom_geojson json,
     buffer_2d_geojson json,
     solid_3d_geojson json
@@ -1981,7 +2013,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
         RETURN;
     END IF;
 
@@ -2019,7 +2051,7 @@ BEGIN
 
             RETURN QUERY SELECT
                 code, msg::varchar,
-                NULL::varchar, NULL::json, NULL::json, NULL::json;
+                NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
             RETURN;
     END;
 
@@ -2037,12 +2069,12 @@ BEGIN
     IF v_table_exists THEN
         v_sql := format('
             WITH fences AS (
-                SELECT f.id::varchar AS id, ST_SetSRID(f.geom, 4326) AS geom,
+                SELECT f.id::varchar AS id, f.geom AS geom, ST_SetSRID(f.geom, 4326) AS calc_geom,
                        COALESCE(f.height, 0)::double precision AS height
                 FROM %I f
                 WHERE f.geom IS NOT NULL
                 UNION ALL
-                SELECT f.id::varchar AS id, ST_SetSRID(f.geom, 4326) AS geom,
+                SELECT f.id::varchar AS id, f.geom AS geom, ST_SetSRID(f.geom, 4326) AS calc_geom,
                        COALESCE(f.height, 0)::double precision AS height
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
@@ -2053,7 +2085,8 @@ BEGIN
                 200 AS code,
                 format(''检测到航线缓冲区闯入电子围栏，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
                 f.id::varchar(32),
-                ST_AsGeoJSON(f.geom)::json AS geom_geojson,
+                f.geom,
+                ST_AsGeoJSON(f.calc_geom)::json AS geom_geojson,
                 ST_AsGeoJSON(buf.buffer_geom)::json AS buffer_2d_geojson,
                 ST_AsGeoJSON(ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
@@ -2062,8 +2095,8 @@ BEGIN
             FROM fences f
             CROSS JOIN LATERAL (
                 SELECT CASE
-                    WHEN COALESCE($1, 0) = 0 THEN ST_Force2D(f.geom)
-                    ELSE ST_Transform(ST_Buffer(ST_Transform(ST_Force2D(f.geom), 3857), COALESCE($1, 0)), 4326)
+                    WHEN COALESCE($1, 0) = 0 THEN ST_Force2D(f.calc_geom)
+                    ELSE ST_Transform(ST_Buffer(ST_Transform(ST_Force2D(f.calc_geom), 3857), COALESCE($1, 0)), 4326)
                 END AS buffer_geom
             ) buf
             CROSS JOIN LATERAL (
@@ -2075,7 +2108,7 @@ BEGIN
     ELSE
         v_sql := '
             WITH fences AS (
-                SELECT f.id::varchar AS id, ST_SetSRID(f.geom, 4326) AS geom,
+                SELECT f.id::varchar AS id, f.geom AS geom, ST_SetSRID(f.geom, 4326) AS calc_geom,
                        COALESCE(f.height, 0)::double precision AS height
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
@@ -2086,7 +2119,8 @@ BEGIN
                 200 AS code,
                 format(''检测到航线缓冲区闯入电子围栏，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
                 f.id::varchar(32),
-                ST_AsGeoJSON(f.geom)::json AS geom_geojson,
+                f.geom,
+                ST_AsGeoJSON(f.calc_geom)::json AS geom_geojson,
                 ST_AsGeoJSON(buf.buffer_geom)::json AS buffer_2d_geojson,
                 ST_AsGeoJSON(ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
@@ -2095,8 +2129,8 @@ BEGIN
             FROM fences f
             CROSS JOIN LATERAL (
                 SELECT CASE
-                    WHEN COALESCE($1, 0) = 0 THEN ST_Force2D(f.geom)
-                    ELSE ST_Transform(ST_Buffer(ST_Transform(ST_Force2D(f.geom), 3857), COALESCE($1, 0)), 4326)
+                    WHEN COALESCE($1, 0) = 0 THEN ST_Force2D(f.calc_geom)
+                    ELSE ST_Transform(ST_Buffer(ST_Transform(ST_Force2D(f.calc_geom), 3857), COALESCE($1, 0)), 4326)
                 END AS buffer_geom
             ) buf
             CROSS JOIN LATERAL (
@@ -2111,7 +2145,7 @@ BEGIN
         RETURN QUERY SELECT
             200, format('航线未闯入任何电子围栏缓冲区，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
     END IF;
 
 EXCEPTION
@@ -2128,7 +2162,7 @@ EXCEPTION
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            NULL::varchar, NULL::json, NULL::json, NULL::json;
+            NULL::varchar, NULL::geometry, NULL::json, NULL::json, NULL::json;
 END;
 $$;
 COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, double precision) IS '检测航线缓冲区冲突';
