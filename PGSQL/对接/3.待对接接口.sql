@@ -13,6 +13,7 @@
 --   p_project_id      text               项目ID；为空时只查公共表
 --   p_fence_id        varchar(32)        围栏ID；为空返回项目/公共范围内全部围栏
 --   p_buffer_radius   double precision   缓冲半径，单位：米；0表示不缓冲
+--   p_return_geojson  boolean            是否返回GeoJSON，默认false；需要前端直接使用GeoJSON时传true
 -- 返回：
 --   code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 -- chek_type：
@@ -23,7 +24,8 @@ SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojs
 FROM public.gis_electric_fence_buffer(
     '2c95908e958f3b75019593551f520126',
     '2052290479526682626',
-    30
+    30,
+    true
 );
 
 -- p_fence_id 为空：返回全部围栏缓冲数据
@@ -31,7 +33,8 @@ SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojs
 FROM public.gis_electric_fence_buffer(
     '2c95908e958f3b75019593551f520126',
     NULL,
-    30
+    30,
+    false
 );
 
 -- 无项目ID且 p_fence_id 为空：返回公共表全部围栏
@@ -39,7 +42,8 @@ SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojs
 FROM public.gis_electric_fence_buffer(
     NULL,
     NULL,
-    0
+    0,
+    false
 );
 
 -- ============================================================================
@@ -49,6 +53,7 @@ FROM public.gis_electric_fence_buffer(
 --   p_project_id      text               项目ID；为空时只查公共表
 --   p_point_geojson   text               Point/PointZ GeoJSON、Feature，或 [lng,lat,alt]
 --   p_buffer_radius   double precision   缓冲半径，单位：米；0表示不缓冲
+--   p_return_geojson  boolean            是否返回围栏/缓冲/立体GeoJSON，默认false；需要前端直接使用GeoJSON时传true
 -- 返回：
 --   code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 -- chek_type：
@@ -59,14 +64,16 @@ SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojs
 FROM public.gis_electric_fence_check_point_buffer(
     '2c95908e958f3b75019593551f520126',
     '{"type":"Point","coordinates":[113.405861,34.769437,120]}',
-    10
+    10,
+    true
 );
 
 SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_point_buffer(
     '2c95908e958f3b75019593551f520126',
     '[113.405861,34.769437,120]',
-    10
+    10,
+    false
 );
 
 -- ============================================================================
@@ -76,6 +83,7 @@ FROM public.gis_electric_fence_check_point_buffer(
 --   p_project_id      text               项目ID；为空时只查公共表
 --   p_line_geojson    text               LineString/MultiLineString GeoJSON、Feature，或 [[lng,lat,alt], ...]
 --   p_buffer_radius   double precision   缓冲半径，单位：米；0表示不缓冲
+--   p_return_geojson  boolean            是否返回围栏/缓冲/立体GeoJSON，默认false；需要前端直接使用GeoJSON时传true
 -- 返回：
 --   code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 -- chek_type：
@@ -94,7 +102,8 @@ FROM public.gis_electric_fence_check_line_buffer(
             [113.4654075,34.8085025,120]
         ]
     }',
-    10
+    10,
+    true
 );
 
 SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
@@ -104,5 +113,6 @@ FROM public.gis_electric_fence_check_line_buffer(
         [113.405861,34.769437,120],
         [113.4654075,34.8085025,120]
     ]',
-    10
+    10,
+    false
 );

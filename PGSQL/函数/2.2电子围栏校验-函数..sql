@@ -1014,17 +1014,11 @@ BEGIN
                 SELECT
                     200 AS code,
                     CASE
-                        WHEN hit.id IS NULL THEN format(''航线未闯入任何电子围栏，chek_type=l_outside(线完全在面外)，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
-                        ELSE format(''检测到航线闯入电子围栏，chek_type=%%s，执行时间 %%s 秒'',
-                            CASE
-                                WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within(线完全在面内)''
-                                WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering(线穿入/穿出面（一端在内，一端在外）)''
-                                ELSE ''l_crosses(线穿过面（贯穿，两端在外）)''
-                            END,
-                            ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                        WHEN hit.id IS NULL THEN format(''航线未闯入任何电子围栏，chek_type=%%s，执行时间 %%s 秒'', ct.chek_type_msg, ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                        ELSE format(''检测到航线闯入电子围栏，chek_type=%%s，执行时间 %%s 秒'', ct.chek_type_msg, ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
                     END::varchar AS msg,
                     (hit.id IS NOT NULL) AS ischeck,
-                CASE WHEN hit.id IS NULL THEN ''l_outside'' WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within'' WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering'' ELSE ''l_crosses'' END::varchar AS chek_type,
+                ct.chek_type,
                 COALESCE(hit.table_name, '''')::varchar AS table_name,
                 il.geom,
                     hit.id::varchar(32) AS electric_id,
@@ -1077,6 +1071,24 @@ BEGIN
                     ORDER BY h.priority
                     LIMIT 1
                 ) hit ON true
+                CROSS JOIN LATERAL (
+                    SELECT
+                        x.chek_type,
+                        CASE x.chek_type
+                            WHEN ''l_outside'' THEN ''l_outside(线完全在面外)''
+                            WHEN ''l_within'' THEN ''l_within(线完全在面内)''
+                            WHEN ''l_entering'' THEN ''l_entering(线穿入/穿出面（一端在内，一端在外）)''
+                            ELSE ''l_crosses(线穿过面（贯穿，两端在外）)''
+                        END::varchar AS chek_type_msg
+                    FROM (
+                        SELECT CASE
+                            WHEN hit.id IS NULL THEN ''l_outside''
+                            WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within''
+                            WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering''
+                            ELSE ''l_crosses''
+                        END::varchar AS chek_type
+                    ) x
+                ) ct
                 ORDER BY il.path',
                 v_table_name,
                 v_table_name
@@ -1090,17 +1102,11 @@ BEGIN
                 SELECT
                     200 AS code,
                     CASE
-                        WHEN hit.id IS NULL THEN format(''航线未闯入任何电子围栏，chek_type=l_outside(线完全在面外)，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
-                        ELSE format(''检测到航线闯入电子围栏，chek_type=%s，执行时间 %s 秒'',
-                            CASE
-                                WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within(线完全在面内)''
-                                WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering(线穿入/穿出面（一端在内，一端在外）)''
-                                ELSE ''l_crosses(线穿过面（贯穿，两端在外）)''
-                            END,
-                            ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                        WHEN hit.id IS NULL THEN format(''航线未闯入任何电子围栏，chek_type=%s，执行时间 %s 秒'', ct.chek_type_msg, ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                        ELSE format(''检测到航线闯入电子围栏，chek_type=%s，执行时间 %s 秒'', ct.chek_type_msg, ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
                     END::varchar AS msg,
                     (hit.id IS NOT NULL) AS ischeck,
-                CASE WHEN hit.id IS NULL THEN ''l_outside'' WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within'' WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering'' ELSE ''l_crosses'' END::varchar AS chek_type,
+                ct.chek_type,
                 COALESCE(hit.table_name, '''')::varchar AS table_name,
                 il.geom,
                     hit.id::varchar(32) AS electric_id,
@@ -1129,6 +1135,24 @@ BEGIN
                       )
                     LIMIT 1
                 ) hit ON true
+                CROSS JOIN LATERAL (
+                    SELECT
+                        x.chek_type,
+                        CASE x.chek_type
+                            WHEN ''l_outside'' THEN ''l_outside(线完全在面外)''
+                            WHEN ''l_within'' THEN ''l_within(线完全在面内)''
+                            WHEN ''l_entering'' THEN ''l_entering(线穿入/穿出面（一端在内，一端在外）)''
+                            ELSE ''l_crosses(线穿过面（贯穿，两端在外）)''
+                        END::varchar AS chek_type_msg
+                    FROM (
+                        SELECT CASE
+                            WHEN hit.id IS NULL THEN ''l_outside''
+                            WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within''
+                            WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering''
+                            ELSE ''l_crosses''
+                        END::varchar AS chek_type
+                    ) x
+                ) ct
                 ORDER BY il.path';
         END IF;
     ELSE
@@ -1140,17 +1164,11 @@ BEGIN
             SELECT
                 200 AS code,
                 CASE
-                    WHEN hit.id IS NULL THEN format(''航线未闯入任何电子围栏，chek_type=l_outside(线完全在面外)，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
-                    ELSE format(''检测到航线闯入电子围栏，chek_type=%s，执行时间 %s 秒'',
-                        CASE
-                            WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within(线完全在面内)''
-                            WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering(线穿入/穿出面（一端在内，一端在外）)''
-                            ELSE ''l_crosses(线穿过面（贯穿，两端在外）)''
-                        END,
-                        ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                    WHEN hit.id IS NULL THEN format(''航线未闯入任何电子围栏，chek_type=%s，执行时间 %s 秒'', ct.chek_type_msg, ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
+                    ELSE format(''检测到航线闯入电子围栏，chek_type=%s，执行时间 %s 秒'', ct.chek_type_msg, ROUND(EXTRACT(epoch FROM clock_timestamp() - $2)::numeric, 3))
                 END::varchar AS msg,
                 (hit.id IS NOT NULL) AS ischeck,
-                CASE WHEN hit.id IS NULL THEN ''l_outside'' WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within'' WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering'' ELSE ''l_crosses'' END::varchar AS chek_type,
+                ct.chek_type,
                 COALESCE(hit.table_name, '''')::varchar AS table_name,
                 il.geom,
                 hit.id::varchar(32) AS electric_id,
@@ -1179,6 +1197,24 @@ BEGIN
                   )
                 LIMIT 1
             ) hit ON true
+            CROSS JOIN LATERAL (
+                SELECT
+                    x.chek_type,
+                    CASE x.chek_type
+                        WHEN ''l_outside'' THEN ''l_outside(线完全在面外)''
+                        WHEN ''l_within'' THEN ''l_within(线完全在面内)''
+                        WHEN ''l_entering'' THEN ''l_entering(线穿入/穿出面（一端在内，一端在外）)''
+                        ELSE ''l_crosses(线穿过面（贯穿，两端在外）)''
+                    END::varchar AS chek_type_msg
+                FROM (
+                    SELECT CASE
+                        WHEN hit.id IS NULL THEN ''l_outside''
+                        WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within''
+                        WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering''
+                        ELSE ''l_crosses''
+                    END::varchar AS chek_type
+                ) x
+            ) ct
             ORDER BY il.path';
     END IF;
 
@@ -1265,7 +1301,8 @@ SELECT gis_drop_function('gis_electric_fence_buffer');
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_buffer(
     p_fence_id varchar(32),        -- 入参1：围栏ID
-    p_buffer_radius double precision -- 入参2：缓冲半径（米）
+    p_buffer_radius double precision, -- 入参2：缓冲半径（米）
+    p_return_geojson boolean DEFAULT false -- 是否返回GeoJSON
 )
 -- 定义函数返回的表结构（字段顺序、类型必须严格匹配）
 RETURNS TABLE (
@@ -1296,8 +1333,8 @@ DECLARE
     v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
     v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
-    v_log_sql := format('SELECT * FROM public.gis_electric_fence_buffer(%L, %s);',
-        p_fence_id, COALESCE(p_buffer_radius::text, 'NULL'));
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_buffer(%L, %s, %L);',
+        p_fence_id, COALESCE(p_buffer_radius::text, 'NULL'), p_return_geojson);
 
     -- ==============================================
     -- 1. 入参合法性校验：围栏ID 不能为空/空字符串
@@ -1356,37 +1393,37 @@ BEGIN
     -- 4. 计算2D缓冲几何（核心GIS逻辑
     -- ==============================================
     SELECT
-        CASE
-            -- 情况1：缓冲半0 直接使用原始围栏几何，设置坐标系4326(WGS84)
-            WHEN p_buffer_radius = 0 THEN
-                ST_SetSRID(v_fence_record.geom, 4326)
-            -- 情况2：半0 计算缓冲突
-            ELSE
-                -- 步骤326857（墨卡托，米单位）→ 做缓转回4326
-                ST_Transform(
-                    ST_Buffer(
-                        ST_Transform(ST_SetSRID(v_fence_record.geom,4326),3857),
-                        p_buffer_radius
-                    ),
-                    4326
-                )
-        END
+            CASE
+                -- 情况1：缓冲半0 直接使用原始围栏几何，设置坐标系4326(WGS84)
+                WHEN p_buffer_radius = 0 THEN
+                    ST_SetSRID(v_fence_record.geom, 4326)
+                -- 情况2：半0 计算缓冲突
+                ELSE
+                    -- 步骤326857（墨卡托，米单位）→ 做缓转回4326
+                    ST_Transform(
+                        ST_Buffer(
+                            ST_Transform(ST_SetSRID(v_fence_record.geom,4326),3857),
+                            p_buffer_radius
+                        ),
+                        4326
+                    )
+            END
     INTO v_buffer_geom; -- 结果存入缓冲几何变量
 
     -- ==============================================
     -- 5. 构建3D立体几何体（底部+顶部
     -- ==============================================
     SELECT
-        -- 转换为多几何对象（兼容前端渲染）
-        ST_Multi(
-            -- 合并两个3D面：底部(Z=0) + 顶部(Z=围栏高度)
-            ST_Collect(
-                -- 底部面：Z坐标=0
-                ST_Force3DZ(v_buffer_geom, 0),
-                -- 顶部面：Z坐标=围栏高度（空值则
-                ST_Force3DZ(v_buffer_geom, COALESCE(v_fence_record.height, 0))
+            -- 转换为多几何对象（兼容前端渲染）
+            ST_Multi(
+                -- 合并两个3D面：底部(Z=0) + 顶部(Z=围栏高度)
+                ST_Collect(
+                    -- 底部面：Z坐标=0
+                    ST_Force3DZ(v_buffer_geom, 0),
+                    -- 顶部面：Z坐标=围栏高度（空值则
+                    ST_Force3DZ(v_buffer_geom, COALESCE(v_fence_record.height, 0))
+                )
             )
-        )
     INTO v_3d_geom; -- 结果存入3D几何变量
 
     -- ==============================================
@@ -1394,16 +1431,20 @@ BEGIN
     -- ==============================================
     RETURN QUERY SELECT
         200,                        -- 状态码：成功
-        format('成功，执行时间 %s 秒',
+        format('成功，chek_type=b_generated(缓冲区已生成)，执行时间 %s 秒',
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,            -- 提示信息
+        true,
+        'b_generated'::varchar,
         v_fence_record.id::varchar, -- 围栏ID
         v_fence_record.geom,
         -- 原始围栏几何 GeoJSON
-        ST_AsGeoJSON(ST_SetSRID(v_fence_record.geom, 4326))::json,
+        CASE WHEN p_return_geojson THEN ST_AsGeoJSON(ST_SetSRID(v_fence_record.geom, 4326))::json ELSE NULL::json END,
+        v_buffer_geom,
         -- 2D缓冲几何 GeoJSON
-        ST_AsGeoJSON(v_buffer_geom)::json,
+        CASE WHEN p_return_geojson THEN ST_AsGeoJSON(v_buffer_geom)::json ELSE NULL::json END,
+        v_3d_geom,
         -- 3D立体几何 GeoJSON
-        ST_AsGeoJSON(v_3d_geom)::json;
+        CASE WHEN p_return_geojson THEN ST_AsGeoJSON(v_3d_geom)::json ELSE NULL::json END;
 
 -- ==============================================
 -- 异常捕获：执行过程中出现任何错误，返00
@@ -1425,13 +1466,14 @@ EXCEPTION
             false, 'error'::varchar, NULL::varchar, NULL::geometry, NULL::json, NULL::geometry, NULL::json, NULL::geometry, NULL::json;
 END;
 $$;
-COMMENT ON FUNCTION public.gis_electric_fence_buffer(varchar, double precision) IS '生成电子围栏缓冲区';
+COMMENT ON FUNCTION public.gis_electric_fence_buffer(varchar, double precision, boolean) IS '生成电子围栏缓冲区';
 
 -- 支持项目ID；p_fence_id为空时返回项目/公共范围内全部围栏缓冲数据
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_buffer(
     p_project_id text,
     p_fence_id varchar(32) DEFAULT NULL,
-    p_buffer_radius double precision DEFAULT 0
+    p_buffer_radius double precision DEFAULT 0,
+    p_return_geojson boolean DEFAULT false
 )
 RETURNS TABLE (
     code integer,
@@ -1456,8 +1498,8 @@ DECLARE
     v_start_time timestamptz := clock_timestamp();
     v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
-    v_log_sql := format('SELECT * FROM public.gis_electric_fence_buffer(%L, %L, %s);',
-        p_project_id, p_fence_id, COALESCE(p_buffer_radius::text, 'NULL'));
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_buffer(%L, %L, %s, %L);',
+        p_project_id, p_fence_id, COALESCE(p_buffer_radius::text, 'NULL'), p_return_geojson);
 
     IF p_project_id IS NOT NULL AND trim(p_project_id) <> '' THEN
         v_table_name := 'gis_electric_fence_' || trim(p_project_id);
@@ -1497,11 +1539,11 @@ BEGIN
                     ''b_generated''::varchar AS chek_type,
                     src.id::varchar(32) AS electric_id,
                     src.geom AS electric_geom,
-                    ST_AsGeoJSON(src.calc_geom)::json AS electric_geojson,
+                    CASE WHEN $5 THEN ST_AsGeoJSON(src.calc_geom)::json ELSE NULL::json END AS electric_geojson,
                     buf.buffer_geom AS electric_buffer_geom,
-                    ST_AsGeoJSON(buf.buffer_geom)::json AS electric_buffer_geojson,
+                    CASE WHEN $5 THEN ST_AsGeoJSON(buf.buffer_geom)::json ELSE NULL::json END AS electric_buffer_geojson,
                     solid.solid_geom AS electric_solid_geom,
-                    ST_AsGeoJSON(solid.solid_geom)::json AS electric_solid_geojson
+                    CASE WHEN $5 THEN ST_AsGeoJSON(solid.solid_geom)::json ELSE NULL::json END AS electric_solid_geojson
                 FROM src
                 CROSS JOIN LATERAL (
                     SELECT CASE
@@ -1514,9 +1556,9 @@ BEGIN
                 ) buf
                 CROSS JOIN LATERAL (
                     SELECT ST_Multi(ST_Collect(
-                        ST_Force3DZ(buf.buffer_geom, 0),
-                        ST_Force3DZ(buf.buffer_geom, src.height)
-                    )) AS solid_geom
+                            ST_Force3DZ(buf.buffer_geom, 0),
+                            ST_Force3DZ(buf.buffer_geom, src.height)
+                        )) AS solid_geom
                 ) solid',
                 v_table_name
             );
@@ -1541,11 +1583,11 @@ BEGIN
                     ''b_generated''::varchar AS chek_type,
                     src.id::varchar(32) AS electric_id,
                     src.geom AS electric_geom,
-                    ST_AsGeoJSON(src.calc_geom)::json AS electric_geojson,
+                    CASE WHEN $5 THEN ST_AsGeoJSON(src.calc_geom)::json ELSE NULL::json END AS electric_geojson,
                     buf.buffer_geom AS electric_buffer_geom,
-                    ST_AsGeoJSON(buf.buffer_geom)::json AS electric_buffer_geojson,
+                    CASE WHEN $5 THEN ST_AsGeoJSON(buf.buffer_geom)::json ELSE NULL::json END AS electric_buffer_geojson,
                     solid.solid_geom AS electric_solid_geom,
-                    ST_AsGeoJSON(solid.solid_geom)::json AS electric_solid_geojson
+                    CASE WHEN $5 THEN ST_AsGeoJSON(solid.solid_geom)::json ELSE NULL::json END AS electric_solid_geojson
                 FROM src
                 CROSS JOIN LATERAL (
                     SELECT CASE
@@ -1558,9 +1600,9 @@ BEGIN
                 ) buf
                 CROSS JOIN LATERAL (
                     SELECT ST_Multi(ST_Collect(
-                        ST_Force3DZ(buf.buffer_geom, 0),
-                        ST_Force3DZ(buf.buffer_geom, src.height)
-                    )) AS solid_geom
+                            ST_Force3DZ(buf.buffer_geom, 0),
+                            ST_Force3DZ(buf.buffer_geom, src.height)
+                        )) AS solid_geom
                 ) solid';
         END IF;
     ELSE
@@ -1583,11 +1625,11 @@ BEGIN
                 ''b_generated''::varchar AS chek_type,
                 src.id::varchar(32) AS electric_id,
                 src.geom AS electric_geom,
-                ST_AsGeoJSON(src.calc_geom)::json AS electric_geojson,
+                CASE WHEN $5 THEN ST_AsGeoJSON(src.calc_geom)::json ELSE NULL::json END AS electric_geojson,
                 buf.buffer_geom AS electric_buffer_geom,
-                ST_AsGeoJSON(buf.buffer_geom)::json AS electric_buffer_geojson,
+                CASE WHEN $5 THEN ST_AsGeoJSON(buf.buffer_geom)::json ELSE NULL::json END AS electric_buffer_geojson,
                 solid.solid_geom AS electric_solid_geom,
-                ST_AsGeoJSON(solid.solid_geom)::json AS electric_solid_geojson
+                CASE WHEN $5 THEN ST_AsGeoJSON(solid.solid_geom)::json ELSE NULL::json END AS electric_solid_geojson
             FROM src
             CROSS JOIN LATERAL (
                 SELECT CASE
@@ -1600,13 +1642,13 @@ BEGIN
             ) buf
             CROSS JOIN LATERAL (
                 SELECT ST_Multi(ST_Collect(
-                    ST_Force3DZ(buf.buffer_geom, 0),
-                    ST_Force3DZ(buf.buffer_geom, src.height)
-                )) AS solid_geom
+                        ST_Force3DZ(buf.buffer_geom, 0),
+                        ST_Force3DZ(buf.buffer_geom, src.height)
+                    )) AS solid_geom
             ) solid';
     END IF;
 
-    RETURN QUERY EXECUTE v_sql USING p_fence_id, p_project_id, p_buffer_radius, v_start_time;
+    RETURN QUERY EXECUTE v_sql USING p_fence_id, p_project_id, p_buffer_radius, v_start_time, p_return_geojson;
 
     IF NOT FOUND THEN
         code := 400;
@@ -1641,7 +1683,7 @@ EXCEPTION
             false, 'error'::varchar, NULL::varchar, NULL::geometry, NULL::json, NULL::geometry, NULL::json, NULL::geometry, NULL::json;
 END;
 $$;
-COMMENT ON FUNCTION public.gis_electric_fence_buffer(text, varchar, double precision) IS '生成电子围栏缓冲区';
+COMMENT ON FUNCTION public.gis_electric_fence_buffer(text, varchar, double precision, boolean) IS '生成电子围栏缓冲区';
 
 
 
@@ -1652,7 +1694,8 @@ SELECT gis_drop_function('gis_electric_fence_check_point_buffer');
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_point_buffer(
     p_project_id text,
     p_point_geojson text,
-    p_buffer_radius double precision DEFAULT 0
+    p_buffer_radius double precision DEFAULT 0,
+    p_return_geojson boolean DEFAULT false
 )
 RETURNS TABLE (
     code integer,
@@ -1680,8 +1723,8 @@ DECLARE
     v_start_time timestamptz := clock_timestamp();
     v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
-    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_point_buffer(%L, %L, %s);',
-        p_project_id, p_point_geojson, COALESCE(p_buffer_radius::text, 'NULL'));
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_point_buffer(%L, %L, %s, %L);',
+        p_project_id, p_point_geojson, COALESCE(p_buffer_radius::text, 'NULL'), p_return_geojson);
 
     IF p_point_geojson IS NULL OR p_point_geojson = '' THEN
         code := 400;
@@ -1805,17 +1848,17 @@ BEGIN
                 ''p_inner''::varchar AS chek_type,
                 f.id::varchar(32) AS electric_id,
                 f.geom AS electric_geom,
-                ST_AsGeoJSON(f.calc_geom)::json AS electric_geojson,
+                CASE WHEN $5 THEN ST_AsGeoJSON(f.calc_geom)::json ELSE NULL::json END AS electric_geojson,
                 buf.buffer_geom AS electric_buffer_geom,
-                ST_AsGeoJSON(buf.buffer_geom)::json AS electric_buffer_geojson,
+                CASE WHEN $5 THEN ST_AsGeoJSON(buf.buffer_geom)::json ELSE NULL::json END AS electric_buffer_geojson,
                 ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
                     ST_Force3DZ(buf.buffer_geom, f.height)
                 )) AS electric_solid_geom,
-                ST_AsGeoJSON(ST_Multi(ST_Collect(
+                CASE WHEN $5 THEN ST_AsGeoJSON(ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
                     ST_Force3DZ(buf.buffer_geom, f.height)
-                )))::json AS electric_solid_geojson
+                )))::json ELSE NULL::json END AS electric_solid_geojson
             FROM fences f
             CROSS JOIN LATERAL (
                 SELECT CASE
@@ -1849,17 +1892,17 @@ BEGIN
                 ''p_inner''::varchar AS chek_type,
                 f.id::varchar(32) AS electric_id,
                 f.geom AS electric_geom,
-                ST_AsGeoJSON(f.calc_geom)::json AS electric_geojson,
+                CASE WHEN $5 THEN ST_AsGeoJSON(f.calc_geom)::json ELSE NULL::json END AS electric_geojson,
                 buf.buffer_geom AS electric_buffer_geom,
-                ST_AsGeoJSON(buf.buffer_geom)::json AS electric_buffer_geojson,
+                CASE WHEN $5 THEN ST_AsGeoJSON(buf.buffer_geom)::json ELSE NULL::json END AS electric_buffer_geojson,
                 ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
                     ST_Force3DZ(buf.buffer_geom, f.height)
                 )) AS electric_solid_geom,
-                ST_AsGeoJSON(ST_Multi(ST_Collect(
+                CASE WHEN $5 THEN ST_AsGeoJSON(ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
                     ST_Force3DZ(buf.buffer_geom, f.height)
-                )))::json AS electric_solid_geojson
+                )))::json ELSE NULL::json END AS electric_solid_geojson
             FROM fences f
             CROSS JOIN LATERAL (
                 SELECT CASE
@@ -1875,7 +1918,7 @@ BEGIN
               )';
     END IF;
 
-    RETURN QUERY EXECUTE v_sql USING v_point, p_buffer_radius, p_project_id, v_start_time;
+    RETURN QUERY EXECUTE v_sql USING v_point, p_buffer_radius, p_project_id, v_start_time, p_return_geojson;
 
     IF NOT FOUND THEN
         RETURN QUERY SELECT
@@ -1901,7 +1944,7 @@ EXCEPTION
             false, 'error'::varchar, NULL::varchar, NULL::geometry, NULL::json, NULL::geometry, NULL::json, NULL::geometry, NULL::json;
 END;
 $$;
-COMMENT ON FUNCTION public.gis_electric_fence_check_point_buffer(text, text, double precision) IS '检测航点缓冲区冲突';
+COMMENT ON FUNCTION public.gis_electric_fence_check_point_buffer(text, text, double precision, boolean) IS '检测航点缓冲区冲突';
 
 
 -- ====================================================================================
@@ -1948,7 +1991,8 @@ SELECT gis_drop_function('gis_electric_fence_check_line_buffer');
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_line_buffer(
     p_line_geojson text,
-    p_buffer_radius double precision DEFAULT 0
+    p_buffer_radius double precision DEFAULT 0,
+    p_return_geojson boolean DEFAULT false
 )
 RETURNS TABLE (
     code integer,
@@ -1972,8 +2016,8 @@ DECLARE
     v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
     v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
-    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_line_buffer(%L, %s);',
-        p_line_geojson, COALESCE(p_buffer_radius::text, 'NULL'));
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_line_buffer(%L, %s, %L);',
+        p_line_geojson, COALESCE(p_buffer_radius::text, 'NULL'), p_return_geojson);
 
     -- ==============================================
     -- 1. GeoJSON线路解析：转换为PostGIS几何对象，强制设326坐标记
@@ -2062,7 +2106,7 @@ BEGIN
          -- 构建3D立体几何体（拉伸高度
          LATERAL ST_Extrude(ST_Force3D(buf_data.buf), 0, 0, COALESCE(f.height, 0)) AS solid_geom,
          -- 调用已有缓冲函数，获取标准返回结果
-         LATERAL gis_electric_fence_buffer(NULL, f.id, p_buffer_radius) AS res
+         LATERAL gis_electric_fence_buffer(NULL, f.id, p_buffer_radius, p_return_geojson) AS res
     WHERE
         f.del_flag = false  -- 仅有效围栏
         AND f.status = '1'  -- 仅启用围栏
@@ -2096,13 +2140,14 @@ EXCEPTION
             false, 'error'::varchar, NULL::varchar, NULL::geometry, NULL::json, NULL::geometry, NULL::json, NULL::geometry, NULL::json;
 END;
 $$;
-COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, double precision) IS '检测航线缓冲区冲突';
+COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, double precision, boolean) IS '检测航线缓冲区冲突';
 
 -- 支持项目ID的航线缓冲区检测
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_line_buffer(
     p_project_id text,
     p_line_geojson text,
-    p_buffer_radius double precision DEFAULT 0
+    p_buffer_radius double precision DEFAULT 0,
+    p_return_geojson boolean DEFAULT false
 )
 RETURNS TABLE (
     code integer,
@@ -2129,8 +2174,8 @@ DECLARE
     v_start_time timestamptz := clock_timestamp();
     v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
-    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_line_buffer(%L, %L, %s);',
-        p_project_id, p_line_geojson, COALESCE(p_buffer_radius::text, 'NULL'));
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_line_buffer(%L, %L, %s, %L);',
+        p_project_id, p_line_geojson, COALESCE(p_buffer_radius::text, 'NULL'), p_return_geojson);
 
     IF p_line_geojson IS NULL OR p_line_geojson = '' THEN
         code := 400;
@@ -2221,17 +2266,17 @@ BEGIN
                 ''l_crosses''::varchar AS chek_type,
                 f.id::varchar(32) AS electric_id,
                 f.geom AS electric_geom,
-                ST_AsGeoJSON(f.calc_geom)::json AS electric_geojson,
+                CASE WHEN $5 THEN ST_AsGeoJSON(f.calc_geom)::json ELSE NULL::json END AS electric_geojson,
                 buf.buffer_geom AS electric_buffer_geom,
-                ST_AsGeoJSON(buf.buffer_geom)::json AS electric_buffer_geojson,
+                CASE WHEN $5 THEN ST_AsGeoJSON(buf.buffer_geom)::json ELSE NULL::json END AS electric_buffer_geojson,
                 ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
                     ST_Force3DZ(buf.buffer_geom, f.height)
                 )) AS electric_solid_geom,
-                ST_AsGeoJSON(ST_Multi(ST_Collect(
+                CASE WHEN $5 THEN ST_AsGeoJSON(ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
                     ST_Force3DZ(buf.buffer_geom, f.height)
-                )))::json AS electric_solid_geojson
+                )))::json ELSE NULL::json END AS electric_solid_geojson
             FROM fences f
             CROSS JOIN LATERAL (
                 SELECT CASE
@@ -2267,17 +2312,17 @@ BEGIN
                 ''l_crosses''::varchar AS chek_type,
                 f.id::varchar(32) AS electric_id,
                 f.geom AS electric_geom,
-                ST_AsGeoJSON(f.calc_geom)::json AS electric_geojson,
+                CASE WHEN $5 THEN ST_AsGeoJSON(f.calc_geom)::json ELSE NULL::json END AS electric_geojson,
                 buf.buffer_geom AS electric_buffer_geom,
-                ST_AsGeoJSON(buf.buffer_geom)::json AS electric_buffer_geojson,
+                CASE WHEN $5 THEN ST_AsGeoJSON(buf.buffer_geom)::json ELSE NULL::json END AS electric_buffer_geojson,
                 ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
                     ST_Force3DZ(buf.buffer_geom, f.height)
                 )) AS electric_solid_geom,
-                ST_AsGeoJSON(ST_Multi(ST_Collect(
+                CASE WHEN $5 THEN ST_AsGeoJSON(ST_Multi(ST_Collect(
                     ST_Force3DZ(buf.buffer_geom, 0),
                     ST_Force3DZ(buf.buffer_geom, f.height)
-                )))::json AS electric_solid_geojson
+                )))::json ELSE NULL::json END AS electric_solid_geojson
             FROM fences f
             CROSS JOIN LATERAL (
                 SELECT CASE
@@ -2295,7 +2340,7 @@ BEGIN
             )';
     END IF;
 
-    RETURN QUERY EXECUTE v_sql USING p_buffer_radius, p_project_id, v_start_time, v_line;
+    RETURN QUERY EXECUTE v_sql USING p_buffer_radius, p_project_id, v_start_time, v_line, p_return_geojson;
 
     IF NOT FOUND THEN
         RETURN QUERY SELECT
@@ -2321,7 +2366,7 @@ EXCEPTION
             false, 'error'::varchar, NULL::varchar, NULL::geometry, NULL::json, NULL::geometry, NULL::json, NULL::geometry, NULL::json;
 END;
 $$;
-COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, double precision) IS '检测航线缓冲区冲突';
+COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, double precision, boolean) IS '检测航线缓冲区冲突';
 
 
 
@@ -2430,42 +2475,47 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, doub
 -- =============================================================================
 -- 4. gis_electric_fence_buffer
 -- 功能：生成围栏缓冲区/3D立体几何。
--- 重载1：gis_electric_fence_buffer(p_fence_id, p_buffer_radius)
--- 重载2：gis_electric_fence_buffer(p_project_id, p_fence_id, p_buffer_radius)
+-- 重载1：gis_electric_fence_buffer(p_fence_id, p_buffer_radius, p_return_geojson)
+-- 重载2：gis_electric_fence_buffer(p_project_id, p_fence_id, p_buffer_radius, p_return_geojson)
+-- p_return_geojson 默认 false；需要返回GeoJSON时传 true
 -- 返回：code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 -- =============================================================================
 
 -- 示例1：旧版调用，按围栏ID生成缓冲
 -- SELECT * FROM public.gis_electric_fence_buffer(
 --     '2052290479526682626',
---     30
+--     30,
+--     true
 -- );
 
 -- 示例2：新版调用，项目ID + 指定围栏ID
 -- SELECT * FROM public.gis_electric_fence_buffer(
 --     '2c95908e958f3b75019593551f520126',
 --     '2052290479526682626',
---     30
+--     30,
+--     true
 -- );
 
 -- 示例3：新版调用，p_fence_id 为空，返回项目/公共范围内全部围栏
 -- SELECT * FROM public.gis_electric_fence_buffer(
 --     '2c95908e958f3b75019593551f520126',
 --     NULL,
---     30
+--     30,
+--     false
 -- );
 
 -- 示例4：新版调用，无项目ID且 p_fence_id 为空，返回公共表全部围栏
 -- SELECT * FROM public.gis_electric_fence_buffer(
 --     NULL,
 --     NULL,
---     0
+--     0,
+--     false
 -- );
 
 -- =============================================================================
 -- 5. gis_electric_fence_check_point_buffer
 -- 功能：检测航点是否闯入电子围栏缓冲区。
--- 入参：p_project_id, p_point_geojson, p_buffer_radius
+-- 入参：p_project_id, p_point_geojson, p_buffer_radius, p_return_geojson
 -- 返回：code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 -- =============================================================================
 
@@ -2473,28 +2523,32 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, doub
 -- SELECT * FROM public.gis_electric_fence_check_point_buffer(
 --     '2c95908e958f3b75019593551f520126',
 --     '{"type":"Point","coordinates":[113.405861,34.769437,120]}',
---     10
+--     10,
+--     true
 -- );
 
 -- 示例2：坐标数组格式 [lng,lat,alt]
 -- SELECT * FROM public.gis_electric_fence_check_point_buffer(
 --     '2c95908e958f3b75019593551f520126',
 --     '[113.405861,34.769437,120]',
---     10
+--     10,
+--     false
 -- );
 
 -- 示例3：无项目ID，查公共表
 -- SELECT * FROM public.gis_electric_fence_check_point_buffer(
 --     NULL,
 --     '{"type":"Point","coordinates":[113.405861,34.769437,120]}',
---     10
+--     10,
+--     false
 -- );
 
 -- =============================================================================
 -- 6. gis_electric_fence_check_line_buffer
 -- 功能：检测航线是否闯入电子围栏缓冲区。
--- 重载1：gis_electric_fence_check_line_buffer(p_line_geojson, p_buffer_radius)
--- 重载2：gis_electric_fence_check_line_buffer(p_project_id, p_line_geojson, p_buffer_radius)
+-- 重载1：gis_electric_fence_check_line_buffer(p_line_geojson, p_buffer_radius, p_return_geojson)
+-- 重载2：gis_electric_fence_check_line_buffer(p_project_id, p_line_geojson, p_buffer_radius, p_return_geojson)
+-- p_return_geojson 默认 false；需要返回GeoJSON时传 true
 -- 返回：code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 -- =============================================================================
 
@@ -2507,7 +2561,8 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, doub
 --             [113.4654075,34.8085025,120]
 --         ]
 --     }',
---     10
+--     10,
+--     true
 -- );
 
 -- 示例2：新版调用，带项目ID
@@ -2520,7 +2575,8 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, doub
 --             [113.4654075,34.8085025,120]
 --         ]
 --     }',
---     10
+--     10,
+--     true
 -- );
 
 -- 示例3：新版调用，坐标数组格式 [[lng,lat,alt], [lng,lat,alt]]
@@ -2530,5 +2586,6 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_line_buffer(text, text, doub
 --         [113.405861,34.769437,120],
 --         [113.4654075,34.8085025,120]
 --     ]',
---     10
+--     10,
+--     false
 -- );

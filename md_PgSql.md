@@ -71,6 +71,8 @@
 
 缓冲区相关函数统一在 `msg` 中追加 `chek_type` 编码和中文含义；围栏字段统一返回为：`electric_id`、`electric_geom`、`electric_geojson`、`electric_buffer_geom`、`electric_buffer_geojson`、`electric_solid_geom`、`electric_solid_geojson`。
 
+缓冲区相关函数新增可选参数 `p_return_geojson boolean DEFAULT false`。默认不生成 GeoJSON，`electric_geojson`、`electric_buffer_geojson`、`electric_solid_geojson` 返回 `NULL`；`electric_geom`、`electric_buffer_geom`、`electric_solid_geom` 仍正常返回。需要前端直接使用 GeoJSON 时传 `true`。
+
 ## 三维自动线路规划
 
 核心函数：`gis_astar_3d_flight_plan`
