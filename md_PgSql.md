@@ -26,49 +26,9 @@
 
 实际顺序以数据库表是否已存在为准。
 
-## 电子围栏创建
-
-函数：`gis_electric_fence_project`
-
-作用：
-
-- 根据项目 ID 创建项目专属电子围栏表。
-- 表名规则：`gis_electric_fence_{project_id}`。
-- 自动导入与项目范围相交的禁飞区、试飞区数据。
-- 自动创建 `geom` 空间索引。
-
-示例：
-
-```sql
-SELECT * FROM gis_electric_fence_project(
-    '2c95908e958f3b75019593551f520126',
-    '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'
-);
-```
-
 ## 电子围栏冲突校验
 
 函数：`gis_check_electric_fence`
-
-当前参数顺序：
-
-```sql
-gis_check_electric_fence(
-  p_project_id,
-  p_fence_type,
-  p_lng_lat_alt
-)
-```
-
-示例：
-
-```sql
-SELECT * FROM gis_check_electric_fence(
-  '2c95908e958f3b75019593551f520126',
-  '3',
-  '{"type":"Polygon","coordinates":[[[115.72,39.41],[117.51,39.41],[117.51,41.05],[115.72,41.05],[115.72,39.41]]]}'
-);
-```
 
 规则：
 
@@ -84,19 +44,32 @@ SELECT * FROM gis_check_electric_fence(
 
 | 函数 | 说明 |
 |------|------|
-| `gis_electric_fence_buffer` | 根据围栏 ID 和缓冲半径生成 2D/3D 几何 |
-| `gis_electric_fence_check_line_buffer` | 检测航线是否穿越缓冲后的围栏 |
-| `gis_electric_fence_check_line` | 检测航线是否穿越原始围栏 |
+| `gis_electric_fence_buffer` | 根据围栏 ID 和缓冲半径生成缓冲面和立体几何 |
 | `gis_electric_fence_check_point` | 检测点位是否位于项目禁飞区内 |
+| `gis_electric_fence_check_line` | 检测航线是否穿越原始围栏 |
+| `gis_electric_fence_check_point_buffer` | 检测点位是否闯入缓冲后的围栏 |
+| `gis_electric_fence_check_line_buffer` | 检测航线是否穿越缓冲后的围栏 |
 
-点位检测示例：
+点位/航线校验的 `chek_type`：
 
-```sql
-SELECT * FROM gis_electric_fence_check_point(
-    '2c95908e958f3b75019593551f520126',
-    '{"type":"Point","coordinates":[113.405861,34.769437,10000]}'
-);
-```
+| chek_type | 说明 |
+|-----------|------|
+| `p_inner` | 点在内部 |
+| `p_outer` | 点在外部 |
+| `l_within` | 线完全在面内 |
+| `l_outside` | 线完全在面外 |
+| `l_crosses` | 线穿过面（贯穿，两端在外） |
+| `l_entering` | 线穿入/穿出面（一端在内，一端在外） |
+
+缓冲区相关函数返回 `ischeck` 和 `chek_type`：
+
+| 函数 | ischeck | chek_type |
+|------|---------|-----------|
+| `gis_electric_fence_buffer` | 生成到有效围栏为 `true`，未查询到或异常为 `false` | `b_generated` 已生成，`b_empty` 未查询到有效围栏数据 |
+| `gis_electric_fence_check_point_buffer` | 命中缓冲区为 `true`，未命中为 `false` | `p_inner` 点在内部，`p_outer` 点在外部 |
+| `gis_electric_fence_check_line_buffer` | 命中缓冲区为 `true`，未命中为 `false` | `l_within`、`l_outside`、`l_crosses`、`l_entering` |
+
+缓冲区相关函数统一在 `msg` 中追加 `chek_type` 编码和中文含义；围栏字段统一返回为：`electric_id`、`electric_geom`、`electric_geojson`、`electric_buffer_geom`、`electric_buffer_geojson`、`electric_solid_geom`、`electric_solid_geojson`。
 
 ## 三维自动线路规划
 
@@ -112,20 +85,6 @@ SELECT * FROM gis_electric_fence_check_point(
 - A* 不可用或异常时自动返回直线兜底航线。
 - 对规划结果进行可视连线简化，减少不必要中间点。
 
-示例：
-
-```sql
-SELECT * FROM gis_astar_3d_flight_plan(
-    113.64040905110176, 34.744365280882896, 50,
-    113.65792057874526, 34.748111106532264, 50,
-    140, 0, TRUE, 'TEST001', 'admin'
-);
-```
-
-封装函数：`gis_generate_smooth_flight_path`
-
-返回 JSONB，适合接口层直接调用。
-
 ## 注意事项
 
 1. 数据库必须安装并启用 PostGIS。
@@ -133,4 +92,3 @@ SELECT * FROM gis_astar_3d_flight_plan(
 3. 空间字段建议统一使用 SRID 4326。
 4. 大范围网格会产生大量数据，建议按项目范围和合理分辨率生成。
 5. 执行 SQL 前先确认依赖表字段是否一致，尤其是 `geom`、`height`、`fence_type`、`project_id`、`zone_type`。
-
