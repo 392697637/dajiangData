@@ -13,24 +13,24 @@
 --   p_project_id      text     项目ID；为空时只查公共表
 --   p_point_geojson   text     Point/PointZ/MultiPoint GeoJSON、Feature，或 [lng,lat,alt] / [[lng,lat,alt], ...]
 -- 返回：
---   code, msg, ischeck, chek_type, table_name, geom, electric_id, electric_geom, electric_geojson；多点按点数返回多行
--- chek_type：
+--   code, msg, ischeck, check_type, table_name, geom, electric_id, electric_geom, electric_geojson；多点按点数返回多行
+-- check_type：
 --   p_inner  点在内部
 --   p_outer  点在外部
 -- ============================================================================
-SELECT code, msg, ischeck, chek_type, table_name, geom, electric_id, electric_geom, electric_geojson
+SELECT code, msg, ischeck, check_type, table_name, geom, electric_id, electric_geom, electric_geojson
 FROM public.gis_electric_fence_check_point(
     '2c95908e958f3b75019593551f520126',
     '{"type":"Point","coordinates":[113.405861,34.769437,10]}'
 );
 
-SELECT code, msg, ischeck, chek_type, table_name, geom, electric_id, electric_geom, electric_geojson
+SELECT code, msg, ischeck, check_type, table_name, geom, electric_id, electric_geom, electric_geojson
 FROM public.gis_electric_fence_check_point(
     '2c95908e958f3b75019593551f520126',
     '[113.405861,34.769437,10]'
 );
 
-SELECT code, msg, ischeck, chek_type, table_name, geom, electric_id, electric_geom, electric_geojson
+SELECT code, msg, ischeck, check_type, table_name, geom, electric_id, electric_geom, electric_geojson
 FROM public.gis_electric_fence_check_point(
     '2c95908e958f3b75019593551f520126',
     '[
@@ -46,14 +46,14 @@ FROM public.gis_electric_fence_check_point(
 --   p_project_id     text     项目ID；为空时只查公共表
 --   p_line_geojson   text     LineString/MultiLineString GeoJSON、Feature，或 [[lng,lat,alt], ...] / [[[lng,lat,alt], ...], ...]
 -- 返回：
---   code, msg, ischeck, chek_type, table_name, geom, electric_id, electric_geom, electric_geojson；多线按线数返回多行
--- chek_type：
+--   code, msg, ischeck, check_type, table_name, geom, electric_id, electric_geom, electric_geojson；多线按线数返回多行
+-- check_type：
 --   l_within    线完全在面内
 --   l_outside   线完全在面外
 --   l_crosses   线穿过面（贯穿，两端在外）
 --   l_entering  线穿入/穿出面（一端在内，一端在外）
 -- ============================================================================
-SELECT code, msg, ischeck, chek_type, table_name, geom, electric_id, electric_geom, electric_geojson
+SELECT code, msg, ischeck, check_type, table_name, geom, electric_id, electric_geom, electric_geojson
 FROM public.gis_electric_fence_check_line(
     '2c95908e958f3b75019593551f520126',
     '{
@@ -65,7 +65,7 @@ FROM public.gis_electric_fence_check_line(
     }'
 );
 
-SELECT code, msg, ischeck, chek_type, table_name, geom, electric_id, electric_geom, electric_geojson
+SELECT code, msg, ischeck, check_type, table_name, geom, electric_id, electric_geom, electric_geojson
 FROM public.gis_electric_fence_check_line(
     '2c95908e958f3b75019593551f520126',
     '[
@@ -74,7 +74,7 @@ FROM public.gis_electric_fence_check_line(
     ]'
 );
 
-SELECT code, msg, ischeck, chek_type, table_name, geom, electric_id, electric_geom, electric_geojson
+SELECT code, msg, ischeck, check_type, table_name, geom, electric_id, electric_geom, electric_geojson
 FROM public.gis_electric_fence_check_line(
     '2c95908e958f3b75019593551f520126',
     '[

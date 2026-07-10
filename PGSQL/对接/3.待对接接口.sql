@@ -15,12 +15,12 @@
 --   p_buffer_radius   double precision   缓冲半径，单位：米；0表示不缓冲
 --   p_return_geojson  boolean            是否返回GeoJSON，默认false；需要前端直接使用GeoJSON时传true
 -- 返回：
---   code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
--- chek_type：
+--   code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+-- check_type：
 --   b_generated  已生成缓冲/立体几何
 --   b_empty      未查询到有效围栏数据
 -- ============================================================================
-SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_buffer(
     '2c95908e958f3b75019593551f520126',
     '2052290479526682626',
@@ -29,7 +29,7 @@ FROM public.gis_electric_fence_buffer(
 );
 
 -- p_fence_id 为空：返回全部围栏缓冲数据
-SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_buffer(
     '2c95908e958f3b75019593551f520126',
     NULL,
@@ -38,7 +38,7 @@ FROM public.gis_electric_fence_buffer(
 );
 
 -- 无项目ID且 p_fence_id 为空：返回公共表全部围栏
-SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_buffer(
     NULL,
     NULL,
@@ -55,12 +55,12 @@ FROM public.gis_electric_fence_buffer(
 --   p_buffer_radius   double precision   缓冲半径，单位：米；0表示不缓冲
 --   p_return_geojson  boolean            是否返回围栏/缓冲/立体GeoJSON，默认false；需要前端直接使用GeoJSON时传true
 -- 返回：
---   code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
--- chek_type：
+--   code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+-- check_type：
 --   p_inner  点在内部
 --   p_outer  点在外部
 -- ============================================================================
-SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_point_buffer(
     '2c95908e958f3b75019593551f520126',
     '{"type":"Point","coordinates":[113.405861,34.769437,120]}',
@@ -68,7 +68,7 @@ FROM public.gis_electric_fence_check_point_buffer(
     true
 );
 
-SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_point_buffer(
     '2c95908e958f3b75019593551f520126',
     '[113.405861,34.769437,120]',
@@ -85,14 +85,14 @@ FROM public.gis_electric_fence_check_point_buffer(
 --   p_buffer_radius   double precision   缓冲半径，单位：米；0表示不缓冲
 --   p_return_geojson  boolean            是否返回围栏/缓冲/立体GeoJSON，默认false；需要前端直接使用GeoJSON时传true
 -- 返回：
---   code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
--- chek_type：
+--   code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+-- check_type：
 --   l_within    线完全在面内
 --   l_outside   线完全在面外
 --   l_crosses   线穿过面（贯穿，两端在外）
 --   l_entering  线穿入/穿出面（一端在内，一端在外）
 -- ============================================================================
-SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_line_buffer(
     '2c95908e958f3b75019593551f520126',
     '{
@@ -106,7 +106,7 @@ FROM public.gis_electric_fence_check_line_buffer(
     true
 );
 
-SELECT code, msg, ischeck, chek_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_line_buffer(
     '2c95908e958f3b75019593551f520126',
     '[
