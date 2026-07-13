@@ -9,6 +9,19 @@
 --
 -- =============================================================================
 
+-- =============================================================================
+-- 2026-07-13 维护备注：航线平滑与直升直降规则
+-- 1. p_height_mode = 0 且起点高度 != 安全高度时，必须保留：
+--      起点真实高度 -> 起点安全高度
+-- 2. p_height_mode = 0 且终点高度 != 安全高度时，必须保留：
+--      终点安全高度 -> 终点真实高度
+-- 3. 起点/终点高度都等于安全高度时，若直线不穿越围栏，允许最终简化为：
+--      起点 -> 终点
+-- 4. 直线兜底、A*失败兜底、异常兜底、长距离快速直线返回，都必须按同一套直升直降规则构造航线。
+-- 5. 原始航线 path_line 和平滑航线 smooth_path_line 在返回/入库前会删除连续重复点；
+--    仅删除 XYZ 都相同的重复点，同经纬度但高度不同的直升直降点必须保留。
+-- =============================================================================
+
 -- ==============================================
 -- 3.2 线路自动规划：全局网格 A* 粗规划函数
 --
@@ -67,6 +80,56 @@ RETURNS DOUBLE PRECISION AS $$
     FROM segs;
 $$ LANGUAGE SQL IMMUTABLE STRICT;
 COMMENT ON FUNCTION gis_linestring_length_m(geometry) IS '计算三维航线实际长度';
+
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_linestring_remove_duplicate_points');
+-- =============================================================================
+-- 函数介绍：gis_linestring_remove_duplicate_points
+-- 主要作用：删除LineString航线中的连续重复点。
+-- 返回说明：仅当连续点XYZ都相同才删除；同经纬度但高度不同的直升直降点会保留。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION gis_linestring_remove_duplicate_points(p_line geometry)
+RETURNS geometry
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    v_clean geometry;
+    v_count integer;
+BEGIN
+    IF p_line IS NULL OR ST_IsEmpty(p_line) OR GeometryType(p_line) NOT IN ('LINESTRING', 'LINESTRINGZ') THEN
+        RETURN p_line;
+    END IF;
+
+    WITH pts AS (
+        SELECT
+            (dp).path[1] AS idx,
+            (dp).geom AS geom,
+            lag((dp).geom) OVER (ORDER BY (dp).path[1]) AS prev_geom
+        FROM ST_DumpPoints(p_line) AS dp
+    ),
+    kept AS (
+        SELECT idx, geom
+        FROM pts
+        WHERE prev_geom IS NULL
+           OR abs(ST_X(geom) - ST_X(prev_geom)) > 0.000000001
+           OR abs(ST_Y(geom) - ST_Y(prev_geom)) > 0.000000001
+           OR abs(COALESCE(ST_Z(geom), 0) - COALESCE(ST_Z(prev_geom), 0)) > 0.000000001
+    )
+    SELECT ST_SetSRID(ST_MakeLine(geom ORDER BY idx), ST_SRID(p_line)), count(*)
+    INTO v_clean, v_count
+    FROM kept;
+
+    IF COALESCE(v_count, 0) < 2 THEN
+        RETURN p_line;
+    END IF;
+
+    RETURN v_clean;
+END;
+$$;
+COMMENT ON FUNCTION gis_linestring_remove_duplicate_points(geometry) IS '删除LineString连续重复点，保留同经纬度不同高度的直升直降点';
 
 -- =============================================================================
 -- 删除函数
@@ -459,15 +522,29 @@ BEGIN
     -- ====================== 分支1：不满足A* → 直接生成两点直线航线（兜底方案） ======================
     -- 此分支处理以下情况：网格表为空、起点或终点在禁飞区、无法匹配网格等
     IF NOT v_use_astar THEN
-      -- 构建起点到终点的3D直线（LineStringZ）
-        v_path_line := ST_MakeLine(v_start_pt, v_end_pt);
+        -- 构建符合直升直降规则的3D直线航线。
+        v_path_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
+        v_path_line := ST_AddPoint(v_path_line, v_start_pt);
+        IF p_height_mode = 0 AND abs(p_start_alt - p_safe_altitude) > 0.001 THEN
+            v_path_line := ST_AddPoint(v_path_line,
+                ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_safe_altitude), 4326)
+            );
+        END IF;
+        IF p_height_mode = 0 AND abs(p_end_alt - p_safe_altitude) > 0.001 THEN
+            v_path_line := ST_AddPoint(v_path_line,
+                ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_safe_altitude), 4326)
+            );
+        END IF;
+        v_path_line := ST_AddPoint(v_path_line, v_end_pt);
+        v_path_line := gis_linestring_remove_duplicate_points(v_path_line);
         -- 最终路径 = 原始直线路径（未经平滑）
         v_final_path := v_path_line;
-        -- 构建两点航点JSON数组
-        v_waypoints := jsonb_build_array(
-            jsonb_build_object('lon', p_start_lon, 'lat', p_start_lat, 'alt', p_start_alt),
-            jsonb_build_object('lon', p_end_lon, 'lat', p_end_lat, 'alt', p_end_alt)
-        );
+        SELECT jsonb_agg(
+            jsonb_build_object('lon', ST_X((dp).geom), 'lat', ST_Y((dp).geom), 'alt', ST_Z((dp).geom))
+            ORDER BY (dp).path[1]
+        )
+        INTO v_waypoints
+        FROM ST_DumpPoints(v_path_line) AS dp;
         -- 平滑航点与原始航点一致（直线无需平滑）
         v_smooth_waypoints := v_waypoints;
         -- 只返回计算结果，不写入 gis_flight_paths。
@@ -672,13 +749,28 @@ BEGIN
     -- 路径点少于2说明没有有效路径（可能起点终点不连通，或搜索失败），此时使用直线航线
     IF COALESCE(array_length(v_path_ids, 1), 0) < 1 THEN
         DROP TABLE IF EXISTS tmp_grid;-- 清理临时表
-        -- 生成两点直线航线（与分支1逻辑相同）
-        v_path_line := ST_MakeLine(v_start_pt, v_end_pt);
+        -- 生成符合直升直降规则的直线航线（与分支1逻辑相同）
+        v_path_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
+        v_path_line := ST_AddPoint(v_path_line, v_start_pt);
+        IF p_height_mode = 0 AND abs(p_start_alt - p_safe_altitude) > 0.001 THEN
+            v_path_line := ST_AddPoint(v_path_line,
+                ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_safe_altitude), 4326)
+            );
+        END IF;
+        IF p_height_mode = 0 AND abs(p_end_alt - p_safe_altitude) > 0.001 THEN
+            v_path_line := ST_AddPoint(v_path_line,
+                ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_safe_altitude), 4326)
+            );
+        END IF;
+        v_path_line := ST_AddPoint(v_path_line, v_end_pt);
+        v_path_line := gis_linestring_remove_duplicate_points(v_path_line);
         v_final_path := v_path_line;
-        v_waypoints := jsonb_build_array(
-            jsonb_build_object('lon', p_start_lon, 'lat', p_start_lat, 'alt', p_start_alt),
-            jsonb_build_object('lon', p_end_lon, 'lat', p_end_lat, 'alt', p_end_alt)
-        );
+        SELECT jsonb_agg(
+            jsonb_build_object('lon', ST_X((dp).geom), 'lat', ST_Y((dp).geom), 'alt', ST_Z((dp).geom))
+            ORDER BY (dp).path[1]
+        )
+        INTO v_waypoints
+        FROM ST_DumpPoints(v_path_line) AS dp;
         v_smooth_waypoints := v_waypoints;
 
         v_return_msg := format('规划成功：A*未找到有效路径，已生成直线兜底航线，执行时间 %s 秒',
@@ -730,24 +822,37 @@ BEGIN
     -- 5. 添加真实终点
     v_path_line := ST_AddPoint(v_path_line, v_end_pt);
     v_raw_path_line := v_path_line;
+    v_raw_path_line := gis_linestring_remove_duplicate_points(v_raw_path_line);
 
     -- ====================== 原始路径可视连线简化 ======================
     -- 规则：
-    -- 1. 从第二个点开始，判断“当前点 -> 下下个点”的直连线是否穿越禁飞区/管控区。
-    -- 2. 若不穿越，则删除中间点，相当于把“第二点-第三点-第四点”简化为“第二点-第四点”。
-    -- 3. 删除后继续用当前点向新的下下个点校验，直到倒数第二个点为止。
-    -- 4. 若直连线穿越禁飞区/管控区，则保留中间点，并移动到下一个点继续判断。
+    -- 1. 起点高度与安全高度不一致时保留起点原地升降段；一致时起点参与简化。
+    -- 2. 终点高度与安全高度不一致时保留终点原地升降段；一致时终点参与简化。
+    -- 3. 判断“当前点 -> 下下个点”的直连线是否穿越禁飞区/管控区，不穿越则删除中间点。
+    -- 4. 删除后继续用当前点向新的下下个点校验；若穿越则保留中间点并移动到下一个点。
     DECLARE
-        v_simplify_idx INT := 2;                 -- 从第二个点开始校验
+        v_simplify_idx INT := 2;                 -- 默认跳过起点原地升降段，从第二个点开始校验
+        v_simplify_end_offset INT := 3;          -- 默认保留终点原地升降段
+        v_min_simplify_points INT := 3;          -- 无起降垂直段时，允许3点压缩为2点
+        v_has_start_vertical BOOLEAN := (p_height_mode = 0 AND abs(p_start_alt - p_safe_altitude) > 0.001);
+        v_has_end_vertical BOOLEAN := (p_height_mode = 0 AND abs(p_end_alt - p_safe_altitude) > 0.001);
         v_direct_line geometry(LineStringZ,4326);-- 当前点到下下个点的直连线
         v_blocked BOOLEAN;                       -- 直连线是否穿越禁飞区/管控区
     BEGIN
-        WHILE ST_NumPoints(v_path_line) >= 4
-              AND v_simplify_idx <= ST_NumPoints(v_path_line) -
-                  CASE
-                      WHEN NOT (p_height_mode > 0 AND p_height_mode < 1) THEN 3
-                      ELSE 2
-                  END LOOP
+        IF NOT v_has_start_vertical THEN
+            v_simplify_idx := 1;
+        ELSE
+            v_min_simplify_points := 4;
+        END IF;
+
+        IF NOT v_has_end_vertical THEN
+            v_simplify_end_offset := 2;
+        ELSE
+            v_min_simplify_points := 4;
+        END IF;
+
+        WHILE ST_NumPoints(v_path_line) >= v_min_simplify_points
+              AND v_simplify_idx <= ST_NumPoints(v_path_line) - v_simplify_end_offset LOOP
 
             v_direct_line := ST_MakeLine(
                 ST_PointN(v_path_line, v_simplify_idx),
@@ -776,6 +881,7 @@ BEGIN
         END LOOP;
     END;
 
+    v_path_line := gis_linestring_remove_duplicate_points(v_path_line);
     -- 平滑路径当前直接使用简化后的 v_path_line。
     v_final_path := v_path_line;
 
@@ -818,13 +924,29 @@ EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE '【调试】自动返回直线兜底航线，触发原因：%（SQLSTATE=%）', SQLERRM, SQLSTATE;
     DROP TABLE IF EXISTS tmp_grid;
 
-    -- 异常兜底：生成两点直线航线（与分支1完全相同）
-    v_path_line := ST_MakeLine(v_start_pt, v_end_pt);
+    -- 异常兜底：生成符合直升直降规则的直线航线（与分支1完全相同）
+    v_path_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
+    v_path_line := ST_AddPoint(v_path_line, v_start_pt);
+    IF p_height_mode = 0 AND abs(p_start_alt - p_safe_altitude) > 0.001 THEN
+        v_path_line := ST_AddPoint(v_path_line,
+            ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_safe_altitude), 4326)
+        );
+    END IF;
+    IF p_height_mode = 0 AND abs(p_end_alt - p_safe_altitude) > 0.001 THEN
+        v_path_line := ST_AddPoint(v_path_line,
+            ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_safe_altitude), 4326)
+        );
+    END IF;
+    v_path_line := ST_AddPoint(v_path_line, v_end_pt);
+    v_path_line := gis_linestring_remove_duplicate_points(v_path_line);
     v_final_path := v_path_line;
-    v_waypoints := jsonb_build_array(
-        jsonb_build_object('lon', p_start_lon, 'lat', p_start_lat, 'alt', p_start_alt),
-        jsonb_build_object('lon', p_end_lon, 'lat', p_end_lat, 'alt', p_end_alt)
-    );
+
+    SELECT jsonb_agg(
+        jsonb_build_object('lon', ST_X((dp).geom), 'lat', ST_Y((dp).geom), 'alt', ST_Z((dp).geom))
+        ORDER BY (dp).path[1]
+    )
+    INTO v_waypoints
+    FROM ST_DumpPoints(v_path_line) AS dp;
     v_smooth_waypoints := v_waypoints;
 
     -- 异常时也只返回兜底航线，不写入 gis_flight_paths。
@@ -981,10 +1103,27 @@ BEGIN
 
     -- 长距离但整条直线不经过禁飞区/管控区时，直接返回一条总航线，避免进入 5km 循环。
     IF NOT gis_flight_line_intersects_fence(v_direct_line, p_project_id) THEN
-        v_waypoints := jsonb_build_array(
-            jsonb_build_object('lon', p_start_lon, 'lat', p_start_lat, 'alt', p_start_alt),
-            jsonb_build_object('lon', p_end_lon, 'lat', p_end_lat, 'alt', p_end_alt)
-        );
+        v_direct_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
+        v_direct_line := ST_AddPoint(v_direct_line, v_start_pt);
+        IF p_height_mode = 0 AND abs(p_start_alt - p_safe_altitude) > 0.001 THEN
+            v_direct_line := ST_AddPoint(v_direct_line,
+                ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_safe_altitude), 4326)
+            );
+        END IF;
+        IF p_height_mode = 0 AND abs(p_end_alt - p_safe_altitude) > 0.001 THEN
+            v_direct_line := ST_AddPoint(v_direct_line,
+                ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_safe_altitude), 4326)
+            );
+        END IF;
+        v_direct_line := ST_AddPoint(v_direct_line, v_end_pt);
+        v_direct_line := gis_linestring_remove_duplicate_points(v_direct_line);
+
+        SELECT jsonb_agg(
+            jsonb_build_object('lon', ST_X((dp).geom), 'lat', ST_Y((dp).geom), 'alt', ST_Z((dp).geom))
+            ORDER BY (dp).path[1]
+        )
+        INTO v_waypoints
+        FROM ST_DumpPoints(v_direct_line) AS dp;
 
         INSERT INTO gis_flight_paths (
             project_id, create_user, update_user,
@@ -1216,6 +1355,39 @@ BEGIN
             POWER((v_lon2 - v_lon1) * 111000.0 * COS(RADIANS((v_lat1 + v_lat2) / 2.0)), 2)
             + POWER((v_lat2 - v_lat1) * 111000.0, 2)
         );
+
+        IF v_segment_m <= 0.001 THEN
+            v_direct_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
+            v_direct_line := ST_AddPoint(v_direct_line, ST_SetSRID(ST_MakePoint(v_lon1, v_lat1, v_alt1), 4326));
+            IF p_height_mode = 0 AND abs(v_alt1 - p_safe_altitude) > 0.001 THEN
+                v_direct_line := ST_AddPoint(v_direct_line,
+                    ST_SetSRID(ST_MakePoint(v_lon1, v_lat1, p_safe_altitude), 4326)
+                );
+            END IF;
+            IF p_height_mode = 0 AND abs(v_alt2 - p_safe_altitude) > 0.001 THEN
+                v_direct_line := ST_AddPoint(v_direct_line,
+                    ST_SetSRID(ST_MakePoint(v_lon2, v_lat2, p_safe_altitude), 4326)
+                );
+            END IF;
+            v_direct_line := ST_AddPoint(v_direct_line, ST_SetSRID(ST_MakePoint(v_lon2, v_lat2, v_alt2), 4326));
+            v_direct_line := gis_linestring_remove_duplicate_points(v_direct_line);
+
+            v_point_count := ST_NumPoints(v_direct_line);
+            v_append_start := CASE WHEN ST_NumPoints(v_merged_path_line) = 0 THEN 1 ELSE 2 END;
+            FOR v_point_idx IN v_append_start..v_point_count LOOP
+                v_merged_path_line := ST_AddPoint(v_merged_path_line, ST_PointN(v_direct_line, v_point_idx));
+            END LOOP;
+
+            v_point_count := ST_NumPoints(v_direct_line);
+            v_append_start := CASE WHEN ST_NumPoints(v_merged_smooth_line) = 0 THEN 1 ELSE 2 END;
+            FOR v_point_idx IN v_append_start..v_point_count LOOP
+                v_merged_smooth_line := ST_AddPoint(v_merged_smooth_line, ST_PointN(v_direct_line, v_point_idx));
+            END LOOP;
+
+            v_part_count := v_part_count + 1;
+            CONTINUE;
+        END IF;
+
         v_anchor_m := 0;
 
         WHILE v_anchor_m < v_segment_m LOOP
@@ -1245,7 +1417,24 @@ BEGIN
                     v_last_safe_m := v_probe_m;
 
                     IF v_last_safe_m >= v_segment_m THEN
-                        v_direct_line := ST_MakeLine(v_anchor_point, v_probe_point);
+                        v_direct_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
+                        v_direct_line := ST_AddPoint(v_direct_line, v_anchor_point);
+                        IF p_height_mode = 0
+                           AND v_anchor_m = 0
+                           AND abs(v_seg_start_alt - p_safe_altitude) > 0.001 THEN
+                            v_direct_line := ST_AddPoint(v_direct_line,
+                                ST_SetSRID(ST_MakePoint(v_seg_start_lon, v_seg_start_lat, p_safe_altitude), 4326)
+                            );
+                        END IF;
+                        IF p_height_mode = 0
+                           AND v_probe_m >= v_segment_m
+                           AND abs(v_seg_end_alt - p_safe_altitude) > 0.001 THEN
+                            v_direct_line := ST_AddPoint(v_direct_line,
+                                ST_SetSRID(ST_MakePoint(v_seg_end_lon, v_seg_end_lat, p_safe_altitude), 4326)
+                            );
+                        END IF;
+                        v_direct_line := ST_AddPoint(v_direct_line, v_probe_point);
+                        v_direct_line := gis_linestring_remove_duplicate_points(v_direct_line);
 
                         v_point_count := ST_NumPoints(v_direct_line);
                         v_append_start := CASE WHEN ST_NumPoints(v_merged_path_line) = 0 THEN 1 ELSE 2 END;
@@ -1273,7 +1462,17 @@ BEGIN
                     v_seg_end_lat := v_lat1 + (v_lat2 - v_lat1) * v_ratio2;
                     v_seg_end_alt := p_safe_altitude;
                     v_probe_point := ST_SetSRID(ST_MakePoint(v_seg_end_lon, v_seg_end_lat, v_seg_end_alt), 4326);
-                    v_direct_line := ST_MakeLine(v_anchor_point, v_probe_point);
+                    v_direct_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
+                    v_direct_line := ST_AddPoint(v_direct_line, v_anchor_point);
+                    IF p_height_mode = 0
+                       AND v_anchor_m = 0
+                       AND abs(v_seg_start_alt - p_safe_altitude) > 0.001 THEN
+                        v_direct_line := ST_AddPoint(v_direct_line,
+                            ST_SetSRID(ST_MakePoint(v_seg_start_lon, v_seg_start_lat, p_safe_altitude), 4326)
+                        );
+                    END IF;
+                    v_direct_line := ST_AddPoint(v_direct_line, v_probe_point);
+                    v_direct_line := gis_linestring_remove_duplicate_points(v_direct_line);
 
                     v_point_count := ST_NumPoints(v_direct_line);
                     v_append_start := CASE WHEN ST_NumPoints(v_merged_path_line) = 0 THEN 1 ELSE 2 END;
@@ -1384,6 +1583,9 @@ BEGIN
         END LOOP;
     END LOOP;
 
+    v_merged_path_line := gis_linestring_remove_duplicate_points(v_merged_path_line);
+    v_merged_smooth_line := gis_linestring_remove_duplicate_points(v_merged_smooth_line);
+
     SELECT jsonb_agg(
         jsonb_build_object('lon', ST_X((dp).geom), 'lat', ST_Y((dp).geom), 'alt', ST_Z((dp).geom))
         ORDER BY (dp).path[1]
@@ -1434,50 +1636,198 @@ COMMENT ON FUNCTION gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARC
 
 
 -- =============================================================================
--- 测试函数
+-- 调用示例
 -- =============================================================================
+-- 统一说明：
+--   1. 本区块只提供调用示例，默认全部注释，避免执行建函数脚本时写入测试航线。
+--   2. p_height_mode = 0：直升直降。
+--   3. 0 < p_height_mode < 1：按比例平滑爬升/下降。
+--   4. p_force_gen = TRUE：强制重新规划，不复用 gis_flight_paths 历史航线。
+--   5. p_project_id：项目ID，用于匹配项目网格表、项目围栏和历史航线。
+--   6. path_line / waypoints：原始航线。
+--   7. smooth_path_line / smooth_waypoints：平滑/简化后航线。
+--   8. 连续重复点会被删除；同经纬度但高度不同的直升直降点会保留。
+-- =============================================================================
+
+-- =============================================================================
+-- A. 辅助函数示例
+-- =============================================================================
+
+-- A1. 计算三维航线长度
 -- SELECT gis_linestring_length_m(
 --     ST_GeomFromText('LINESTRING Z (113.640409 34.744365 50, 113.657920 34.748111 120)', 4326)
 -- );
 
+-- A2. 判断航点是否落入禁飞/管控围栏
 -- SELECT gis_flight_point_in_fence(
 --     ST_SetSRID(ST_MakePoint(113.640409, 34.744365, 120), 4326),
 --     'TEST001'
 -- );
 
+-- A3. 判断航线是否穿越禁飞/管控围栏
 -- SELECT gis_flight_line_intersects_fence(
 --     ST_GeomFromText('LINESTRING Z (113.640409 34.744365 50, 113.657920 34.748111 120)', 4326),
 --     'TEST001'
 -- );
 
--- SELECT * FROM gis_astar_3d_flight(
---     113.64040905110176, 34.744365280882896, 50,
---     113.65792057874526, 34.748111106532264, 50,
---     140, 0, TRUE, 'TEST001', 'admin'
+-- A4. 删除连续重复点，保留同经纬度不同高度的垂直点
+-- SELECT ST_AsText(gis_linestring_remove_duplicate_points(
+--     ST_GeomFromText(
+--         'LINESTRING Z (113.1 34.1 100, 113.1 34.1 100, 113.1 34.1 120, 113.2 34.2 120)',
+--         4326
+--     )
+-- ));
+
+-- =============================================================================
+-- B. 单段核心函数 gis_astar_3d_flight
+-- 说明：只计算并返回单段结果，不写入 gis_flight_paths；通常由入口函数调用。
+-- =============================================================================
+
+-- SELECT code, msg, waypoints, smooth_waypoints
+-- FROM gis_astar_3d_flight(
+--     113.48457, 34.814507, 100.0,
+--     113.48575564234284, 34.81534315486885, 120.0,
+--     120.0, 0, TRUE,
+--     '2c95908e958f3b75019593551f520126', 'user_123'
 -- );
 
-SELECT * FROM gis_astar_3d_flight_plan(
-    113.64040905110176, 34.744365280882896, 50,
-    113.65792057874526, 34.748111106532264, 50,
-    140, 0, TRUE, 'TEST001', 'admin'
-);
+-- =============================================================================
+-- C. 单段入口函数 gis_astar_3d_flight_plan
+-- 说明：5km内调用核心函数并入库；超过5km会转入 gis_flight_paths_plan。
+-- =============================================================================
 
-SELECT * FROM gis_astar_3d_flight_plan(
-    113.64222358404974, 34.74451810188475, 50,
-    113.64726547682564, 34.74503129632292, 50,
-    140, 0, TRUE, 'TEST001', 'admin'
-);
-SELECT gis_astar_3d_flight_plan (
-    113.6414337492313, 34.74416672368355, 50.0, 
-    113.64713158192619, 34.745232119865804, 50.0, 
-    120, 0, False, 'project_001', 'user_123'
-    );
+-- C1. 起点高度 != 安全高度，终点高度 = 安全高度
+-- 预期点形态：起点真实高度 -> 起点安全高度 -> 终点
+-- SELECT code, msg, id, waypoints, smooth_waypoints
+-- FROM gis_astar_3d_flight_plan(
+--     113.48457::double precision, 34.814507::double precision, 100.0::double precision,
+--     113.48575564234284::double precision, 34.81534315486885::double precision, 120.0::double precision,
+--     120.0::double precision, 0::double precision, TRUE::boolean,
+--     '2c95908e958f3b75019593551f520126'::varchar, 'user_123'::varchar
+-- );
 
--- SELECT * FROM gis_flight_paths_plan(
+-- C2. 起点高度 = 安全高度，终点高度 != 安全高度
+-- 预期点形态：起点 -> 终点安全高度 -> 终点真实高度
+-- SELECT code, msg, id, waypoints, smooth_waypoints
+-- FROM gis_astar_3d_flight_plan(
+--     113.48457, 34.814507, 120.0,
+--     113.48575564234284, 34.81534315486885, 80.0,
+--     120.0, 0, TRUE,
+--     '2c95908e958f3b75019593551f520126', 'user_123'
+-- );
+
+-- C3. 起点高度 != 安全高度，终点高度 != 安全高度
+-- 预期点形态：起点真实高度 -> 起点安全高度 -> 终点安全高度 -> 终点真实高度
+-- SELECT code, msg, id, waypoints, smooth_waypoints
+-- FROM gis_astar_3d_flight_plan(
+--     113.48457, 34.814507, 100.0,
+--     113.48575564234284, 34.81534315486885, 80.0,
+--     120.0, 0, TRUE,
+--     '2c95908e958f3b75019593551f520126', 'user_123'
+-- );
+
+-- C4. 起点高度 = 安全高度，终点高度 = 安全高度
+-- 若直线无围栏冲突，预期可简化为：起点 -> 终点
+-- SELECT code, msg, id, waypoints, smooth_waypoints
+-- FROM gis_astar_3d_flight_plan(
+--     113.48457, 34.814507, 120.0,
+--     113.48575564234284, 34.81534315486885, 120.0,
+--     120.0, 0, TRUE,
+--     '2c95908e958f3b75019593551f520126', 'user_123'
+-- );
+
+-- C5. 平滑爬升/下降模式示例
+-- SELECT code, msg, id, waypoints, smooth_waypoints
+-- FROM gis_astar_3d_flight_plan(
+--     113.48457, 34.814507, 80.0,
+--     113.48575564234284, 34.81534315486885, 130.0,
+--     120.0, 0.3, TRUE,
+--     '2c95908e958f3b75019593551f520126', 'user_123'
+-- );
+
+-- =============================================================================
+-- D. 多点入口函数 gis_flight_paths_plan
+-- 说明：按输入点顺序逐段规划，最终只插入并返回一条总航线。
+-- =============================================================================
+
+-- D1. 常规多点航线
+-- SELECT code, msg, id, total_distance, waypoints, smooth_waypoints
+-- FROM gis_flight_paths_plan(
 --     jsonb_build_array(
---         jsonb_build_object('lon', 113.64040905110176, 'lat', 34.744365280882896, 'alt', 50),
---         jsonb_build_object('lon', 113.65792057874526, 'lat', 34.748111106532264, 'alt', 50)
+--         jsonb_build_object('lon', 113.48457, 'lat', 34.814507, 'alt', 100.0),
+--         jsonb_build_object('lon', 113.48575564234284, 'lat', 34.81534315486885, 'alt', 120.0),
+--         jsonb_build_object('lon', 113.4901, 'lat', 34.8172, 'alt', 80.0)
 --     ),
---     140, TRUE, 'TEST001', 'admin', 0
+--     120.0, TRUE, '2c95908e958f3b75019593551f520126', 'user_123', 0
 -- );
+
+-- D2. 多点零距离垂直段
+-- 相邻输入点经纬度相同但高度不同，用于验证垂直段不会丢失。
+-- SELECT code, msg, id, waypoints, smooth_waypoints
+-- FROM gis_flight_paths_plan(
+--     jsonb_build_array(
+--         jsonb_build_object('lon', 113.48457, 'lat', 34.814507, 'alt', 80.0),
+--         jsonb_build_object('lon', 113.48457, 'lat', 34.814507, 'alt', 120.0),
+--         jsonb_build_object('lon', 113.48575564234284, 'lat', 34.81534315486885, 'alt', 120.0)
+--     ),
+--     120.0, TRUE, '2c95908e958f3b75019593551f520126', 'user_123', 0
+-- );
+
+-- D3. 数组坐标格式输入
+-- p_points 也支持 [[lon, lat, alt], ...] 格式。
+-- SELECT code, msg, id, total_distance, waypoints, smooth_waypoints
+-- FROM gis_flight_paths_plan(
+--     jsonb_build_array(
+--         jsonb_build_array(113.48457, 34.814507, 100.0),
+--         jsonb_build_array(113.48575564234284, 34.81534315486885, 120.0),
+--         jsonb_build_array(113.4901, 34.8172, 80.0)
+--     ),
+--     120.0, TRUE, '2c95908e958f3b75019593551f520126', 'user_123', 0
+-- );
+
+-- D4. 长距离多点航线
+-- 相邻点超过5km时会按5km探测；安全段直接合并，遇围栏/障碍段调用A*。
+-- SELECT code, msg, id, total_distance, waypoints, smooth_waypoints
+-- FROM gis_flight_paths_plan(
+--     jsonb_build_array(
+--         jsonb_build_object('lon', 113.48457, 'lat', 34.814507, 'alt', 100.0),
+--         jsonb_build_object('lon', 113.56000, 'lat', 34.850000, 'alt', 120.0),
+--         jsonb_build_object('lon', 113.62000, 'lat', 34.900000, 'alt', 100.0)
+--     ),
+--     120.0, TRUE, '2c95908e958f3b75019593551f520126', 'user_123', 0
+-- );
+
+-- =============================================================================
+-- E. 结果检查示例
+-- =============================================================================
+
+-- E1. 查看返回/入库航线的 path_line 与 smooth_path_line 点序
+-- 将 WHERE p.id = 1 替换为实际返回的航线ID。
+-- SELECT
+--     p.id,
+--     'path_line' AS line_type,
+--     (dp).path[1] AS seq,
+--     ST_X((dp).geom) AS lon,
+--     ST_Y((dp).geom) AS lat,
+--     ST_Z((dp).geom) AS alt
+-- FROM gis_flight_paths p
+-- CROSS JOIN LATERAL ST_DumpPoints(p.path_line) AS dp
+-- WHERE p.id = 1
+-- UNION ALL
+-- SELECT
+--     p.id,
+--     'smooth_path_line' AS line_type,
+--     (dp).path[1] AS seq,
+--     ST_X((dp).geom) AS lon,
+--     ST_Y((dp).geom) AS lat,
+--     ST_Z((dp).geom) AS alt
+-- FROM gis_flight_paths p
+-- CROSS JOIN LATERAL ST_DumpPoints(p.smooth_path_line) AS dp
+-- WHERE p.id = 1
+-- ORDER BY line_type, seq;
+
+-- E2. 查看JSON航点
+-- SELECT id, waypoints, smooth_waypoints
+-- FROM gis_flight_paths
+-- WHERE id = 1;
 

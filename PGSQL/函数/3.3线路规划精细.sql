@@ -105,6 +105,9 @@ DECLARE
     v_max_lat DOUBLE PRECISION;                    -- 走廊外包框最大纬度。
     v_mid_lat DOUBLE PRECISION;                    -- 走廊中间纬度，用来估算经度方向每度对应多少米。
     v_lon_meter DOUBLE PRECISION;                  -- 当前纬度附近 1 度经度约等于多少米。
+    v_corridor_buffer_m DOUBLE PRECISION := 80.0;  -- 精细走廊外包框额外外扩距离，给建筑绕行留出空间。
+    v_lon_buffer DOUBLE PRECISION;                 -- 经度方向外扩量，单位度。
+    v_lat_buffer DOUBLE PRECISION;                 -- 纬度方向外扩量，单位度。
     step_lon DOUBLE PRECISION;                     -- 经度方向网格步长，单位是“度”，由米换算而来。
     step_lat DOUBLE PRECISION;                     -- 纬度方向网格步长，单位是“度”，由米换算而来。
     step_alt DOUBLE PRECISION;                     -- 高度方向网格步长，单位米。
@@ -194,6 +197,15 @@ BEGIN
         RETURN NEXT;
         RETURN;
     END IF;
+
+    -- 粗航线可能直接贴着或穿过建筑。精细网格必须在粗线外包框外额外留出绕行空间；
+    -- 否则 A* 即使正确避障，也可能因为搜索范围太窄而只能退化为直线。
+    v_lat_buffer := v_corridor_buffer_m / 111320.0;
+    v_lon_buffer := v_corridor_buffer_m / v_lon_meter;
+    v_min_lon := v_min_lon - v_lon_buffer;
+    v_max_lon := v_max_lon + v_lon_buffer;
+    v_min_lat := v_min_lat - v_lat_buffer;
+    v_max_lat := v_max_lat + v_lat_buffer;
 
     -- 30m/20m 分辨率需要换算成经纬度步长。
     -- 纬度 1 度约 111320 米；经度 1 度随纬度变化，所以用 v_lon_meter 单独计算。
@@ -830,6 +842,9 @@ DECLARE
     v_start_time timestamptz := clock_timestamp();       -- 函数开始时间，用于耗时统计。
     v_return_msg TEXT;                                   -- 最终返回给调用方的说明。
     v_grid_reg REGCLASS;                                 -- 精细网格表是否存在。
+    v_project_key TEXT;                                  -- 清洗后的项目ID，用于查找项目建筑表。
+    v_building_table TEXT;                               -- 建筑表名：gis_buildings_<project_id>。
+    v_building_reg REGCLASS;                             -- 建筑表是否存在。
     v_start_pt geometry(PointZ,4326);                    -- 起点三维几何。
     v_end_pt geometry(PointZ,4326);                      -- 终点三维几何。
     v_start_id BIGINT;                                   -- 距离真实起点最近的可飞网格点 id。
@@ -911,6 +926,12 @@ BEGIN
         RETURN;
     END IF;
 
+    v_project_key := regexp_replace(COALESCE(p_project_id, ''), '[^0-9a-zA-Z_]', '', 'g');
+    IF v_project_key <> '' THEN
+        v_building_table := 'gis_buildings_' || v_project_key;
+        SELECT to_regclass(format('%I.%I', current_schema(), v_building_table)) INTO v_building_reg;
+    END IF;
+
     -- 根据起终点网格的 x/y 得到一个搜索窗口，再向外扩 v_margin 个网格。
     -- 这样不需要把整张精细网格都放进 A* 临时表，能明显减少搜索量。
     EXECUTE format('SELECT x FROM %I WHERE id = $1', p_grid_table) INTO v_min_x USING v_start_id;
@@ -951,6 +972,37 @@ BEGIN
     CREATE INDEX IF NOT EXISTS idx_tmp_fine_astar_grid_open ON tmp_fine_astar_grid(f_cost) WHERE closed = false;
     ANALYZE tmp_fine_astar_grid;
 
+    -- 节点级建筑打标只能保证航点不落入建筑，不能保证两个相邻航点之间的斜线不切过建筑。
+    -- 这里把搜索窗口内、高度达到巡航高度的建筑面缓存下来，供 A* 扩展邻居时做线段相交过滤。
+    DROP TABLE IF EXISTS tmp_fine_astar_buildings;
+    IF v_building_reg IS NOT NULL THEN
+        EXECUTE format('
+            CREATE TEMP TABLE tmp_fine_astar_buildings ON COMMIT DROP AS
+            WITH grid_extent AS (
+                SELECT ST_Extent(ST_Force2D(geom))::box3d AS extent
+                FROM tmp_fine_astar_grid
+            )
+            SELECT
+                COALESCE(id::text, gid::text) AS building_id,
+                CASE WHEN COALESCE(height, 0) > 0 THEN height::double precision ELSE 5::double precision END AS max_height,
+                ST_Buffer(ST_SetSRID(ST_Force2D(geom), 4326)::geography, 20)::geometry AS geom2d
+            FROM %I, grid_extent e
+            WHERE geom IS NOT NULL
+              AND (CASE WHEN COALESCE(height, 0) > 0 THEN height::double precision ELSE 5::double precision END) >= $1
+              AND ST_SetSRID(ST_Force2D(geom), 4326) && ST_MakeEnvelope(ST_XMin(e.extent), ST_YMin(e.extent), ST_XMax(e.extent), ST_YMax(e.extent), 4326)
+              AND ST_Intersects(ST_SetSRID(ST_Force2D(geom), 4326), ST_MakeEnvelope(ST_XMin(e.extent), ST_YMin(e.extent), ST_XMax(e.extent), ST_YMax(e.extent), 4326))
+        ', v_building_table)
+        USING p_safe_altitude;
+    ELSE
+        CREATE TEMP TABLE tmp_fine_astar_buildings (
+            building_id text,
+            max_height double precision,
+            geom2d geometry
+        ) ON COMMIT DROP;
+    END IF;
+    CREATE INDEX IF NOT EXISTS idx_tmp_fine_astar_buildings_geom ON tmp_fine_astar_buildings USING GIST (geom2d);
+    ANALYZE tmp_fine_astar_buildings;
+
     -- 初始化起点：起点 g_cost=0，f_cost=到终点的直线距离。
     UPDATE tmp_fine_astar_grid g
     SET g_cost = 0,
@@ -988,11 +1040,20 @@ BEGIN
         FOR v_nid, v_n_geom IN
             SELECT n.id, n.geom
             FROM tmp_fine_astar_grid n
+            CROSS JOIN LATERAL (
+                SELECT ST_SetSRID(ST_MakeLine(ST_Force2D(v_curr_geom), ST_Force2D(n.geom)), 4326) AS geom2d
+            ) seg
             WHERE n.closed = false
               AND n.x BETWEEN v_curr_x - 1 AND v_curr_x + 1
               AND n.y BETWEEN v_curr_y - 1 AND v_curr_y + 1
               AND n.z BETWEEN v_curr_z - 1 AND v_curr_z + 1
               AND n.id <> v_curr
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM tmp_fine_astar_buildings b
+                  WHERE seg.geom2d && b.geom2d
+                    AND ST_Intersects(seg.geom2d, b.geom2d)
+              )
         LOOP
             v_new_g := v_curr_g + ST_3DDistance(v_curr_geom, v_n_geom);
             UPDATE tmp_fine_astar_grid g
@@ -1005,11 +1066,14 @@ BEGIN
         END LOOP;
     END LOOP;
 
-    -- 如果 A* 没找到路，返回起点到终点直线兜底，避免上层完全没有航线。
+    -- 如果 A* 没找到路，不能返回直线兜底；直线很可能穿过建筑，必须让上层明确知道精细规划失败。
     IF NOT v_found THEN
-        v_path_line := ST_MakeLine(v_start_pt, v_end_pt);
-        v_raw_path_line := v_path_line;
-        v_final_line := v_path_line;
+        code := 400;
+        msg := format('精细网格未找到避开建筑的有效路径，请增大走廊范围或提高安全高度，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
     ELSE
         -- 从 goal 沿 parent_id 一路回溯到 start，得到网格路径 id。
         v_current := v_goal_id;
