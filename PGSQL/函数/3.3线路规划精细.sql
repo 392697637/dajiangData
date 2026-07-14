@@ -1,66 +1,59 @@
 -- =============================================================================
 -- 3.3线路规划精细.sql
---   gis_generate_corridor_fine_grid         生成航廊精细飞行网格
---   gis_mark_electric_fence_on_grid         标记精细网格电子围栏
---   gis_mark_buildings_on_grid              标记精细网格建筑障碍
---   gis_astar_3d_flight_plan_on_grid        指定网格精细避障寻路
---   gis_astar_3d_flight_plan_build          建筑避障精细航线规划
+--   gis_generate_corridor_fine_grid          生成项目级航廊精细飞行网格
+--   gis_get_project_fine_grid                查询项目级精细网格，供前端绘制
+--   gis_mark_electric_fence_on_grid          标记精细网格电子围栏障碍
+--   gis_mark_buildings_on_grid               标记精细网格建筑障碍
+--   gis_astar_3d_flight_plan_on_grid         指定精细网格上的 A* 避障寻路
+--   gis_astar_3d_flight_plan_build           建筑避障两阶段精细航线规划入口
 --
--- =============================================================================
-
--- ==============================================
--- 100m 全局粗规划 + 20m 航线矩形精规划
 -- 依赖：
---   1. 3.1 中的 gis_generate_3d_grid / gis_mark_electric_fence / gis_mark_buildings
---   2. 3.2 中的 gis_astar_3d_flight_plan / gis_linestring_length_m
--- 说明：
---   - 全局粗规划继续使用 gis_grid_nodes_<project_id>
---   - 精细规划只在粗航线所有线路点外包矩形内生成精细网格，避免全域 20m 数据量爆炸
---   - 精细网格是 UNLOGGED 实表，不是内存表；p_drop_fine_grid=true 时总控函数结束后删除
---   - 精细网格表名：gis_grid_nodes_fine_<16位hash>，避免项目ID过长导致 PostgreSQL 标识符截断冲突
---   - 本文件依赖 3.2 的 gis_astar_3d_flight_plan 新返回结构：code/msg + gis_flight_paths 字段
+--   1. 3.1 中的 gis_generate_3d_grid / gis_mark_electric_fence / gis_mark_buildings。
+--   2. 3.2 中的 gis_astar_3d_flight_plan / gis_linestring_length_m。
+--   3. PostGIS，用于几何构造、空间索引、相交判断和三维距离计算。
 --
 -- 总体流程：
---   1. 先用 3.2 的 100m 全局网格跑一次粗 A*，拿到一条大概可行的粗航线。
---   2. 取粗航线所有线路点构成外包矩形，不再做 buffer 外扩。
---   3. 只在矩形范围内部生成 20m 精细三维网格，控制数据量。
---   4. 对这张临时/中间精细网格重新打电子围栏和建筑物阻塞标记。
---   5. 在精细网格上再跑一次 A*，得到更贴近障碍物边界的精细航线。
+--   1. 先调用 3.2 的 100m 全局粗规划，得到一条可行粗航线。
+--   2. 按粗航线所有点的外包矩形生成 20m 精细网格，并额外外扩 500m 作为绕行空间。
+--   3. 精细网格按项目固定保存为 gis_grid_nodes_fine_<project_id>，默认不在总控结束后删除。
+--   4. 对精细网格重新打电子围栏和建筑物阻塞标记。
+--   5. 在精细网格上执行 A*，并在扩展邻居和平滑简化时校验建筑穿越。
+--   6. 如果需要前端排查，可调用 gis_get_project_fine_grid 读取网格点进行绘制。
 --
 -- 重要字段约定：
 --   is_flyable  = true 表示 A* 可以走这个网格点。
---   block_mask  使用二进制位记录阻塞来源：
---                 第 1 位，值 1：电子围栏造成阻塞；
---                 第 2 位，值 2：建筑物造成阻塞；
---                 后续如果增加障碍类型，可以继续用 4/8/16。
+--   block_mask  使用二进制位记录阻塞来源：1=电子围栏，2=建筑物，后续可继续用 4/8/16。
 --   zone_type   记录围栏类型中文名，例如 禁飞区 / 管控区 / 适飞区。
 --   geom2d      二维点，只用于平面相交、围栏、建筑判断，速度更快。
 --   geom        三维点，用于 A* 距离计算和最终航线高度。
 --
 -- 返回策略：
 --   code=200 表示函数正常完成。
---   code=400 表示输入参数非法。
+--   code=400 表示输入参数或空间条件不满足规划要求。
 --   code=500 表示执行过程中出现异常。
---   msg 中包含执行时间，以及具体执行说明。
--- ==============================================
+--   msg 中包含执行说明和耗时，便于接口或日志直接展示。
+-- =============================================================================
 
 CREATE EXTENSION IF NOT EXISTS postgis;
 
-
 -- ============================================================
 -- 1. gis_generate_corridor_fine_grid
---    根据粗航线所有线路点外包矩形生成精细网格。
---    输入粗航线 LineStringZ、垂直高度范围和精细分辨率。
---    返回精细网格表名，后续由围栏/建筑打标函数和精细 A* 使用。
+--    根据粗航线外包矩形生成项目级精细三维网格。
+--
+-- 设计说明：
+--   - 输入粗规划得到的 LineStringZ，取整条线路的二维外包矩形。
+--   - 外包矩形额外外扩 500m，避免粗航线贴近或穿过建筑时精细 A* 没有绕行空间。
+--   - 表名固定为 gis_grid_nodes_fine_<project_id>，同一项目可以复用，也便于前端按项目查询。
+--   - 表为 UNLOGGED 实表，适合中间网格数据；字段包含 x/y/z、lon/lat/alt、geom2d、geom、is_flyable、block_mask、create_time、update_time。
 --
 -- 参数说明：
---   p_project_id       项目ID。用于生成稳定表名；不能为空。
---   p_path_line        粗规划得到的航线，通常是 LineStringZ。函数会取整条线路的外包矩形。
---   p_min_alt          精细网格最低高度，单位米。通常取起终点高度和 0 的最小值。
---   p_max_alt          精细网格最高高度，单位米。通常取安全高度、起点高度、终点高度的最大值。
---   p_resolution       精细网格平面分辨率，单位米；默认 20。数值越小，网格越密，计算越慢。
---   p_task_id          任务ID。用于参与精细表名 hash；为空时自动生成随机 key。
---   p_drop_old         如果同名精细网格表已存在，true=先删除重建，false=直接复用旧表。
+--   p_project_id       项目ID。用于生成稳定网格表名；不能为空。
+--   p_path_line        粗规划得到的航线，通常是 LineStringZ。
+--   p_min_alt          精细网格最低高度，单位米。
+--   p_max_alt          精细网格最高高度，单位米。
+--   p_resolution       平面分辨率，单位米；默认 20。数值越小网格越密，计算越慢。
+--   p_task_id          兼容旧调用保留，目前不参与表名生成。
+--   p_drop_old         同名精细网格表已存在时，true=删除重建，false=复用旧表。
 --
 -- 返回字段：
 --   code        200/400/500 状态码。
@@ -75,48 +68,57 @@ SELECT gis_drop_function('gis_generate_corridor_fine_grid');
 
 -- =============================================================================
 -- 函数介绍：gis_generate_corridor_fine_grid
--- 主要作用：沿粗规划航线生成走廊范围内的精细三维网格，用于二次精细避障。
--- 入参说明：包含项目ID、中心航线、高度范围、分辨率、任务标识和是否重建。
+-- 主要作用：沿粗规划航线生成项目级走廊范围内的精细三维网格，用于二次精细避障。
+-- 入参说明：包含项目ID、中心航线、高度范围、分辨率、兼容任务标识和是否重建。
 -- 返回说明：返回精细网格表名、生成数量和执行状态，供后续围栏和建筑标记使用。
--- 注意事项：只在粗航线所有线路点外包矩形内建网格，适合20米精细分辨率，避免全域高密度建表。
+-- 输出字段说明：
+--   code        返回状态码，200成功，400参数或业务条件不满足，500执行异常。
+--   table_name  生成或复用的项目级精细网格表名。
+--   msg         执行结果说明，包含失败原因或耗时信息。
+--   count       生成、复用或预估的精细网格点数量。
+-- 注意事项：当前按粗航线所有线路点外包矩形并外扩500m建网格，表名固定为 gis_grid_nodes_fine_<project_id>。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION gis_generate_corridor_fine_grid(
-    p_project_id VARCHAR,
-    p_path_line GEOMETRY,
-    p_min_alt NUMERIC,
-    p_max_alt NUMERIC,
-    p_resolution INT DEFAULT 20,
-    p_task_id VARCHAR DEFAULT NULL,
-    p_drop_old BOOLEAN DEFAULT TRUE
+    p_project_id VARCHAR,                 -- 项目ID，用于生成稳定的项目级精细网格表名。
+    p_path_line GEOMETRY,                 -- 粗规划输出的中心航线，用于计算精细网格走廊范围。
+    p_min_alt NUMERIC,                    -- 精细网格最低高度，单位米。
+    p_max_alt NUMERIC,                    -- 精细网格最高高度，单位米。
+    p_resolution INT DEFAULT 20,          -- 平面网格分辨率，单位米，默认 20m。
+    p_task_id VARCHAR DEFAULT NULL,       -- 兼容旧调用保留的任务标识，当前不参与表名生成。
+    p_drop_old BOOLEAN DEFAULT TRUE       -- 是否删除同名旧精细网格表并重新生成。
 )
-RETURNS TABLE (code integer, table_name text, msg text, count bigint)
+RETURNS TABLE (
+    code integer,       -- 返回状态码：200成功，400参数或业务条件不满足，500执行异常。
+    table_name text,    -- 生成或复用的项目级精细网格表名。
+    msg text,           -- 执行结果说明，包含失败原因或耗时信息。
+    count bigint        -- 生成、复用或预估的精细网格点数量。
+)
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_start_time timestamptz := clock_timestamp(); -- 记录函数开始时间，用于返回 msg 中的耗时。
-    v_project_key TEXT;                            -- 清洗后的项目ID，只保留字母、数字、下划线，避免动态表名非法。
-    v_task_key TEXT;                               -- 清洗后的任务ID；为空则用当前时间 md5 生成一个短 key。
-    v_table TEXT;                                  -- 最终生成的精细网格表名。
-    v_idx_prefix TEXT;                             -- 精细网格索引名前缀，避免索引名过长。
-    v_table_regclass REGCLASS;                     -- 用 to_regclass 检查表是否存在时的结果。
-    v_min_lon DOUBLE PRECISION;                    -- 走廊外包框最小经度。
-    v_max_lon DOUBLE PRECISION;                    -- 走廊外包框最大经度。
-    v_min_lat DOUBLE PRECISION;                    -- 走廊外包框最小纬度。
-    v_max_lat DOUBLE PRECISION;                    -- 走廊外包框最大纬度。
-    v_mid_lat DOUBLE PRECISION;                    -- 走廊中间纬度，用来估算经度方向每度对应多少米。
-    v_lon_meter DOUBLE PRECISION;                  -- 当前纬度附近 1 度经度约等于多少米。
-    v_corridor_buffer_m DOUBLE PRECISION := 80.0;  -- 精细走廊外包框额外外扩距离，给建筑绕行留出空间。
-    v_lon_buffer DOUBLE PRECISION;                 -- 经度方向外扩量，单位度。
-    v_lat_buffer DOUBLE PRECISION;                 -- 纬度方向外扩量，单位度。
-    step_lon DOUBLE PRECISION;                     -- 经度方向网格步长，单位是“度”，由米换算而来。
-    step_lat DOUBLE PRECISION;                     -- 纬度方向网格步长，单位是“度”，由米换算而来。
-    step_alt DOUBLE PRECISION;                     -- 高度方向网格步长，单位米。
-    v_lon_max_idx INT;                             -- 经度方向 generate_series 的最大下标。
-    v_lat_max_idx INT;                             -- 纬度方向 generate_series 的最大下标。
-    v_alt_max_idx INT;                             -- 高度方向 generate_series 的最大下标。
-    v_estimated_count BIGINT;                      -- 按外包框预估的最大三维网格数量，用于提前拦截超大任务。
-    v_cnt BIGINT;                                  -- 实际写入精细网格表的行数。
-    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
+    v_start_time timestamptz := clock_timestamp();       -- 记录函数开始时间，用于返回 msg 中的耗时。
+    v_project_key TEXT;                                  -- 清洗后的项目ID，只保留字母、数字、下划线，避免动态表名非法。
+    v_table TEXT;                                        -- 最终生成的项目级精细网格表名。
+    v_idx_prefix TEXT;                                   -- 精细网格索引名前缀，避免索引名过长。
+    v_table_regclass REGCLASS;                           -- 用 to_regclass 检查表是否存在时的结果。
+    v_min_lon DOUBLE PRECISION;                          -- 走廊外包框最小经度。
+    v_max_lon DOUBLE PRECISION;                          -- 走廊外包框最大经度。
+    v_min_lat DOUBLE PRECISION;                          -- 走廊外包框最小纬度。
+    v_max_lat DOUBLE PRECISION;                          -- 走廊外包框最大纬度。
+    v_mid_lat DOUBLE PRECISION;                          -- 走廊中间纬度，用来估算经度方向每度对应多少米。
+    v_lon_meter DOUBLE PRECISION;                        -- 当前纬度附近 1 度经度约等于多少米。
+    v_corridor_buffer_m DOUBLE PRECISION := 500.0;       -- 精细走廊外包框额外外扩距离，当前为 500m。
+    v_lon_buffer DOUBLE PRECISION;                       -- 经度方向外扩量，单位度。
+    v_lat_buffer DOUBLE PRECISION;                       -- 纬度方向外扩量，单位度。
+    step_lon DOUBLE PRECISION;                           -- 经度方向网格步长，单位是度，由米换算而来。
+    step_lat DOUBLE PRECISION;                           -- 纬度方向网格步长，单位是度，由米换算而来。
+    step_alt DOUBLE PRECISION;                           -- 高度方向网格步长，单位米。
+    v_lon_max_idx INT;                                   -- 经度方向 generate_series 的最大下标。
+    v_lat_max_idx INT;                                   -- 纬度方向 generate_series 的最大下标。
+    v_alt_max_idx INT;                                   -- 高度方向 generate_series 的最大下标。
+    v_estimated_count BIGINT;                            -- 按外包框预估的最大三维网格数量，用于提前拦截超大任务。
+    v_cnt BIGINT;                                        -- 实际写入精细网格表的行数。
+    v_log_sql TEXT;                                      -- 当前函数调用SQL，用于错误日志。
 BEGIN
     v_log_sql := format('SELECT * FROM public.gis_generate_corridor_fine_grid(%L, %L, %s, %s, %s, %L, %L);',
         p_project_id, ST_AsText(p_path_line), COALESCE(p_min_alt::text, 'NULL'), COALESCE(p_max_alt::text, 'NULL'), COALESCE(p_resolution::text, 'NULL'), p_task_id, p_drop_old);
@@ -162,15 +164,23 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 动态表名不能直接拼接原始 project_id/task_id，因为可能包含横线、中文或其他非法字符。
+    -- 清理项目ID，只保留可用于动态表名的字符。
     v_project_key := regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
-    v_task_key := COALESCE(NULLIF(regexp_replace(COALESCE(p_task_id, ''), '[^0-9a-zA-Z_]', '', 'g'), ''), substr(md5(clock_timestamp()::text), 1, 12));
-    -- PostgreSQL标识符最长63字节，精细表名用hash压缩，避免项目ID+任务ID过长被截断。
-    v_table := 'gis_grid_nodes_fine_' || substr(md5(v_project_key || '_' || v_task_key), 1, 16);
+    IF v_project_key = '' THEN
+        code := 400;
+        msg := format('参数错误：项目ID清理后为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- 精细网格表按项目ID固定生成，便于复用和前端按项目查询。
+    v_table := 'gis_grid_nodes_fine_' || v_project_key;
     v_idx_prefix := 'idx_' || substr(md5(v_table), 1, 12);
     table_name := v_table;
 
-    -- 取粗航线所有线路点构成的外包矩形，不再做 buffer 外扩。
+    -- 取粗航线所有线路点构成的外包矩形，作为精细网格生成的基础范围。
     SELECT
         ST_XMin(ST_Envelope(ST_Force2D(ST_SetSRID(p_path_line, 4326)))),
         ST_XMax(ST_Envelope(ST_Force2D(ST_SetSRID(p_path_line, 4326)))),
@@ -178,7 +188,7 @@ BEGIN
         ST_YMax(ST_Envelope(ST_Force2D(ST_SetSRID(p_path_line, 4326))))
     INTO v_min_lon, v_max_lon, v_min_lat, v_max_lat;
 
-    -- 线路经度或纬度完全相同时，矩形面积为0，无法生成二维网格；只做最小兜底展开。
+    -- 如果经度或纬度完全相同，外包框面积为 0，做最小展开避免无法生成二维网格。
     IF v_min_lon = v_max_lon THEN
         v_min_lon := v_min_lon - 0.000001;
         v_max_lon := v_max_lon + 0.000001;
@@ -198,8 +208,8 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 粗航线可能直接贴着或穿过建筑。精细网格必须在粗线外包框外额外留出绕行空间；
-    -- 否则 A* 即使正确避障，也可能因为搜索范围太窄而只能退化为直线。
+    -- 粗航线可能贴近或穿过建筑，精细网格需要在粗线外包框外额外保留绕行空间。
+    -- 走廊外扩距离当前为 500m。
     v_lat_buffer := v_corridor_buffer_m / 111320.0;
     v_lon_buffer := v_corridor_buffer_m / v_lon_meter;
     v_min_lon := v_min_lon - v_lon_buffer;
@@ -207,8 +217,7 @@ BEGIN
     v_min_lat := v_min_lat - v_lat_buffer;
     v_max_lat := v_max_lat + v_lat_buffer;
 
-    -- 30m/20m 分辨率需要换算成经纬度步长。
-    -- 纬度 1 度约 111320 米；经度 1 度随纬度变化，所以用 v_lon_meter 单独计算。
+    -- 将米级分辨率换算为经纬度步长；经度方向按当前纬度单独换算。
     step_lat := p_resolution / 111320.0;
     step_lon := p_resolution / v_lon_meter;
     step_alt := 1.0;
@@ -220,7 +229,7 @@ BEGIN
 
     IF v_estimated_count > 30000000 THEN
         code := 400;
-        msg := format('参数错误：精细网格预计 %s 条，超过3000万，请增大分辨率或缩小线路点外包矩形范围，执行时间 %s 秒', v_estimated_count, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        msg := format('参数错误：精细网格预计 %s 条，超过3000万，请增大分辨率或缩小航线外包范围，执行时间 %s 秒', v_estimated_count, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := v_estimated_count;
         INSERT INTO public.gis_error_log(code, msg, sqlstring)
         VALUES (code, msg, v_log_sql);
@@ -228,13 +237,16 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 如果同名表已经存在：p_drop_old=true 时删掉重建；否则直接返回旧表和旧行数。
+    -- 如果同名表已经存在：p_drop_old=true 时删掉重建；否则补齐时间字段后直接返回旧表和旧行数。
     SELECT to_regclass(format('%I.%I', current_schema(), v_table)) INTO v_table_regclass;
     IF v_table_regclass IS NOT NULL AND p_drop_old THEN
         EXECUTE format('DROP TABLE %s CASCADE;', v_table_regclass);
     ELSIF v_table_regclass IS NOT NULL THEN
         code := 200;
         msg := format('精细网格表已存在：%s，执行时间 %s 秒', v_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS create_time TIMESTAMP DEFAULT now()', v_table);
+        EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS update_time TIMESTAMP DEFAULT now()', v_table);
+        EXECUTE format('UPDATE %I SET create_time = COALESCE(create_time, now()), update_time = COALESCE(update_time, now())', v_table);
         EXECUTE format('SELECT count(*) FROM %I', v_table) INTO count;
         RETURN NEXT;
         RETURN;
@@ -243,7 +255,7 @@ BEGIN
     -- 创建 UNLOGGED 精细网格表：
     --   lon_series  生成经度方向离散点。
     --   lat_series  生成纬度方向离散点。
-    --   xy_grid     先生成二维点，并只保留落在走廊面内的点。
+    --   xy_grid     先生成二维点；旧版会再按走廊面裁剪，当前通过粗航线外包框+500m控制范围。
     --   z_grid      生成高度方向离散点。
     --   最终 xy_grid × z_grid 得到三维点。
     --
@@ -266,6 +278,7 @@ BEGIN
         ),
         xy_grid AS MATERIALIZED (
             -- MATERIALIZED 强制物化二维网格，后面和 z_grid 做笛卡尔积时避免重复计算。
+            -- 当前精细范围已由粗航线外包框+500m控制，不再额外按走廊面过滤 xy 点。
             SELECT
                 x.x,
                 y.y,
@@ -293,8 +306,10 @@ BEGIN
             true::BOOLEAN AS is_flyable, -- 初始都认为可飞，后续围栏/建筑打标会改成 false。
             NULL::VARCHAR(20) AS zone_type, -- 围栏类型，建筑阻塞不写这个字段。
             0::INT AS block_mask, -- 阻塞来源位图：1=围栏，2=建筑。
+            NOW()::TIMESTAMP AS create_time,
+            NOW()::TIMESTAMP AS update_time,
             xy.geom2d, -- 二维点，用于平面空间判断。
-            ST_SetSRID(ST_MakePoint(xy.lon, xy.lat, z.alt), 4326)::geometry(PointZ,4326) AS geom -- 三维点，用于 A*。
+            ST_SetSRID(ST_MakePoint(xy.lon, xy.lat, z.alt), 4326)::geometry(PointZ,4326) AS geom
         FROM xy_grid xy
         CROSS JOIN z_grid z
     ', v_table)
@@ -318,13 +333,13 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST(geom2d) WHERE z = 0', v_idx_prefix || '_geom2d_z0', v_table);
     EXECUTE format('ANALYZE %I', v_table);
 
-    msg := format('走廊精细网格生成成功：%s，共 %s 条，执行时间 %s 秒', v_table, v_cnt, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    msg := format('航廊精细网格生成成功：%s，共 %s 条，执行时间 %s 秒', v_table, v_cnt, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     RETURN NEXT;
 
 EXCEPTION WHEN OTHERS THEN
     code := 500;
     table_name := v_table;
-    msg := format('生成走廊精细网格失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    msg := format('生成航廊精细网格失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     count := 0;
     INSERT INTO public.gis_error_log(code, msg, sqlstring)
     VALUES (code, msg, v_log_sql);
@@ -335,31 +350,202 @@ COMMENT ON FUNCTION gis_generate_corridor_fine_grid(VARCHAR, GEOMETRY, NUMERIC, 
 
 
 -- ============================================================
--- 2. gis_mark_electric_fence_on_grid
---    对指定网格表做电子围栏打标。
+-- 2. gis_get_project_fine_grid
+--    按项目ID读取项目级精细网格，供前端绘制和问题排查。
 --
--- 适用场景：
---   精细网格表不是固定项目全局表，表名由 gis_generate_corridor_fine_grid 动态生成，
---   因此不能直接复用 3.1 中按 project_id 推导表名的 gis_mark_electric_fence。
---
--- 打标规则：
---   - bo_electric_fence 中 fence_type=1/2/3 分别映射为禁飞区/管控区/适飞区；
---   - 项目专属表 gis_electric_fence_<project_id> 中 fence_type=1/2 作为禁飞/管控；
---   - 禁飞区、管控区设置 block_mask 第1位，并让 is_flyable=false；
---   - 适飞区只写 zone_type，不清除其他来源造成的阻塞。
---
--- 性能策略：
---   先把有效围栏物化到临时表并建 GiST 索引，再按围栏范围裁剪 z=0 网格点。
+-- 设计说明：
+--   - 根据 project_id 推导 gis_grid_nodes_fine_<project_id>。
+--   - 支持按高度层 z、是否可飞 is_flyable 过滤。
+--   - 支持 limit/offset 分页，避免一次返回过多网格点。
+--   - 返回 geom2d 的 GeoJSON，前端可直接绘制二维网格点。
 --
 -- 参数说明：
---   p_project_id  项目ID。用于筛选 bo_electric_fence，也用于查找 gis_electric_fence_<project_id>。
---   p_grid_table  需要打标的网格表名，一般是 gis_generate_corridor_fine_grid 返回的精细网格表。
+--   p_project_id    项目ID。
+--   p_z             可选，高度层下标；为空时查询所有高度层。
+--   p_only_flyable  可选，true 只看可飞点，false 只看不可飞点，NULL 不过滤。
+--   p_limit         可选，分页大小；NULL 或 <=0 表示不限制。
+--   p_offset        分页偏移量，默认 0。
+-- ============================================================
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_get_project_fine_grid');
+
+-- =============================================================================
+-- 函数介绍：gis_get_project_fine_grid
+-- 主要作用：按项目ID读取项目级精细网格数据，供前端绘制和排查规划问题。
+-- 入参说明：包含项目ID、高度层过滤、可飞状态过滤、分页大小和分页偏移。
+-- 返回说明：返回网格点坐标、高度、可飞状态、阻塞来源、时间字段和二维 GeoJSON。
+-- 输出字段说明：
+--   code             返回状态码，200成功，400参数或网格表不存在，500执行异常。
+--   msg              查询结果说明，包含失败原因或耗时信息。
+--   table_name       当前读取的项目级精细网格表名。
+--   total_count      当前过滤条件下的网格点总数，用于前端分页。
+--   id/x/y/z         精细网格点主键和三维离散下标。
+--   lon/lat/alt      精细网格点经纬度和高度。
+--   is_flyable       当前网格点是否可飞。
+--   block_mask       阻塞来源位标记，1=电子围栏，2=建筑物。
+--   zone_type        电子围栏类型中文名，例如禁飞区、管控区、适飞区。
+--   create_time      网格点创建时间。
+--   update_time      网格点最近更新时间。
+--   geom_geojson     网格点二维 GeoJSON，供前端绘制。
+-- 注意事项：函数只读取 gis_grid_nodes_fine_<project_id>，如果精细网格未保留则无法查询。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION gis_get_project_fine_grid(
+    p_project_id VARCHAR,                 -- 项目ID，用于定位 gis_grid_nodes_fine_<project_id>。
+    p_z INT DEFAULT NULL,                 -- 高度层下标过滤条件，NULL 表示不过滤高度层。
+    p_only_flyable BOOLEAN DEFAULT NULL,  -- 是否只查询可飞网格点，NULL 表示不过滤可飞状态。
+    p_limit INT DEFAULT NULL,             -- 返回行数限制，NULL 或小于等于 0 表示不限制。
+    p_offset INT DEFAULT 0                -- 分页偏移量，负数会按 0 处理。
+)
+RETURNS TABLE (
+    code integer,                    -- 返回状态码：200成功，400参数或网格表不存在，500执行异常。
+    msg text,                        -- 查询结果说明，包含失败原因或耗时信息。
+    table_name text,                 -- 当前读取的项目级精细网格表名。
+    total_count bigint,              -- 当前过滤条件下的网格点总数，用于前端分页。
+    id bigint,                       -- 精细网格点主键 id。
+    x integer,                       -- 精细网格经度方向离散下标。
+    y integer,                       -- 精细网格纬度方向离散下标。
+    z integer,                       -- 精细网格高度方向离散下标。
+    lon double precision,            -- 精细网格点经度。
+    lat double precision,            -- 精细网格点纬度。
+    alt double precision,            -- 精细网格点高度，单位米。
+    is_flyable boolean,              -- 当前网格点是否可飞。
+    block_mask integer,              -- 阻塞来源位标记：1=电子围栏，2=建筑物。
+    zone_type varchar(20),           -- 电子围栏类型中文名，例如禁飞区、管控区、适飞区。
+    create_time timestamp,           -- 网格点创建时间。
+    update_time timestamp,           -- 网格点最近更新时间。
+    geom_geojson jsonb               -- 网格点二维 GeoJSON，供前端绘制。
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_start_time timestamptz := clock_timestamp();       -- 记录函数开始时间，用于返回 msg 中的耗时。
+    v_project_key TEXT;                                  -- 清洗后的项目ID，只保留字母、数字、下划线，避免动态表名非法。
+    v_table TEXT;                                        -- 项目级精细网格表名。
+    v_table_reg REGCLASS;                                -- 用 to_regclass 检查项目级精细网格表是否存在。
+    v_total BIGINT := 0;                                 -- 当前项目精细网格总数量。
+    v_offset INT := GREATEST(COALESCE(p_offset, 0), 0);  -- 前端分页偏移量，空值或负数按 0 处理。
+    v_log_sql TEXT;                                      -- 当前函数调用SQL，用于错误日志。
+BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_get_project_fine_grid(%L, %s, %s, %s, %s);',
+        p_project_id,
+        COALESCE(p_z::text, 'NULL'),
+        COALESCE(p_only_flyable::text, 'NULL'),
+        COALESCE(p_limit::text, 'NULL'),
+        COALESCE(p_offset::text, 'NULL'));
+
+    IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
+        RETURN QUERY SELECT
+            400, 'project_id is required'::text, NULL::text, 0::bigint,
+            NULL::bigint, NULL::integer, NULL::integer, NULL::integer,
+            NULL::double precision, NULL::double precision, NULL::double precision,
+            NULL::boolean, NULL::integer, NULL::varchar(20),
+            NULL::timestamp, NULL::timestamp, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    -- 清理项目ID，只保留可用于动态表名的字符。
+    v_project_key := regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
+    -- 精细网格表按项目ID固定生成，便于复用和前端按项目查询。
+    v_table := 'gis_grid_nodes_fine_' || v_project_key;
+    SELECT to_regclass(format('%I.%I', current_schema(), v_table)) INTO v_table_reg;
+
+    IF v_table_reg IS NULL THEN
+        RETURN QUERY SELECT
+            404, format('project fine grid table does not exist: %s', v_table), v_table, 0::bigint,
+            NULL::bigint, NULL::integer, NULL::integer, NULL::integer,
+            NULL::double precision, NULL::double precision, NULL::double precision,
+            NULL::boolean, NULL::integer, NULL::varchar(20),
+            NULL::timestamp, NULL::timestamp, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS create_time TIMESTAMP DEFAULT now()', v_table);
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS update_time TIMESTAMP DEFAULT now()', v_table);
+    EXECUTE format('UPDATE %I SET create_time = COALESCE(create_time, now()), update_time = COALESCE(update_time, now())', v_table);
+
+    EXECUTE format('
+        SELECT count(*)
+        FROM %I g
+        WHERE ($1 IS NULL OR g.z = $1)
+          AND ($2 IS NULL OR g.is_flyable = $2)
+    ', v_table)
+    INTO v_total
+    USING p_z, p_only_flyable;
+
+    IF v_total = 0 THEN
+        RETURN QUERY SELECT
+            200, format('project fine grid query success: 0 rows, elapsed %s seconds', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)),
+            v_table, 0::bigint,
+            NULL::bigint, NULL::integer, NULL::integer, NULL::integer,
+            NULL::double precision, NULL::double precision, NULL::double precision,
+            NULL::boolean, NULL::integer, NULL::varchar(20),
+            NULL::timestamp, NULL::timestamp, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    RETURN QUERY EXECUTE format('
+        SELECT
+            200::integer AS code,
+            format(''project fine grid query success: %%s rows, elapsed %%s seconds'', $5, ROUND(EXTRACT(epoch FROM clock_timestamp() - $6)::numeric, 3))::text AS msg,
+            %L::text AS table_name,
+            $5::bigint AS total_count,
+            g.id::bigint,
+            g.x::integer,
+            g.y::integer,
+            g.z::integer,
+            g.lon::double precision,
+            g.lat::double precision,
+            g.alt::double precision,
+            g.is_flyable::boolean,
+            g.block_mask::integer,
+            g.zone_type::varchar(20),
+            g.create_time::timestamp,
+            g.update_time::timestamp,
+            ST_AsGeoJSON(g.geom2d)::jsonb AS geom_geojson
+        FROM %I g
+        WHERE ($1 IS NULL OR g.z = $1)
+          AND ($2 IS NULL OR g.is_flyable = $2)
+        ORDER BY g.z, g.y, g.x
+        LIMIT $3 OFFSET $4
+    ', v_table, v_table)
+    USING p_z, p_only_flyable, CASE WHEN p_limit IS NULL OR p_limit <= 0 THEN NULL ELSE p_limit END, v_offset, v_total, v_start_time;
+
+EXCEPTION WHEN OTHERS THEN
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (500, format('query project fine grid failed: %s', SQLERRM), v_log_sql);
+
+    RETURN QUERY SELECT
+        500, format('query project fine grid failed: %s', SQLERRM), v_table, 0::bigint,
+        NULL::bigint, NULL::integer, NULL::integer, NULL::integer,
+        NULL::double precision, NULL::double precision, NULL::double precision,
+        NULL::boolean, NULL::integer, NULL::varchar(20),
+        NULL::timestamp, NULL::timestamp, NULL::jsonb;
+END;
+$$;
+COMMENT ON FUNCTION gis_get_project_fine_grid(VARCHAR, INT, BOOLEAN, INT, INT) IS '按项目ID读取项目级精细网格，供前端绘制';
+
+
+-- ============================================================
+-- 3. gis_mark_electric_fence_on_grid
+--    对指定精细网格表执行电子围栏打标。
 --
--- 返回字段：
---   code        200/400 状态码；本函数未单独写异常块，异常会抛给上层总控函数处理。
---   table_name  被打标的网格表名。
---   msg         执行说明和耗时。
---   count       更新行数 + 清空旧标记行数。
+-- 适用场景：
+--   精细网格表是按项目和粗航线动态生成的，不是全局固定网格表，因此需要把围栏状态写入指定网格表。
+--
+-- 打标规则：
+--   - bo_electric_fence 中 fence_type=1/2/3 分别映射为 禁飞区 / 管控区 / 适飞区。
+--   - 项目专属 gis_electric_fence_<project_id> 中 fence_type=1/2 映射为 禁飞区 / 管控区。
+--   - 禁飞区、管控区设置 block_mask 第 1 位，并让 is_flyable=false。
+--   - 适飞区只记录 zone_type，不主动清除建筑等其他来源造成的阻塞。
+--
+-- 性能策略：
+--   先把有效围栏物化到临时表并建立 GiST 索引，再只对 z=0 的二维网格点做点面相交。
+--
+-- 参数说明：
+--   p_project_id  项目ID。用于筛选全局围栏，也用于查找项目围栏表。
+--   p_grid_table  需要打标的精细网格表名。
 -- ============================================================
 -- =============================================================================
 -- 删除函数
@@ -369,29 +555,39 @@ SELECT gis_drop_function('gis_mark_electric_fence_on_grid');
 -- =============================================================================
 -- 函数介绍：gis_mark_electric_fence_on_grid
 -- 主要作用：把电子围栏障碍标记到指定精细网格表中，更新可飞状态。
--- 入参说明：p_grid_table 为精细网格表名；p_project_id 为项目ID，用于读取项目围栏数据。
+-- 入参说明：p_grid_table 为精细网格表名；p_project_id 为项目ID，用于读取全局和项目围栏数据。
 -- 返回说明：返回更新行数和状态信息，用于确认精细网格围栏障碍标记完成。
+-- 输出字段说明：
+--   code        返回状态码，200成功，400参数或网格表不存在，500执行异常。
+--   table_name  被更新的精细网格表名。
+--   msg         电子围栏打标结果说明，包含更新数量和耗时。
+--   count       本次围栏标记影响的网格点数量。
 -- 注意事项：函数针对指定网格表操作，调用前需确保精细网格已生成且表名正确。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION gis_mark_electric_fence_on_grid(
-    p_project_id VARCHAR,
-    p_grid_table VARCHAR
+    p_project_id VARCHAR,                 -- 项目ID，用于读取项目专属电子围栏表。
+    p_grid_table VARCHAR                  -- 需要执行电子围栏打标的精细网格表名。
 )
-RETURNS TABLE (code integer, table_name text, msg text, count bigint)
+RETURNS TABLE (
+    code integer,       -- 返回状态码：200成功，400参数或网格表不存在，500执行异常。
+    table_name text,    -- 被更新的精细网格表名。
+    msg text,           -- 电子围栏打标结果说明，包含更新数量和耗时。
+    count bigint        -- 本次围栏标记影响的网格点数量。
+)
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于耗时统计。
-    v_grid_reg REGCLASS;                           -- 精细网格表是否存在。
-    v_project_key TEXT;                            -- 清洗后的项目ID，用于拼项目专属围栏表名。
-    v_project_fence_table TEXT;                    -- 项目专属围栏表名：gis_electric_fence_<project_id>。
-    v_project_fence_reg REGCLASS;                  -- 项目专属围栏表是否存在。
-    v_geom_col TEXT;                               -- 网格平面判断使用的几何列；优先 geom2d，没有则用 geom。
-    v_grid_extent box3d;                           -- 当前精细网格二维范围，用于只筛选走廊缓冲范围内的围栏。
-    v_extent box3d;                                -- 所有有效围栏的总外包框，用于先裁剪网格范围。
-    v_updated BIGINT := 0;                         -- 本次命中围栏并更新的网格点数量。
-    v_cleared BIGINT := 0;                         -- 本次清除旧围栏标记的网格点数量。
-    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
+    v_start_time timestamptz := clock_timestamp();       -- 记录函数开始时间，用于返回 msg 中的耗时。
+    v_grid_reg REGCLASS;                                 -- 精细网格表 regclass，用于动态 SQL 安全引用。
+    v_project_key TEXT;                                  -- 清洗后的项目ID，只保留字母、数字、下划线，避免动态表名非法。
+    v_project_fence_table TEXT;                          -- 项目专属电子围栏表名。
+    v_project_fence_reg REGCLASS;                        -- 项目专属电子围栏表 regclass。
+    v_geom_col TEXT;                                     -- 电子围栏表实际使用的二维几何字段名。
+    v_grid_extent box3d;                                 -- 精细网格二维范围，用于判断围栏数据是否覆盖当前区域。
+    v_extent box3d;                                      -- 电子围栏二维范围，用于和网格范围做快速相交判断。
+    v_updated BIGINT := 0;                               -- 本次标记为围栏阻塞的网格点数量。
+    v_cleared BIGINT := 0;                               -- 本次清理围栏阻塞标记的网格点数量。
+    v_log_sql text;                                      -- 当前函数调用SQL，用于错误日志。
 BEGIN
     v_log_sql := format('SELECT * FROM public.gis_mark_electric_fence_on_grid(%L, %L);',
         p_project_id, p_grid_table);
@@ -408,12 +604,13 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 保证目标网格表具备打标需要的字段；重复执行也安全。
+    -- 保证目标网格表具备围栏打标需要的字段；重复执行也安全。
+    -- zone_type 记录围栏类型，block_mask 第 1 位记录围栏阻塞。
     EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS zone_type VARCHAR(20)', p_grid_table);
     EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS block_mask INT DEFAULT 0', p_grid_table);
     EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS is_flyable BOOLEAN DEFAULT true', p_grid_table);
 
-    -- 精细网格有 geom2d；如果传入的是旧结构网格表，则退化使用 geom。
+    -- 精细网格优先使用 geom2d 做平面判断；如果传入旧结构网格表，则退化使用 geom。
     SELECT CASE WHEN EXISTS (
         SELECT 1 FROM information_schema.columns c
         WHERE c.table_schema = current_schema()
@@ -426,14 +623,14 @@ BEGIN
 
     IF v_grid_extent IS NULL THEN
         code := 200;
-        msg := format('精细网格无二维走廊点，跳过电子围栏打标，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        msg := format('精细网格无二维航廊点，跳过打标，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
         RETURN NEXT;
         RETURN;
     END IF;
 
-    -- tmp_fine_fence 统一承载“全局围栏表 + 项目专属围栏表”的有效围栏。
-    -- priority 数值越小优先级越高，后面 DISTINCT ON 会按这个优先级决定最终 zone_type。
+    -- tmp_fine_fence 统一承载全局围栏和项目专属围栏表中的有效围栏。
+    -- priority 数值越小优先级越高，后续 DISTINCT ON 会按这个优先级决定最终 zone_type。
     DROP TABLE IF EXISTS tmp_fine_fence;
     CREATE TEMP TABLE tmp_fine_fence (
         id text,
@@ -444,10 +641,10 @@ BEGIN
     ) ON COMMIT DROP;
 
     -- 读取全局电子围栏：
-    --   fence_type=1 禁飞区，阻塞飞行；
-    --   fence_type=2 管控区，当前也按阻塞处理；
+    --   fence_type=1 禁飞区，阻塞飞行。
+    --   fence_type=2 管控区，当前也按阻塞处理。
     --   fence_type=3 适飞区，只做区域标识，不主动阻塞。
-    -- height 为 0 或 NULL 表示不限制高度，整列高度都受影响。
+    -- height 为 0 或 NULL 表示不限高，整列高度都受影响。
     INSERT INTO tmp_fine_fence
     SELECT
         id::text,
@@ -464,7 +661,7 @@ BEGIN
       AND ST_SetSRID(ST_Force2D(geom), 4326) && ST_MakeEnvelope(ST_XMin(v_grid_extent), ST_YMin(v_grid_extent), ST_XMax(v_grid_extent), ST_YMax(v_grid_extent), 4326)
       AND ST_Intersects(ST_SetSRID(ST_Force2D(geom), 4326), ST_MakeEnvelope(ST_XMin(v_grid_extent), ST_YMin(v_grid_extent), ST_XMax(v_grid_extent), ST_YMax(v_grid_extent), 4326));
 
-    -- 项目专属围栏表如果存在，也合并进临时围栏表。
+    -- 根据项目ID查找项目建筑表；如果建筑表不存在，只做网格避障，不做建筑线段过滤。
     v_project_key := regexp_replace(COALESCE(p_project_id, ''), '[^0-9a-zA-Z_]', '', 'g');
     v_project_fence_table := 'gis_electric_fence_' || v_project_key;
     SELECT to_regclass(format('%I.%I', current_schema(), v_project_fence_table)) INTO v_project_fence_reg;
@@ -499,9 +696,9 @@ BEGIN
         RETURN;
     END IF;
 
-    -- tmp_fine_desired_zone 计算每个网格点“本次应该是什么围栏状态”。
+    -- tmp_fine_desired_zone 计算每个网格点本次应该写入的围栏状态。
     -- 先在 z=0 的二维点上做点面相交，得到命中的 x/y；
-    -- 再扩展到所有高度 z，并用 max_height 判断这个高度是否受围栏影响。
+    -- 再扩展到所有高度 z，并按 max_height 判断这个高度是否受围栏影响。
     DROP TABLE IF EXISTS tmp_fine_desired_zone;
     EXECUTE format('
         CREATE TEMP TABLE tmp_fine_desired_zone ON COMMIT DROP AS
@@ -526,7 +723,7 @@ BEGIN
              AND ST_Intersects(n.geom2d, f.geom4326)
         )
         SELECT DISTINCT ON (n.id)
-            -- 如果一个网格点同时落入多个围栏，按 priority 和 fence_id 选一个最终 zone_type。
+            -- 如果一个网格点同时落入多个围栏，按 priority + fence_id 选一个最终 zone_type。
             n.id,
             xy.zone_type
         FROM %I n
@@ -562,7 +759,7 @@ BEGIN
     ', p_grid_table);
     GET DIAGNOSTICS v_updated = ROW_COUNT;
 
-    -- 走廊精细网格由总控函数新建，默认不存在旧围栏标记，跳过全表清理以降低耗时。
+    -- 精细网格由总控函数新建，默认不存在旧围栏标记，跳过全表清理以降低耗时。
     v_cleared := 0;
 
     code := 200;
@@ -575,25 +772,19 @@ COMMENT ON FUNCTION gis_mark_electric_fence_on_grid(VARCHAR, VARCHAR) IS '标记
 
 
 -- ============================================================
--- 3. gis_mark_buildings_on_grid
---    对指定精细网格表做建筑打标，支持 buffer 防漏标。
---
--- 参数说明：
---   p_project_id        项目ID，用于定位 gis_buildings_<project_id>。
---   p_grid_table        要打标的网格表名，通常是走廊精细网格。
---   p_building_buffer   建筑外扩距离，单位米；20m精细网格默认取20。
---                       作用是给建筑面稍微外扩，防止网格点刚好从建筑边缘“漏过去”。
---
--- 返回字段：
---   code        200/400 状态码；异常会抛给上层总控函数处理。
---   table_name  被打标的网格表名。
---   msg         执行说明和耗时。
---   count       更新行数 + 清空旧建筑阻塞行数。
+-- 4. gis_mark_buildings_on_grid
+--    对指定精细网格表执行建筑障碍打标，支持建筑外扩缓冲。
 --
 -- 打标规则：
---   - 网格二维点落入建筑面，且网格 alt <= 建筑 height，则 block_mask | 2；
---   - height 为空或小于等于0时按 5m 默认高度处理；
---   - 清除不再命中的旧建筑阻塞位，并按剩余 block_mask 重算 is_flyable。
+--   - 网格二维点落入建筑面，且网格 alt <= 建筑 height，则设置 block_mask 第 2 位。
+--   - 命中建筑的网格点直接设置 is_flyable=false。
+--   - height 为空或 <=0 时按 5m 默认高度处理。
+--   - p_building_buffer 按米处理，当前总控调用使用 3m，用于降低边界漏判风险。
+--
+-- 参数说明：
+--   p_project_id        项目ID。用于定位 gis_buildings_<project_id>。
+--   p_grid_table        要打标的精细网格表名。
+--   p_building_buffer   建筑面外扩距离，单位米；0 表示不外扩。
 -- ============================================================
 -- =============================================================================
 -- 删除函数
@@ -605,33 +796,44 @@ SELECT gis_drop_function('gis_mark_buildings_on_grid');
 -- 主要作用：把项目建筑物范围标记到指定精细网格表中，作为精细规划障碍。
 -- 入参说明：p_grid_table 为精细网格表名；p_project_id 为项目ID；p_building_buffer 为建筑缓冲距离。
 -- 返回说明：返回建筑障碍更新行数和执行消息，供精细路径规划前检查。
--- 注意事项：依赖项目建筑表；缓冲距离按米处理，可根据建筑数据精度适当调整。
+-- 输出字段说明：
+--   code        返回状态码，200成功，400参数或建筑表不存在，500执行异常。
+--   table_name  被更新的精细网格表名。
+--   msg         建筑障碍打标结果说明，包含更新数量和耗时。
+--   count       本次建筑标记影响的网格点数量。
+-- 注意事项：依赖项目建筑表 gis_buildings_<project_id>；缓冲距离按米处理，可根据建筑数据精度调整。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION gis_mark_buildings_on_grid(
-    p_project_id VARCHAR,
-    p_grid_table VARCHAR,
-    p_building_buffer DOUBLE PRECISION DEFAULT 0
+    p_project_id VARCHAR,                 -- 项目ID，用于读取 gis_buildings_<project_id> 建筑表。
+    p_grid_table VARCHAR,                 -- 需要执行建筑障碍打标的精细网格表名。
+    p_building_buffer DOUBLE PRECISION DEFAULT 0 -- 建筑二维缓冲距离，单位米。
 )
-RETURNS TABLE (code integer, table_name text, msg text, count bigint)
+RETURNS TABLE (
+    code integer,       -- 返回状态码：200成功，400参数或建筑表不存在，500执行异常。
+    table_name text,    -- 被更新的精细网格表名。
+    msg text,           -- 建筑障碍打标结果说明，包含更新数量和耗时。
+    count bigint        -- 本次建筑标记影响的网格点数量。
+)
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于耗时统计。
-    v_project_key TEXT;                            -- 清洗后的项目ID，用于拼建筑表名。
-    v_building_table TEXT;                         -- 建筑表名：gis_buildings_<project_id>。
-    v_grid_reg REGCLASS;                           -- 网格表是否存在。
-    v_building_reg REGCLASS;                       -- 建筑表是否存在。
-    v_geom_col TEXT;                               -- 网格平面判断使用的几何列；优先 geom2d。
-    v_grid_extent box3d;                           -- 当前精细网格二维范围，用于只筛选走廊缓冲范围内的建筑。
-    v_min_alt DOUBLE PRECISION;                    -- 当前精细网格最低高度，用于跳过不会影响巡航高度的低矮建筑。
-    v_updated BIGINT := 0;                         -- 本次命中建筑并设置阻塞的网格点数。
-    v_cleared BIGINT := 0;                         -- 本次清理旧建筑阻塞的网格点数。
-    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
+    v_start_time timestamptz := clock_timestamp();       -- 记录函数开始时间，用于返回 msg 中的耗时。
+    v_project_key TEXT;                                  -- 清洗后的项目ID，只保留字母、数字、下划线，避免动态表名非法。
+    v_building_table TEXT;                               -- 项目建筑物表名 gis_buildings_<project_id>。
+    v_grid_reg REGCLASS;                                 -- 精细网格表 regclass，用于动态 SQL 安全引用。
+    v_building_reg REGCLASS;                             -- 项目建筑物表 regclass。
+    v_geom_col TEXT;                                     -- 建筑表实际使用的几何字段名，优先 geom3d，其次 geom。
+    v_grid_extent box3d;                                 -- 精细网格二维范围，用于判断建筑数据是否覆盖当前区域。
+    v_min_alt DOUBLE PRECISION;                          -- 网格最低高度，用于建筑高度为空时仍能按范围相交判断。
+    v_updated BIGINT := 0;                               -- 本次标记为建筑阻塞的网格点数量。
+    v_cleared BIGINT := 0;                               -- 本次清理建筑阻塞标记的网格点数量。
+    v_log_sql text;                                      -- 当前函数调用SQL，用于错误日志。
 BEGIN
     v_log_sql := format('SELECT * FROM public.gis_mark_buildings_on_grid(%L, %L, %s);',
         p_project_id, p_grid_table, COALESCE(p_building_buffer::text, 'NULL'));
 
     table_name := p_grid_table;
+    -- 清理项目ID，只保留可用于动态表名的字符。
     v_project_key := regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
     v_building_table := 'gis_buildings_' || v_project_key;
 
@@ -656,11 +858,11 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 保证目标网格表有阻塞字段；zone_type 是围栏字段，建筑不需要写。
+    -- 保证目标网格表有建筑阻塞字段；zone_type 是围栏字段，建筑不需要写。
     EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS block_mask INT DEFAULT 0', p_grid_table);
     EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS is_flyable BOOLEAN DEFAULT true', p_grid_table);
 
-    -- 建筑判断只需要二维位置，优先使用 geom2d。
+    -- 精细网格优先使用 geom2d 做平面判断；如果传入旧结构网格表，则退化使用 geom。
     SELECT CASE WHEN EXISTS (
         SELECT 1 FROM information_schema.columns c
         WHERE c.table_schema = current_schema()
@@ -673,21 +875,21 @@ BEGIN
 
     IF v_grid_extent IS NULL THEN
         code := 200;
-        msg := format('精细网格无二维走廊点，跳过建筑打标，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        msg := format('精细网格无二维航廊点，跳过打标，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
         RETURN NEXT;
         RETURN;
     END IF;
 
-    -- 建筑表 geom 建二维 GiST 索引，加速点面相交。
+    -- 建筑 geom 建二维 GiST 索引，加速点面相交。
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I USING GIST (geom gist_geometry_ops_2d)',
                    'idx_' || substr(md5(v_building_table), 1, 12) || '_geom',
                    v_building_table);
 
-    -- tmp_fine_building_hit 保存本次被建筑挡住的网格点 id。
+    -- tmp_fine_building_hit 保存本次被建筑挡住的网格 id。
     -- 判断方式：
-    --   1. 建筑面按 p_building_buffer 外扩；
-    --   2. z=0 平面点落入建筑面，说明这个 x/y 在建筑占地范围内；
+    --   1. 建筑面按 p_building_buffer 外扩。
+    --   2. z=0 平面点落入建筑面，说明这个 x/y 在建筑占地范围内。
     --   3. 再判断三维网格点 alt <= 建筑高度，低于楼高才算被挡。
     DROP TABLE IF EXISTS tmp_fine_building_hit;
     EXECUTE format('
@@ -715,6 +917,7 @@ BEGIN
                 b.building_id,
                 b.max_height
             FROM (
+                -- 只取 z=0 是因为同一个 x/y 的二维位置相同，不需要每个高度重复做建筑点面相交。
                 SELECT DISTINCT x, y, %I AS geom2d
                 FROM %I
                 WHERE z = 0
@@ -747,7 +950,7 @@ BEGIN
     ', p_grid_table);
     GET DIAGNOSTICS v_updated = ROW_COUNT;
 
-    -- 走廊精细网格由总控函数新建，默认不存在旧建筑标记，跳过全表清理以降低耗时。
+    -- 精细网格由总控函数新建，默认不存在旧围栏标记，跳过全表清理以降低耗时。
     v_cleared := 0;
 
     code := 200;
@@ -760,81 +963,75 @@ COMMENT ON FUNCTION gis_mark_buildings_on_grid(VARCHAR, VARCHAR, DOUBLE PRECISIO
 
 
 -- ============================================================
--- 4. gis_astar_3d_flight_plan_on_grid
---    在指定网格表上做简化 A* 规划。
---
--- 与 3.2 的区别：
---   - 3.2 自动选择 gis_grid_nodes_<project_id> 或公共 gis_grid_nodes；
---   - 本函数显式接收 p_grid_table，因此可直接在走廊精细网格上规划；
---   - 本函数假设围栏/建筑等障碍已经被打标到 is_flyable/block_mask，
---     搜索阶段主要使用 is_flyable=true，不再重复扫描原始障碍表。
---
--- 结果：
---   规划结果写入 gis_flight_paths，并返回该航线记录。
---   如果没有找到精细路径，会退化为起点到终点的直线路径，保证总控函数有结果可返回。
---
--- 参数说明：
---   p_grid_table      已经生成并完成障碍打标的网格表名。
---   p_start_lon       起点经度，WGS84，经度单位度。
---   p_start_lat       起点纬度，WGS84，纬度单位度。
---   p_start_alt       起点高度，单位米。
---   p_end_lon         终点经度，WGS84，经度单位度。
---   p_end_lat         终点纬度，WGS84，纬度单位度。
---   p_end_alt         终点高度，单位米。
---   p_safe_altitude   巡航/安全高度，单位米；路径中间点会统一抬到这个高度。
---   p_height_mode     高度模式，目前仅原样写入 smooth_ratio 字段，保持和 3.2 返回结构兼容。
---   p_project_id      写入 gis_flight_paths.project_id。
---   p_create_user     写入 gis_flight_paths.create_user/update_user。
---
--- A* 临时表字段：
---   g_cost     从起点走到当前点的累计代价。
---   f_cost     g_cost + 当前点到终点的启发式距离，值越小越优先搜索。
---   parent_id  当前点是从哪个上一个点走过来的，用于最后回溯路径。
---   closed     true 表示这个点已经完成扩展，不再重复处理。
+-- 5. gis_astar_3d_flight_plan_on_grid
+--    在指定精细网格表上执行三维 A* 避障寻路。
+--    调用前需要先生成精细网格，并完成电子围栏、建筑障碍打标。
+--    本函数只使用传入网格表中的 is_flyable/block_mask 状态，不再重复扫描原始围栏表。
+--    会在扩展邻居时检查建筑线段相交，避免最终航线横穿建筑。
 -- ============================================================
 -- =============================================================================
 -- 删除函数
 -- =============================================================================
 SELECT gis_drop_function('gis_astar_3d_flight_plan_on_grid');
 
+
 -- =============================================================================
 -- 函数介绍：gis_astar_3d_flight_plan_on_grid
 -- 主要作用：在指定精细网格表上执行三维A*规划，生成更贴合走廊和障碍的航线。
 -- 入参说明：包含精细网格表名、起终点经纬高、安全高度、项目ID、创建人和高度模式。
 -- 返回说明：返回规划状态、路径线、平滑路径、航点JSON和距离等规划结果。
+-- 输出字段说明：
+--   code                返回状态码，200成功，400规划条件不满足，500执行异常。
+--   msg                 精细 A* 规划结果说明，包含失败原因或耗时。
+--   id                  写入 gis_flight_paths 的航线记录 id。
+--   project_id          航线所属项目ID。
+--   create_user         航线创建人。
+--   create_time         航线创建时间。
+--   update_user         航线更新人。
+--   update_time         航线更新时间。
+--   del_flag            航线逻辑删除标记。
+--   start_point         航线真实起点三维点。
+--   end_point           航线真实终点三维点。
+--   safe_altitude       航线使用的安全高度，单位米。
+--   path_line           原始规划航线三维线。
+--   smooth_path_line    平滑后的规划航线三维线。
+--   waypoints           原始规划航点 JSON。
+--   smooth_waypoints    平滑后航点 JSON。
+--   total_distance      原始规划航线总长度，单位米。
+--   smooth_ratio        平滑比例或压缩比例。
 -- 注意事项：函数只使用传入网格表寻路，调用前应先完成围栏和建筑障碍标记。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan_on_grid(
-    p_grid_table VARCHAR,
-    p_start_lon DOUBLE PRECISION,
-    p_start_lat DOUBLE PRECISION,
-    p_start_alt DOUBLE PRECISION,
-    p_end_lon DOUBLE PRECISION,
-    p_end_lat DOUBLE PRECISION,
-    p_end_alt DOUBLE PRECISION,
-    p_safe_altitude DOUBLE PRECISION DEFAULT 120,
-    p_height_mode DOUBLE PRECISION DEFAULT 0,
-    p_project_id VARCHAR DEFAULT NULL,
-    p_create_user VARCHAR DEFAULT NULL
+    p_grid_table VARCHAR,                         -- 精细网格表名，A* 只在该表内寻路。
+    p_start_lon DOUBLE PRECISION,                 -- 起点经度。
+    p_start_lat DOUBLE PRECISION,                 -- 起点纬度。
+    p_start_alt DOUBLE PRECISION,                 -- 起点高度，单位米。
+    p_end_lon DOUBLE PRECISION,                   -- 终点经度。
+    p_end_lat DOUBLE PRECISION,                   -- 终点纬度。
+    p_end_alt DOUBLE PRECISION,                   -- 终点高度，单位米。
+    p_safe_altitude DOUBLE PRECISION DEFAULT 120, -- 巡航安全高度，单位米。
+    p_height_mode DOUBLE PRECISION DEFAULT 0,     -- 高度模式，兼容 3.2 自动规划参数。
+    p_project_id VARCHAR DEFAULT NULL,            -- 项目ID，用于读取建筑表和写入航线记录。
+    p_create_user VARCHAR DEFAULT NULL            -- 创建人，写入 gis_flight_paths。
 ) RETURNS TABLE (
-    code integer,
-    msg text,
-    id integer,
-    project_id char(32),
-    create_user varchar(32),
-    create_time timestamp,
-    update_user varchar(32),
-    update_time timestamp,
-    del_flag boolean,
-    start_point geometry(PointZ,4326),
-    end_point geometry(PointZ,4326),
-    safe_altitude double precision,
-    path_line geometry(LineStringZ,4326),
-    smooth_path_line geometry(LineStringZ,4326),
-    waypoints jsonb,
-    smooth_waypoints jsonb,
-    total_distance double precision,
-    smooth_ratio double precision
+    code integer,                              -- 返回状态码：200成功，400规划条件不满足，500执行异常。
+    msg text,                                  -- 精细 A* 规划结果说明，包含失败原因或耗时。
+    id integer,                                -- 写入 gis_flight_paths 的航线记录 id。
+    project_id char(32),                       -- 航线所属项目ID。
+    create_user varchar(32),                   -- 航线创建人。
+    create_time timestamp,                     -- 航线创建时间。
+    update_user varchar(32),                   -- 航线更新人。
+    update_time timestamp,                     -- 航线更新时间。
+    del_flag boolean,                          -- 航线逻辑删除标记。
+    start_point geometry(PointZ,4326),         -- 航线真实起点三维点。
+    end_point geometry(PointZ,4326),           -- 航线真实终点三维点。
+    safe_altitude double precision,            -- 航线使用的安全高度，单位米。
+    path_line geometry(LineStringZ,4326),      -- 原始规划航线三维线。
+    smooth_path_line geometry(LineStringZ,4326), -- 平滑后的规划航线三维线。
+    waypoints jsonb,                           -- 原始规划航点 JSON。
+    smooth_waypoints jsonb,                    -- 平滑后航点 JSON。
+    total_distance double precision,           -- 原始规划航线总长度，单位米。
+    smooth_ratio double precision              -- 平滑比例或压缩比例。
 )
 LANGUAGE plpgsql
 AS $$
@@ -847,6 +1044,8 @@ DECLARE
     v_building_reg REGCLASS;                             -- 建筑表是否存在。
     v_start_pt geometry(PointZ,4326);                    -- 起点三维几何。
     v_end_pt geometry(PointZ,4326);                      -- 终点三维几何。
+    v_start_safe_pt geometry(PointZ,4326);               -- 起点垂直到安全高度后的三维点。
+    v_end_safe_pt geometry(PointZ,4326);                 -- 终点垂直到安全高度后的三维点。
     v_start_id BIGINT;                                   -- 距离真实起点最近的可飞网格点 id。
     v_goal_id BIGINT;                                    -- 距离真实终点最近的可飞网格点 id。
     v_min_x INT;                                         -- 搜索窗口最小 x，下方会由起终点 x 计算。
@@ -868,12 +1067,23 @@ DECLARE
     v_path_ids BIGINT[] := ARRAY[]::BIGINT[];             -- 回溯得到的网格点 id 列表，顺序为起点到终点。
     v_current BIGINT;                                    -- 回溯 parent_id 时当前处理的点。
     v_path_line geometry(LineStringZ,4326);              -- 原始规划线。
-    v_raw_path_line geometry(LineStringZ,4326);          -- 精细A*网格回溯得到的原始线路。
-    v_final_line geometry(LineStringZ,4326);             -- 平滑线；当前实现暂未额外平滑，等于 v_path_line。
+    v_raw_path_line geometry(LineStringZ,4326);          -- 未平滑的完整原始执行线，包含起飞/降落过渡和网格路径点。
+    v_final_line geometry(LineStringZ,4326);             -- 平滑线，在原始执行线基础上删除可安全直连的中间点。
     v_waypoints JSONB;                                   -- path_line 拆出来的航点 JSON。
     v_smooth_waypoints JSONB;                            -- smooth_path_line 拆出来的航点 JSON。
     v_path_id INT;                                       -- 写入 gis_flight_paths 后生成的记录 id。
-    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
+    v_cross_count BIGINT := 0;                           -- 最终航线与建筑体相交的线段数量。
+    v_direct_cross_count BIGINT := 0;                    -- 起终点直连航线与建筑体相交的线段数量。
+    v_used_direct BOOLEAN := false;                      -- 是否使用了近距离直连航线。
+    v_line_building_buffer_m DOUBLE PRECISION := 3.0;    -- A* 线段和最终航线建筑校验缓冲距离，单位米。
+    v_simplify_idx INT;                                  -- 平滑简化时当前校验点序号，PostGIS 点序号从 1 开始。
+    v_simplify_end_offset INT;                           -- 平滑简化时尾部保留点偏移，用于保护终点下降段。
+    v_min_simplify_points INT;                           -- 允许执行平滑简化的最少点数。
+    v_has_start_vertical BOOLEAN;                        -- 原始执行线是否包含起点原地升高段。
+    v_has_end_vertical BOOLEAN;                          -- 原始执行线是否包含终点原地下降段。
+    v_direct_line geometry(LineStringZ,4326);            -- 平滑简化时当前点到下下个点的候选直连线。
+    v_blocked BOOLEAN;                                   -- 候选直连线是否穿越建筑。
+    v_log_sql text;                                      -- 当前函数调用SQL，用于错误日志。
 BEGIN
     v_log_sql := format('SELECT * FROM public.gis_astar_3d_flight_plan_on_grid(%L, %s, %s, %s, %s, %s, %s, %s, %s, %L, %L);',
         p_grid_table, COALESCE(p_start_lon::text, 'NULL'), COALESCE(p_start_lat::text, 'NULL'), COALESCE(p_start_alt::text, 'NULL'), COALESCE(p_end_lon::text, 'NULL'), COALESCE(p_end_lat::text, 'NULL'), COALESCE(p_end_alt::text, 'NULL'), COALESCE(p_safe_altitude::text, 'NULL'), COALESCE(p_height_mode::text, 'NULL'), p_project_id, p_create_user);
@@ -910,6 +1120,8 @@ BEGIN
     -- 构造真实起终点。A* 实际从“最近的可飞网格点”开始/结束，但最终航线会保留真实起终点。
     v_start_pt := ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_start_alt), 4326);
     v_end_pt := ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_end_alt), 4326);
+    v_start_safe_pt := ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_safe_altitude), 4326);
+    v_end_safe_pt := ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_safe_altitude), 4326);
 
     -- 找到离真实起点/终点最近的可飞网格点，作为 A* 的 start/goal。
     EXECUTE format('SELECT id FROM %I WHERE is_flyable = true ORDER BY geom <-> $1 LIMIT 1', p_grid_table)
@@ -926,6 +1138,7 @@ BEGIN
         RETURN;
     END IF;
 
+    -- 根据项目ID查找项目建筑表；如果建筑表不存在，只做网格避障，不做建筑线段过滤。
     v_project_key := regexp_replace(COALESCE(p_project_id, ''), '[^0-9a-zA-Z_]', '', 'g');
     IF v_project_key <> '' THEN
         v_building_table := 'gis_buildings_' || v_project_key;
@@ -973,7 +1186,7 @@ BEGIN
     ANALYZE tmp_fine_astar_grid;
 
     -- 节点级建筑打标只能保证航点不落入建筑，不能保证两个相邻航点之间的斜线不切过建筑。
-    -- 这里把搜索窗口内、高度达到巡航高度的建筑面缓存下来，供 A* 扩展邻居时做线段相交过滤。
+    -- 这里把搜索窗口内的建筑面缓存下来，A* 扩展邻居和最终整线校验时再按线段高度判断是否穿越。
     DROP TABLE IF EXISTS tmp_fine_astar_buildings;
     IF v_building_reg IS NOT NULL THEN
         EXECUTE format('
@@ -982,17 +1195,17 @@ BEGIN
                 SELECT ST_Extent(ST_Force2D(geom))::box3d AS extent
                 FROM tmp_fine_astar_grid
             )
+            -- 统一建筑数据：没有高度时按 5m 处理；需要 buffer 时按米外扩。
             SELECT
                 COALESCE(id::text, gid::text) AS building_id,
                 CASE WHEN COALESCE(height, 0) > 0 THEN height::double precision ELSE 5::double precision END AS max_height,
-                ST_Buffer(ST_SetSRID(ST_Force2D(geom), 4326)::geography, 20)::geometry AS geom2d
+                ST_Buffer(ST_SetSRID(ST_Force2D(geom), 4326)::geography, $1)::geometry AS geom2d
             FROM %I, grid_extent e
             WHERE geom IS NOT NULL
-              AND (CASE WHEN COALESCE(height, 0) > 0 THEN height::double precision ELSE 5::double precision END) >= $1
               AND ST_SetSRID(ST_Force2D(geom), 4326) && ST_MakeEnvelope(ST_XMin(e.extent), ST_YMin(e.extent), ST_XMax(e.extent), ST_YMax(e.extent), 4326)
               AND ST_Intersects(ST_SetSRID(ST_Force2D(geom), 4326), ST_MakeEnvelope(ST_XMin(e.extent), ST_YMin(e.extent), ST_XMax(e.extent), ST_YMax(e.extent), 4326))
         ', v_building_table)
-        USING p_safe_altitude;
+        USING v_line_building_buffer_m;
     ELSE
         CREATE TEMP TABLE tmp_fine_astar_buildings (
             building_id text,
@@ -1002,6 +1215,91 @@ BEGIN
     END IF;
     CREATE INDEX IF NOT EXISTS idx_tmp_fine_astar_buildings_geom ON tmp_fine_astar_buildings USING GIST (geom2d);
     ANALYZE tmp_fine_astar_buildings;
+
+    -- 近距离优先直连：如果 起点->安全高度->终点安全高度->终点 三段都不穿建筑，
+    -- 不再强制进入网格 A*，避免短距离场景因为找不到合适网格连接点而失败。
+    WITH direct_segments AS (
+        SELECT
+            ST_SetSRID(ST_MakeLine(ST_Force2D(a.pt), ST_Force2D(b.pt)), 4326) AS geom2d,
+            LEAST(ST_Z(a.pt), ST_Z(b.pt)) AS min_alt
+        FROM (
+            VALUES
+                (1, v_start_pt),
+                (2, v_start_safe_pt),
+                (3, v_end_safe_pt),
+                (4, v_end_pt)
+        ) AS a(ord, pt)
+        JOIN (
+            VALUES
+                (1, v_start_pt),
+                (2, v_start_safe_pt),
+                (3, v_end_safe_pt),
+                (4, v_end_pt)
+        ) AS b(ord, pt)
+          ON b.ord = a.ord + 1
+    )
+    SELECT count(*)
+    INTO v_direct_cross_count
+    FROM direct_segments s
+    JOIN tmp_fine_astar_buildings b
+      ON b.max_height >= s.min_alt
+     AND s.geom2d && b.geom2d
+     AND ST_Intersects(s.geom2d, b.geom2d);
+
+    IF v_direct_cross_count = 0 THEN
+        v_found := true;
+        v_used_direct := true;
+        v_path_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
+        v_path_line := ST_AddPoint(v_path_line, v_start_pt);
+        v_path_line := ST_AddPoint(v_path_line, v_start_safe_pt);
+        v_path_line := ST_AddPoint(v_path_line, v_end_safe_pt);
+        v_path_line := ST_AddPoint(v_path_line, v_end_pt);
+        v_raw_path_line := gis_linestring_remove_duplicate_points(v_path_line);
+        v_final_line := v_raw_path_line;
+    ELSE
+
+    -- 重新选择起终网格点：不仅要求点本身可飞，还要求“安全高度点 -> 网格点”的连接线不穿建筑。
+    -- 之前只按距离取最近可飞点，会出现起点或终点连接段横穿建筑的问题。
+    SELECT g.id
+    INTO v_start_id
+    FROM tmp_fine_astar_grid g
+    CROSS JOIN LATERAL (
+        SELECT ST_SetSRID(ST_MakeLine(ST_Force2D(v_start_safe_pt), ST_Force2D(g.geom)), 4326) AS geom2d
+    ) seg
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM tmp_fine_astar_buildings b
+        WHERE b.max_height >= LEAST(ST_Z(v_start_safe_pt), ST_Z(g.geom))
+          AND seg.geom2d && b.geom2d
+          AND ST_Intersects(seg.geom2d, b.geom2d)
+    )
+    ORDER BY ST_3DDistance(g.geom, v_start_safe_pt)
+    LIMIT 1;
+
+    SELECT g.id
+    INTO v_goal_id
+    FROM tmp_fine_astar_grid g
+    CROSS JOIN LATERAL (
+        SELECT ST_SetSRID(ST_MakeLine(ST_Force2D(g.geom), ST_Force2D(v_end_safe_pt)), 4326) AS geom2d
+    ) seg
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM tmp_fine_astar_buildings b
+        WHERE b.max_height >= LEAST(ST_Z(g.geom), ST_Z(v_end_safe_pt))
+          AND seg.geom2d && b.geom2d
+          AND ST_Intersects(seg.geom2d, b.geom2d)
+    )
+    ORDER BY ST_3DDistance(g.geom, v_end_safe_pt)
+    LIMIT 1;
+
+    IF v_start_id IS NULL OR v_goal_id IS NULL THEN
+        code := 400;
+        msg := format('精细规划失败：起点或终点无法连接到不穿越建筑的可飞网格点，请增大走廊范围或调整起终点/安全高度，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
 
     -- 初始化起点：起点 g_cost=0，f_cost=到终点的直线距离。
     UPDATE tmp_fine_astar_grid g
@@ -1052,6 +1350,7 @@ BEGIN
                   SELECT 1
                   FROM tmp_fine_astar_buildings b
                   WHERE seg.geom2d && b.geom2d
+                    AND b.max_height >= LEAST(ST_Z(v_curr_geom), ST_Z(n.geom))
                     AND ST_Intersects(seg.geom2d, b.geom2d)
               )
         LOOP
@@ -1082,7 +1381,7 @@ BEGIN
             SELECT g.parent_id INTO v_current FROM tmp_fine_astar_grid g WHERE g.id = v_current;
         END LOOP;
 
-        -- 组装原始航线：只保留精细A*在网格上回溯得到的原始点。
+        -- 组装网格回溯线：只保留精细A*在网格上回溯得到的路径点，用于后续拼接执行线。
         IF COALESCE(array_length(v_path_ids, 1), 0) >= 2 THEN
             SELECT ST_MakeLine(g.geom ORDER BY u.ord)::geometry(LineStringZ,4326)
             INTO v_raw_path_line
@@ -1098,7 +1397,7 @@ BEGIN
         -- 当前代码把中间网格点高度统一改成 p_safe_altitude。
         v_path_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
         v_path_line := ST_AddPoint(v_path_line, v_start_pt);
-        v_path_line := ST_AddPoint(v_path_line, ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_safe_altitude), 4326));
+        v_path_line := ST_AddPoint(v_path_line, v_start_safe_pt);
 
         IF COALESCE(array_length(v_path_ids, 1), 0) > 0 THEN
             FOR v_loop IN 1..array_length(v_path_ids, 1) LOOP
@@ -1112,12 +1411,70 @@ BEGIN
             END LOOP;
         END IF;
 
-        v_path_line := ST_AddPoint(v_path_line, ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_safe_altitude), 4326));
+        v_path_line := ST_AddPoint(v_path_line, v_end_safe_pt);
         v_path_line := ST_AddPoint(v_path_line, v_end_pt);
-        v_final_line := v_path_line;
+        v_raw_path_line := gis_linestring_remove_duplicate_points(v_path_line);
+        v_final_line := v_raw_path_line;
+    END IF;
     END IF;
 
-    -- path_line/waypoints 存原始网格线路；smooth_path_line/smooth_waypoints 存处理后线路。
+    -- 平滑简化：参考 3.2 的思路，在不穿越建筑的前提下删除中间点。
+    -- path_line 保留未平滑的完整执行线；smooth_path_line 使用简化后的 v_final_line。
+    v_has_start_vertical := abs(p_start_alt - p_safe_altitude) > 0.001;
+    v_has_end_vertical := abs(p_end_alt - p_safe_altitude) > 0.001;
+    v_simplify_idx := CASE WHEN v_has_start_vertical THEN 2 ELSE 1 END;
+    v_simplify_end_offset := CASE WHEN v_has_end_vertical THEN 3 ELSE 2 END;
+    v_min_simplify_points := CASE WHEN v_has_start_vertical OR v_has_end_vertical THEN 4 ELSE 3 END;
+
+    WHILE ST_NumPoints(v_final_line) >= v_min_simplify_points
+          AND v_simplify_idx <= ST_NumPoints(v_final_line) - v_simplify_end_offset LOOP
+        v_direct_line := ST_MakeLine(
+            ST_PointN(v_final_line, v_simplify_idx),
+            ST_PointN(v_final_line, v_simplify_idx + 2)
+        );
+
+        SELECT EXISTS (
+            SELECT 1
+            FROM tmp_fine_astar_buildings b
+            WHERE b.max_height >= LEAST(ST_Z(ST_PointN(v_final_line, v_simplify_idx)), ST_Z(ST_PointN(v_final_line, v_simplify_idx + 2)))
+              AND ST_Force2D(v_direct_line) && b.geom2d
+              AND ST_Intersects(ST_Force2D(v_direct_line), b.geom2d)
+        ) INTO v_blocked;
+
+        IF NOT v_blocked THEN
+            v_final_line := ST_RemovePoint(v_final_line, v_simplify_idx);
+        ELSE
+            v_simplify_idx := v_simplify_idx + 1;
+        END IF;
+    END LOOP;
+
+    v_final_line := gis_linestring_remove_duplicate_points(v_final_line);
+
+    -- 最终整线兜底校验：覆盖起降垂直段、两端连接段和中间网格段，任何线段穿建筑都返回失败。
+    WITH final_segments AS (
+        SELECT
+            ST_SetSRID(ST_MakeLine(ST_Force2D(ST_PointN(v_final_line, gs.i)), ST_Force2D(ST_PointN(v_final_line, gs.i + 1))), 4326) AS geom2d,
+            LEAST(ST_Z(ST_PointN(v_final_line, gs.i)), ST_Z(ST_PointN(v_final_line, gs.i + 1))) AS min_alt
+        FROM generate_series(1, GREATEST(ST_NumPoints(v_final_line) - 1, 0)) AS gs(i)
+    )
+    SELECT count(*)
+    INTO v_cross_count
+    FROM final_segments s
+    JOIN tmp_fine_astar_buildings b
+      ON b.max_height >= s.min_alt
+     AND s.geom2d && b.geom2d
+     AND ST_Intersects(s.geom2d, b.geom2d);
+
+    IF v_cross_count > 0 THEN
+        code := 400;
+        msg := format('精细规划失败：最终航线仍有 %s 段穿越建筑，请增大走廊范围或调整起终点/安全高度，执行时间 %s 秒', v_cross_count, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
+
+    -- path_line/waypoints 存未平滑的完整原始执行线；smooth_path_line/smooth_waypoints 存平滑简化后的线路。
     SELECT jsonb_agg(jsonb_build_object('lon', ST_X((dp).geom), 'lat', ST_Y((dp).geom), 'alt', ST_Z((dp).geom)) ORDER BY (dp).path[1])
     INTO v_waypoints
     FROM ST_DumpPoints(v_raw_path_line) AS dp;
@@ -1141,6 +1498,7 @@ BEGIN
     ) RETURNING gis_flight_paths.id INTO v_path_id;
 
     v_return_msg := CASE
+        WHEN v_used_direct THEN format('精细网格直连规划完成，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
         WHEN v_found THEN format('精细网格A*规划完成，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
         ELSE format('精细网格未找到有效路径，已返回直线兜底航线，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
     END;
@@ -1160,38 +1518,29 @@ COMMENT ON FUNCTION gis_astar_3d_flight_plan_on_grid(
     DOUBLE PRECISION, DOUBLE PRECISION, VARCHAR, VARCHAR
 ) IS '指定网格精细避障寻路';
 
-
 -- ============================================================
--- 5. gis_astar_3d_flight_plan_build
---    两阶段规划总控函数：100m全局粗规划 + 20m矩形精规划。
+-- 6. gis_astar_3d_flight_plan_build
+--    建筑避障两阶段精细航线规划入口。
 --
 -- 执行流程：
---   1. 调用 3.2 的 gis_astar_3d_flight_plan 生成粗航线；
---   2. 取粗航线所有线路点外包矩形；
---   3. 在矩形范围内生成精细网格表；
---   4. 对精细网格做电子围栏和建筑打标；
---   5. 在精细网格上重新规划；
---   6. 按 p_drop_fine_grid 决定是否删除精细网格表。
+--   1. 调用 3.2 的 gis_astar_3d_flight_plan 做全局粗规划。
+--   2. 优先使用粗规划 smooth_path_line 作为精细航廊中心线；没有平滑线时使用 path_line。
+--   3. 按粗航线外包框生成项目级 20m 精细网格，并外扩 500m 作为绕行空间。
+--   4. 对精细网格执行电子围栏和建筑打标，其中建筑缓冲使用 3m。
+--   5. 调用 gis_astar_3d_flight_plan_on_grid 在精细网格上重新寻路。
+--   6. 根据 p_drop_fine_grid 决定是否删除精细网格；默认 false，保留给前端绘制和排查。
 --
--- 参数策略：
---   粗网格由 3.1 已生成表决定；精细网格固定 20m，建筑外扩固定 20m。
---
--- 完整参数说明：
---   p_start_lon          起点经度，WGS84，单位度。
---   p_start_lat          起点纬度，WGS84，单位度。
---   p_start_alt          起点高度，单位米。
---   p_end_lon            终点经度，WGS84，单位度。
---   p_end_lat            终点纬度，WGS84，单位度。
---   p_end_alt            终点高度，单位米。
---   p_safe_altitude      安全/巡航高度，单位米；粗规划和精细规划都会使用。
---   p_height_mode        高度模式，传给底层规划函数；当前也会写入结果 smooth_ratio 字段。
---   p_project_id         项目ID，用于选择项目网格、围栏、建筑表，并写入航线结果。
---   p_create_user        创建人账号/ID，写入 gis_flight_paths。
---   p_drop_fine_grid     是否在函数结束后删除精细网格表；排查问题时传 false。
+-- 参数说明：
+--   p_start_lon / p_start_lat / p_start_alt  起点经纬高，WGS84，经纬度单位度，高度单位米。
+--   p_end_lon / p_end_lat / p_end_alt        终点经纬高，WGS84，经纬度单位度，高度单位米。
+--   p_safe_altitude                          巡航/安全高度，单位米。
+--   p_height_mode                            高度模式，沿用 3.2 约定。
+--   p_project_id                             项目ID，用于粗规划、精细网格、围栏和建筑表。
+--   p_create_user                            写入 gis_flight_paths.create_user/update_user。
+--   p_drop_fine_grid                         true=规划结束删除精细网格，false=保留。
 --
 -- 返回字段：
---   code/msg             先返回本总控函数状态，再拼接 gis_flight_paths 的完整字段。
---   其他字段             与 gis_flight_paths 表结构一致，例如 path_line、waypoints、total_distance。
+--   code/msg + gis_flight_paths 的完整航线记录字段。
 -- ============================================================
 -- =============================================================================
 -- 删除函数
@@ -1201,77 +1550,91 @@ SELECT gis_drop_function('gis_astar_3d_flight_plan_build');
 -- =============================================================================
 -- 函数介绍：gis_astar_3d_flight_plan_build
 -- 主要作用：组合粗规划、走廊精细建网格、障碍标记和精细A*，生成建筑避障优化航线。
--- 入参说明：参考粗规划入口，包含起终点经纬高、安全高度、高度模式、项目ID和创建人。
+-- 入参说明：参考粗规划入口，包含起终点经纬高、安全高度、高度模式、项目ID、创建人和是否保留精细网格。
 -- 返回说明：返回最终精细规划结果，并保留过程状态信息，便于判断失败环节。
+-- 输出字段说明：
+--   code                返回状态码，200成功，400粗规划或精细规划条件不满足，500执行异常。
+--   msg                 两阶段精细规划结果说明，包含各阶段耗时或失败原因。
+--   id                  写入 gis_flight_paths 的最终航线记录 id。
+--   project_id          航线所属项目ID。
+--   create_user         航线创建人。
+--   create_time         航线创建时间。
+--   update_user         航线更新人。
+--   update_time         航线更新时间。
+--   del_flag            航线逻辑删除标记。
+--   start_point         航线真实起点三维点。
+--   end_point           航线真实终点三维点。
+--   safe_altitude       航线使用的安全高度，单位米。
+--   path_line           原始规划航线三维线。
+--   smooth_path_line    平滑后的规划航线三维线。
+--   waypoints           原始规划航点 JSON。
+--   smooth_waypoints    平滑后航点 JSON。
+--   total_distance      原始规划航线总长度，单位米。
+--   smooth_ratio        平滑比例或压缩比例。
 -- 注意事项：该函数是精细线路规划入口，依赖3.2粗规划、项目网格、围栏和建筑数据完整可用。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan_build(
-    p_start_lon DOUBLE PRECISION,
-    p_start_lat DOUBLE PRECISION,
-    p_start_alt DOUBLE PRECISION,
-    p_end_lon DOUBLE PRECISION,
-    p_end_lat DOUBLE PRECISION,
-    p_end_alt DOUBLE PRECISION,
-    p_safe_altitude DOUBLE PRECISION DEFAULT 120,
-    p_height_mode DOUBLE PRECISION DEFAULT 0,
-    p_project_id VARCHAR DEFAULT NULL,
-    p_create_user VARCHAR DEFAULT NULL,
-    p_drop_fine_grid BOOLEAN DEFAULT TRUE
+    p_start_lon DOUBLE PRECISION,                 -- 起点经度。
+    p_start_lat DOUBLE PRECISION,                 -- 起点纬度。
+    p_start_alt DOUBLE PRECISION,                 -- 起点高度，单位米。
+    p_end_lon DOUBLE PRECISION,                   -- 终点经度。
+    p_end_lat DOUBLE PRECISION,                   -- 终点纬度。
+    p_end_alt DOUBLE PRECISION,                   -- 终点高度，单位米。
+    p_safe_altitude DOUBLE PRECISION DEFAULT 120, -- 巡航安全高度，单位米。
+    p_height_mode DOUBLE PRECISION DEFAULT 0,     -- 高度模式，透传给 3.2 粗规划和精细 A*。
+    p_project_id VARCHAR DEFAULT NULL,            -- 项目ID，用于生成项目级精细网格表和读取建筑数据。
+    p_create_user VARCHAR DEFAULT NULL,           -- 创建人，写入 gis_flight_paths。
+    p_drop_fine_grid BOOLEAN DEFAULT FALSE        -- 总控结束后是否删除本次精细网格表，默认保留供前端绘制。
 ) RETURNS TABLE (
-    code integer,
-    msg text,
-    id integer,
-    project_id char(32),
-    create_user varchar(32),
-    create_time timestamp,
-    update_user varchar(32),
-    update_time timestamp,
-    del_flag boolean,
-    start_point geometry(PointZ,4326),
-    end_point geometry(PointZ,4326),
-    safe_altitude double precision,
-    path_line geometry(LineStringZ,4326),
-    smooth_path_line geometry(LineStringZ,4326),
-    waypoints jsonb,
-    smooth_waypoints jsonb,
-    total_distance double precision,
-    smooth_ratio double precision
+    code integer,                              -- 返回状态码：200成功，400粗规划或精细规划条件不满足，500执行异常。
+    msg text,                                  -- 两阶段精细规划结果说明，包含各阶段耗时或失败原因。
+    id integer,                                -- 写入 gis_flight_paths 的最终航线记录 id。
+    project_id char(32),                       -- 航线所属项目ID。
+    create_user varchar(32),                   -- 航线创建人。
+    create_time timestamp,                     -- 航线创建时间。
+    update_user varchar(32),                   -- 航线更新人。
+    update_time timestamp,                     -- 航线更新时间。
+    del_flag boolean,                          -- 航线逻辑删除标记。
+    start_point geometry(PointZ,4326),         -- 航线真实起点三维点。
+    end_point geometry(PointZ,4326),           -- 航线真实终点三维点。
+    safe_altitude double precision,            -- 航线使用的安全高度，单位米。
+    path_line geometry(LineStringZ,4326),      -- 原始规划航线三维线。
+    smooth_path_line geometry(LineStringZ,4326), -- 平滑后的规划航线三维线。
+    waypoints jsonb,                           -- 原始规划航点 JSON。
+    smooth_waypoints jsonb,                    -- 平滑后航点 JSON。
+    total_distance double precision,           -- 原始规划航线总长度，单位米。
+    smooth_ratio double precision              -- 平滑比例或压缩比例。
 )
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_start_time timestamptz := clock_timestamp(); -- 总控函数开始时间，用于整体耗时统计。
-    v_coarse gis_flight_paths%ROWTYPE;             -- 粗规划写入 gis_flight_paths 后对应的记录。
-    v_fine gis_flight_paths%ROWTYPE;               -- 精细规划写入 gis_flight_paths 后对应的记录。
-    v_coarse_code INT;                             -- 粗规划返回状态码。
-    v_coarse_msg TEXT;                             -- 粗规划返回说明。
-    v_fine_code INT;                               -- 精细规划返回状态码。
-    v_fine_msg TEXT;                               -- 精细规划返回说明。
-    v_grid_result RECORD;                          -- 生成精细网格函数的返回结果。
-    v_mark_result RECORD;                          -- 围栏/建筑打标函数的返回结果；主要用于接收，当前不强制校验。
-    v_task_key TEXT;                               -- 清洗后的任务 key，用于生成精细网格表名。
-    v_fine_table TEXT;                             -- 本次生成的精细网格表名。
-    v_path_line geometry(LineStringZ,4326);        -- 粗规划航线，用它来生成精细走廊。
-    v_fail_code INT := 500;                        -- 失败返回码：400参数/业务校验，500空间计算/执行异常。
-    v_fail_msg TEXT;                               -- 失败返回说明。
-    v_step_start timestamptz;                      -- 分阶段计时起点。
-    v_coarse_seconds NUMERIC := 0;                 -- 粗规划耗时。
-    v_grid_seconds NUMERIC := 0;                   -- 精细网格生成耗时。
-    v_fence_seconds NUMERIC := 0;                  -- 电子围栏打标耗时。
-    v_building_seconds NUMERIC := 0;               -- 建筑打标耗时。
-    v_astar_seconds NUMERIC := 0;                  -- 精细A*耗时。
-    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
+    v_start_time timestamptz := clock_timestamp();       -- 记录总控函数开始时间，用于最终 msg 中的总耗时。
+    v_coarse gis_flight_paths%ROWTYPE;                   -- 粗规划结果行，对应 3.2 自动规划写入的 gis_flight_paths 记录。
+    v_fine gis_flight_paths%ROWTYPE;                     -- 精细规划结果行，对应当前 3.3 写入或更新的 gis_flight_paths 记录。
+    v_coarse_code INT;                                   -- 粗规划函数返回状态码。
+    v_coarse_msg TEXT;                                   -- 粗规划函数返回消息。
+    v_fine_code INT;                                     -- 精细 A* 函数返回状态码。
+    v_fine_msg TEXT;                                     -- 精细 A* 函数返回消息。
+    v_grid_result RECORD;                                -- 精细网格生成函数返回记录。
+    v_mark_result RECORD;                                -- 围栏或建筑打标函数返回记录。
+    v_fine_table TEXT;                                   -- 当前项目使用的精细网格表名。
+    v_path_line geometry(LineStringZ,4326);              -- 粗规划输出的三维航线，用作精细网格走廊中心线。
+    v_fail_code INT := 500;                              -- 异常失败时写入 gis_flight_paths 的状态码。
+    v_fail_msg TEXT;                                     -- 异常失败时写入 gis_flight_paths 的错误消息。
+    v_step_start timestamptz;                            -- 分阶段计时起点。
+    v_coarse_seconds NUMERIC := 0;                       -- 粗规划耗时，单位秒。
+    v_grid_seconds NUMERIC := 0;                         -- 精细网格生成耗时，单位秒。
+    v_fence_seconds NUMERIC := 0;                        -- 电子围栏打标耗时，单位秒。
+    v_building_seconds NUMERIC := 0;                     -- 建筑物打标耗时，单位秒。
+    v_astar_seconds NUMERIC := 0;                        -- 精细 A* 耗时，单位秒。
+    v_log_sql TEXT;                                      -- 当前函数调用SQL，用于错误日志。
 BEGIN
     v_log_sql := format('SELECT * FROM public.gis_astar_3d_flight_plan_build(%s, %s, %s, %s, %s, %s, %s, %s, %L, %L, %L);',
         COALESCE(p_start_lon::text, 'NULL'), COALESCE(p_start_lat::text, 'NULL'), COALESCE(p_start_alt::text, 'NULL'),
         COALESCE(p_end_lon::text, 'NULL'), COALESCE(p_end_lat::text, 'NULL'), COALESCE(p_end_alt::text, 'NULL'),
         COALESCE(p_safe_altitude::text, 'NULL'), COALESCE(p_height_mode::text, 'NULL'), p_project_id, p_create_user, p_drop_fine_grid);
 
-    -- 自动生成短任务 key，避免不同任务的精细临时表互相覆盖。
-    v_task_key := substr(md5(clock_timestamp()::text), 1, 12);
-
-    -- 第一步：全局粗规划，使用 3.2 原函数和全局网格表。
-    -- 3.2 返回 code/msg + gis_flight_paths 字段，这里显式接收，避免字段错位。
+    -- 第一步：调用 3.2 粗规划，拿到用于生成精细航廊的中心线。
     v_step_start := clock_timestamp();
     SELECT
         r.code,
@@ -1302,7 +1665,7 @@ BEGIN
 
     IF v_coarse_code IS DISTINCT FROM 200 OR v_coarse.id IS NULL THEN
         v_fail_code := COALESCE(NULLIF(v_coarse_code, 200), 400);
-        v_fail_msg := format('粗规划失败，无法生成精细走廊：%s', COALESCE(v_coarse_msg, '无返回结果'));
+        v_fail_msg := format('粗规划失败，无法生成精细航廊：%s', COALESCE(v_coarse_msg, '无返回结果'));
         RETURN QUERY SELECT
             v_fail_code,
             format('%s，执行时间 %s 秒', v_fail_msg, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)),
@@ -1310,7 +1673,7 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 优先使用粗规划的 smooth_path_line 作为走廊中心线；没有平滑线时使用原始 path_line。
+    -- 优先使用粗规划平滑线作为精细走廊中心线；没有平滑线时使用原始线。
     v_path_line := COALESCE(v_coarse.smooth_path_line, v_coarse.path_line);
     IF v_path_line IS NULL OR ST_IsEmpty(v_path_line) THEN
         v_fail_code := 400;
@@ -1322,8 +1685,8 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 第二步：根据粗航线所有线路点外包矩形生成 20m 精细网格
-    -- 高度范围只覆盖安全高度上下1米；起降段由最终航线直接连接真实起终点和安全高度点。
+    -- 第二步：根据粗航线所有线路点外包矩形生成 20m 精细网格。
+    -- 高度范围只覆盖安全高度上下 1m，起降段由最终航线直接连接真实起终点和安全高度点。
     -- 这样避免从地面到安全高度生成多层精细网格，降低建网格和打标成本。
     v_step_start := clock_timestamp();
     SELECT *
@@ -1334,7 +1697,7 @@ BEGIN
         GREATEST(COALESCE(p_safe_altitude, 0) - 1, 0)::numeric,
         (COALESCE(p_safe_altitude, 0) + 1)::numeric,
         20,
-        v_task_key::varchar,
+        NULL::varchar,
         TRUE
     )
     LIMIT 1;
@@ -1351,18 +1714,16 @@ BEGIN
     END IF;
     v_fine_table := v_grid_result.table_name;
 
-    -- 第三步：精细网格打标。
-    -- 当前只接收打标返回结果，不中断 code!=200 的情况；
-    -- 如果你希望建筑表缺失时直接失败，可以在这里增加 v_mark_result.code 校验。
     v_step_start := clock_timestamp();
+    -- 第三步：对精细网格重新执行围栏和建筑打标。
     SELECT * INTO v_mark_result FROM gis_mark_electric_fence_on_grid(p_project_id, v_fine_table) LIMIT 1;
     v_fence_seconds := ROUND(EXTRACT(epoch FROM clock_timestamp() - v_step_start)::numeric, 3);
 
     v_step_start := clock_timestamp();
-    SELECT * INTO v_mark_result FROM gis_mark_buildings_on_grid(p_project_id, v_fine_table, 20) LIMIT 1;
+    SELECT * INTO v_mark_result FROM gis_mark_buildings_on_grid(p_project_id, v_fine_table, 3) LIMIT 1;
     v_building_seconds := ROUND(EXTRACT(epoch FROM clock_timestamp() - v_step_start)::numeric, 3);
 
-    -- 第四步：在精细网格上重新规划
+    -- 第四步：在精细网格上重新规划。
     v_step_start := clock_timestamp();
     SELECT
         r.code,
@@ -1394,7 +1755,7 @@ BEGIN
 
     IF v_fine_code IS DISTINCT FROM 200 OR v_fine.id IS NULL THEN
         v_fail_code := COALESCE(NULLIF(v_fine_code, 200), 400);
-        v_fail_msg := format('精细规划失败：%s', COALESCE(v_fine_msg, '无返回结果'));
+        v_fail_msg := COALESCE(v_fine_msg, '精细规划失败：无返回结果');
         RETURN QUERY SELECT
             v_fail_code,
             format('%s，执行时间 %s 秒', v_fail_msg, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)),
@@ -1425,7 +1786,7 @@ BEGIN
     END IF;
 
 EXCEPTION WHEN OTHERS THEN
-    -- 任意步骤异常时，也尽量清理精细网格表，避免失败任务留下大量中间表。
+    -- 任意步骤异常时，也尽量按参数清理精细网格表，避免失败任务留下大量中间表。
     IF p_drop_fine_grid AND v_fine_table IS NOT NULL THEN
         EXECUTE format('DROP TABLE IF EXISTS %I CASCADE', v_fine_table);
     END IF;
@@ -1471,8 +1832,8 @@ EXCEPTION WHEN OTHERS THEN
 
         IF NOT FOUND THEN
             RETURN QUERY SELECT
-                500,
-                format('空间计算错误：%s，直线/粗规划兜底无返回结果，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)),
+            500,
+            format('空间计算错误：%s，已返回直线/粗规划兜底航线，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)),
                 (NULL::gis_flight_paths).*;
         END IF;
     END IF;
@@ -1485,7 +1846,14 @@ COMMENT ON FUNCTION gis_astar_3d_flight_plan_build(
 ) IS '建筑避障精细航线规划';
 
 
--- 调用示例：
+-- =============================================================================
+-- 调用示例
+-- =============================================================================
+
+-- 示例1：调用精细线路规划总入口 gis_astar_3d_flight_plan_build。
+-- 用途：先执行 3.2 粗规划，再生成项目级精细网格，完成围栏/建筑打标，最后执行精细 A*。
+-- 输出：code/msg + gis_flight_paths 航线记录字段。
+-- 说明：p_drop_fine_grid=false 表示保留 gis_grid_nodes_fine_<project_id>，便于前端绘制网格。
 -- SELECT * FROM gis_astar_3d_flight_plan_build(
 --     112.80, 34.30, 0,
 --     114.00, 34.80, 0,
@@ -1493,31 +1861,59 @@ COMMENT ON FUNCTION gis_astar_3d_flight_plan_build(
 --     0,
 --     '2c95908e958f3b75019593551f520126',
 --     'system',
---     TRUE
+--     FALSE
 -- );
 
+-- 示例2：单独生成项目级精细网格 gis_generate_corridor_fine_grid。
+-- 用途：根据一条粗航线 LineStringZ 生成走廊范围内的三维精细网格。
+-- 输出：code、table_name、msg、count。
+-- 说明：p_drop_old=true 表示如果同名项目网格表已存在，则删除后重建。
 -- SELECT * FROM gis_generate_corridor_fine_grid(
 --     '2c95908e958f3b75019593551f520126',
 --     ST_GeomFromText('LINESTRING Z (112.80 34.30 0, 114.00 34.80 0)', 4326),
---     0, 300, 20, 'task001', TRUE
+--     0, 300, 20, NULL, TRUE
 -- );
 
+-- 示例3：单独执行电子围栏打标 gis_mark_electric_fence_on_grid。
+-- 用途：把全局围栏和项目围栏标记到指定精细网格表，更新 block_mask / is_flyable / zone_type。
+-- 输出：code、table_name、msg、count。
+-- 前置条件：精细网格表已存在。
 -- SELECT * FROM gis_mark_electric_fence_on_grid(
 --     '2c95908e958f3b75019593551f520126',
---     'gis_grid_nodes_fine_task001'
+--     'gis_grid_nodes_fine_2c95908e958f3b75019593551f520126'
 -- );
 
+-- 示例4：单独执行建筑障碍打标 gis_mark_buildings_on_grid。
+-- 用途：把 gis_buildings_<project_id> 建筑范围标记到指定精细网格表。
+-- 输出：code、table_name、msg、count。
+-- 说明：第三个参数为建筑二维缓冲距离，单位米；总控函数当前使用 3m。
 -- SELECT * FROM gis_mark_buildings_on_grid(
 --     '2c95908e958f3b75019593551f520126',
---     'gis_grid_nodes_fine_task001',
---     20
+--     'gis_grid_nodes_fine_2c95908e958f3b75019593551f520126',
+--     3
 -- );
 
+-- 示例5：在已有精细网格上执行 A* gis_astar_3d_flight_plan_on_grid。
+-- 用途：复用已生成并完成障碍打标的精细网格，直接规划起终点之间的精细航线。
+-- 输出：code/msg + gis_flight_paths 航线记录字段。
+-- 前置条件：精细网格表已存在，且已执行围栏和建筑障碍打标。
 -- SELECT * FROM gis_astar_3d_flight_plan_on_grid(
---     'gis_grid_nodes_fine_task001',
+--     'gis_grid_nodes_fine_2c95908e958f3b75019593551f520126',
 --     112.80, 34.30, 0,
 --     114.00, 34.80, 0,
 --     120, 0,
 --     '2c95908e958f3b75019593551f520126',
 --     'system'
+-- );
+
+-- 示例6：读取项目级精细网格 gis_get_project_fine_grid。
+-- 用途：供前端按项目读取精细网格点，用于绘制网格、可飞状态和障碍分布。
+-- 输出：code/msg、表名、总数、网格坐标、可飞状态、阻塞来源、时间字段和 GeoJSON。
+-- 说明：第二个参数 p_z 为高度层过滤；第四、五个参数为 limit/offset 分页。
+-- SELECT * FROM gis_get_project_fine_grid(
+--     '2c95908e958f3b75019593551f520126',
+--     0,
+--     NULL,
+--     1000,
+--     0
 -- );
