@@ -906,7 +906,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            false, 'l_outside'::varchar, ''::varchar, NULL::geometry, NULL::varchar, NULL::geometry, NULL::json;
+            false, 'ln_outside'::varchar, ''::varchar, NULL::geometry, NULL::varchar, NULL::geometry, NULL::json;
         RETURN;
     END IF;
 
@@ -973,7 +973,7 @@ BEGIN
 
             RETURN QUERY SELECT
                 code, msg::varchar,
-                false, 'l_outside'::varchar, ''::varchar, NULL::geometry, NULL::varchar, NULL::geometry, NULL::json;
+                false, 'ln_outside'::varchar, ''::varchar, NULL::geometry, NULL::varchar, NULL::geometry, NULL::json;
             RETURN;
     END;
 
@@ -991,7 +991,7 @@ BEGIN
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            false, 'l_outside'::varchar, ''::varchar, NULL::geometry, NULL::varchar, NULL::geometry, NULL::json;
+            false, 'ln_outside'::varchar, ''::varchar, NULL::geometry, NULL::varchar, NULL::geometry, NULL::json;
         RETURN;
     END IF;
 
@@ -1068,24 +1068,26 @@ BEGIN
                               ))
                           )
                     ) h
-                    ORDER BY h.priority
+                    ORDER BY h.priority, h.id
                     LIMIT 1
                 ) hit ON true
                 CROSS JOIN LATERAL (
                     SELECT
                         x.check_type,
                         CASE x.check_type
-                            WHEN ''l_outside'' THEN ''l_outside(线完全在面外)''
-                            WHEN ''l_within'' THEN ''l_within(线完全在面内)''
-                            WHEN ''l_entering'' THEN ''l_entering(线穿入/穿出面（一端在内，一端在外）)''
-                            ELSE ''l_crosses(线穿过面（贯穿，两端在外）)''
+                            WHEN ''ln_outside'' THEN ''ln_outside(线与面：相离)''
+                            WHEN ''ln_within'' THEN ''ln_within(线与面：包含于)''
+                            WHEN ''ln_enters'' THEN ''ln_enters(线与面：穿入/穿出)''
+                            WHEN ''ln_overlaps'' THEN ''ln_overlaps(线与面：重叠)''
+                            ELSE ''ln_crosses(线与面：交叉)''
                         END::varchar AS check_type_msg
                     FROM (
                         SELECT CASE
-                            WHEN hit.id IS NULL THEN ''l_outside''
-                            WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within''
-                            WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering''
-                            ELSE ''l_crosses''
+                            WHEN hit.id IS NULL THEN ''ln_outside''
+                            WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_Boundary(ST_SetSRID(hit.geom, 4326))) THEN ''ln_overlaps''
+                            WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''ln_within''
+                            WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''ln_enters''
+                            ELSE ''ln_crosses''
                         END::varchar AS check_type
                     ) x
                 ) ct
@@ -1133,23 +1135,26 @@ BEGIN
                               )
                           ))
                       )
+                    ORDER BY f.id
                     LIMIT 1
                 ) hit ON true
                 CROSS JOIN LATERAL (
                     SELECT
                         x.check_type,
                         CASE x.check_type
-                            WHEN ''l_outside'' THEN ''l_outside(线完全在面外)''
-                            WHEN ''l_within'' THEN ''l_within(线完全在面内)''
-                            WHEN ''l_entering'' THEN ''l_entering(线穿入/穿出面（一端在内，一端在外）)''
-                            ELSE ''l_crosses(线穿过面（贯穿，两端在外）)''
+                            WHEN ''ln_outside'' THEN ''ln_outside(线与面：相离)''
+                            WHEN ''ln_within'' THEN ''ln_within(线与面：包含于)''
+                            WHEN ''ln_enters'' THEN ''ln_enters(线与面：穿入/穿出)''
+                            WHEN ''ln_overlaps'' THEN ''ln_overlaps(线与面：重叠)''
+                            ELSE ''ln_crosses(线与面：交叉)''
                         END::varchar AS check_type_msg
                     FROM (
                         SELECT CASE
-                            WHEN hit.id IS NULL THEN ''l_outside''
-                            WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within''
-                            WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering''
-                            ELSE ''l_crosses''
+                            WHEN hit.id IS NULL THEN ''ln_outside''
+                            WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_Boundary(ST_SetSRID(hit.geom, 4326))) THEN ''ln_overlaps''
+                            WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''ln_within''
+                            WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''ln_enters''
+                            ELSE ''ln_crosses''
                         END::varchar AS check_type
                     ) x
                 ) ct
@@ -1195,23 +1200,26 @@ BEGIN
                           )
                       ))
                   )
+                ORDER BY f.id
                 LIMIT 1
             ) hit ON true
             CROSS JOIN LATERAL (
                 SELECT
                     x.check_type,
                     CASE x.check_type
-                        WHEN ''l_outside'' THEN ''l_outside(线完全在面外)''
-                        WHEN ''l_within'' THEN ''l_within(线完全在面内)''
-                        WHEN ''l_entering'' THEN ''l_entering(线穿入/穿出面（一端在内，一端在外）)''
-                        ELSE ''l_crosses(线穿过面（贯穿，两端在外）)''
+                        WHEN ''ln_outside'' THEN ''ln_outside(线与面：相离)''
+                        WHEN ''ln_within'' THEN ''ln_within(线与面：包含于)''
+                        WHEN ''ln_enters'' THEN ''ln_enters(线与面：穿入/穿出)''
+                        WHEN ''ln_overlaps'' THEN ''ln_overlaps(线与面：重叠)''
+                        ELSE ''ln_crosses(线与面：交叉)''
                     END::varchar AS check_type_msg
                 FROM (
                     SELECT CASE
-                        WHEN hit.id IS NULL THEN ''l_outside''
-                        WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''l_within''
-                        WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''l_entering''
-                        ELSE ''l_crosses''
+                        WHEN hit.id IS NULL THEN ''ln_outside''
+                        WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_Boundary(ST_SetSRID(hit.geom, 4326))) THEN ''ln_overlaps''
+                        WHEN ST_CoveredBy(ST_Force2D(il.geom), ST_SetSRID(hit.geom, 4326)) THEN ''ln_within''
+                        WHEN ST_Covers(ST_SetSRID(hit.geom, 4326), ST_StartPoint(ST_Force2D(il.geom))) <> ST_Covers(ST_SetSRID(hit.geom, 4326), ST_EndPoint(ST_Force2D(il.geom))) THEN ''ln_enters''
+                        ELSE ''ln_crosses''
                     END::varchar AS check_type
                 ) x
             ) ct
@@ -1223,9 +1231,9 @@ BEGIN
     -- 5. 无碰撞时返回空结果状00
     IF NOT FOUND THEN
         RETURN QUERY SELECT
-            200, format('航线未闯入任何电子围栏，check_type=l_outside(线完全在面外)，执行时间 %s 秒',
+            200, format('航线未闯入任何电子围栏，check_type=ln_outside(线与面：相离)，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
-            false, 'l_outside'::varchar, ''::varchar, v_line, NULL::varchar, NULL::geometry, NULL::json;
+            false, 'ln_outside'::varchar, ''::varchar, v_line, NULL::varchar, NULL::geometry, NULL::json;
     END IF;
 
 -- 异常捕获
@@ -1243,7 +1251,7 @@ EXCEPTION
 
         RETURN QUERY SELECT
             code, msg::varchar,
-            false, 'l_outside'::varchar, ''::varchar, NULL::geometry, NULL::varchar, NULL::geometry, NULL::json;
+            false, 'ln_outside'::varchar, ''::varchar, NULL::geometry, NULL::varchar, NULL::geometry, NULL::json;
 END;
 $$;
 COMMENT ON FUNCTION public.gis_electric_fence_check_line(text, text) IS '检测航线穿越围栏';
@@ -2087,7 +2095,7 @@ BEGIN
             res.msg,
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar AS msg,
         true AS ischeck,
-        'l_crosses'::varchar AS check_type,
+        'ln_crosses'::varchar AS check_type,
         res.electric_id,
         res.electric_geom,
         res.electric_geojson,
@@ -2118,9 +2126,9 @@ BEGIN
 
     IF NOT FOUND THEN
         RETURN QUERY SELECT
-            200, format('航线未闯入任何电子围栏，check_type=l_outside(线完全在面外)，执行时间 %s 秒',
+            200, format('航线未闯入任何电子围栏，check_type=ln_outside(线与面：相离)，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
-            false, 'l_outside'::varchar, NULL::varchar, NULL::geometry, NULL::json, NULL::geometry, NULL::json, NULL::geometry, NULL::json;
+            false, 'ln_outside'::varchar, NULL::varchar, NULL::geometry, NULL::json, NULL::geometry, NULL::json, NULL::geometry, NULL::json;
     END IF;
 
 EXCEPTION
@@ -2261,9 +2269,9 @@ BEGIN
             )
             SELECT
                 200 AS code,
-                format(''检测到航线缓冲区闯入电子围栏，check_type=l_crosses(线穿过面（贯穿，两端在外）)，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
+                format(''检测到航线缓冲区闯入电子围栏，check_type=ln_crosses(线与面：交叉)，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
                 true AS ischeck,
-                ''l_crosses''::varchar AS check_type,
+                ''ln_crosses''::varchar AS check_type,
                 f.id::varchar(32) AS electric_id,
                 f.geom AS electric_geom,
                 CASE WHEN $5 THEN ST_AsGeoJSON(f.calc_geom)::json ELSE NULL::json END AS electric_geojson,
@@ -2307,9 +2315,9 @@ BEGIN
             )
             SELECT
                 200 AS code,
-                format(''检测到航线缓冲区闯入电子围栏，check_type=l_crosses(线穿过面（贯穿，两端在外）)，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
+                format(''检测到航线缓冲区闯入电子围栏，check_type=ln_crosses(线与面：交叉)，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
                 true AS ischeck,
-                ''l_crosses''::varchar AS check_type,
+                ''ln_crosses''::varchar AS check_type,
                 f.id::varchar(32) AS electric_id,
                 f.geom AS electric_geom,
                 CASE WHEN $5 THEN ST_AsGeoJSON(f.calc_geom)::json ELSE NULL::json END AS electric_geojson,
@@ -2344,9 +2352,9 @@ BEGIN
 
     IF NOT FOUND THEN
         RETURN QUERY SELECT
-            200, format('航线未闯入任何电子围栏缓冲区，check_type=l_outside(线完全在面外)，执行时间 %s 秒',
+            200, format('航线未闯入任何电子围栏缓冲区，check_type=ln_outside(线与面：相离)，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
-            false, 'l_outside'::varchar, NULL::varchar, NULL::geometry, NULL::json, NULL::geometry, NULL::json, NULL::geometry, NULL::json;
+            false, 'ln_outside'::varchar, NULL::varchar, NULL::geometry, NULL::json, NULL::geometry, NULL::json, NULL::geometry, NULL::json;
     END IF;
 
 EXCEPTION

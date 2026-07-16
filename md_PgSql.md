@@ -56,10 +56,11 @@
 |-----------|------|
 | `p_inner` | 点在内部 |
 | `p_outer` | 点在外部 |
-| `l_within` | 线完全在面内 |
-| `l_outside` | 线完全在面外 |
-| `l_crosses` | 线穿过面（贯穿，两端在外） |
-| `l_entering` | 线穿入/穿出面（一端在内，一端在外） |
+| `ln_within` | 线与面：包含于 |
+| `ln_outside` | 线与面：相离 |
+| `ln_crosses` | 线与面：交叉 |
+| `ln_enters` | 线与面：穿入/穿出 |
+| `ln_overlaps` | 线与面：重叠 |
 
 缓冲区相关函数返回 `ischeck` 和 `chek_type`：
 
@@ -67,7 +68,7 @@
 |------|---------|-----------|
 | `gis_electric_fence_buffer` | 生成到有效围栏为 `true`，未查询到或异常为 `false` | `b_generated` 已生成，`b_empty` 未查询到有效围栏数据 |
 | `gis_electric_fence_check_point_buffer` | 命中缓冲区为 `true`，未命中为 `false` | `p_inner` 点在内部，`p_outer` 点在外部 |
-| `gis_electric_fence_check_line_buffer` | 命中缓冲区为 `true`，未命中为 `false` | `l_within`、`l_outside`、`l_crosses`、`l_entering` |
+| `gis_electric_fence_check_line_buffer` | 命中缓冲区为 `true`，未命中为 `false` | `ln_within`、`ln_outside`、`ln_crosses`、`ln_enters`、`ln_overlaps` |
 
 缓冲区相关函数统一在 `msg` 中追加 `chek_type` 编码和中文含义；围栏字段统一返回为：`electric_id`、`electric_geom`、`electric_geojson`、`electric_buffer_geom`、`electric_buffer_geojson`、`electric_solid_geom`、`electric_solid_geojson`。
 

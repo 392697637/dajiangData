@@ -48,10 +48,11 @@ FROM public.gis_electric_fence_check_point(
 -- 返回：
 --   code, msg, ischeck, check_type, table_name, geom, electric_id, electric_geom, electric_geojson；多线按线数返回多行
 -- check_type：
---   l_within    线完全在面内
---   l_outside   线完全在面外
---   l_crosses   线穿过面（贯穿，两端在外）
---   l_entering  线穿入/穿出面（一端在内，一端在外）
+--   ln_within    线与面：包含于
+--   ln_outside   线与面：相离
+--   ln_crosses   线与面：交叉
+--   ln_enters    线与面：穿入/穿出
+--   ln_overlaps  线与面：重叠
 -- ============================================================================
 SELECT code, msg, ischeck, check_type, table_name, geom, electric_id, electric_geom, electric_geojson
 FROM public.gis_electric_fence_check_line(
