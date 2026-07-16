@@ -1,4 +1,4 @@
--- ============================================================================
+﻿-- ============================================================================
 -- 3.待对接接口.sql
 -- 日期：2026-07-06
 -- 范围：电子围栏缓冲区相关接口。
@@ -15,12 +15,12 @@
 --   p_buffer_radius   double precision   缓冲半径，单位：米；0表示不缓冲
 --   p_return_geojson  boolean            是否返回GeoJSON，默认false；需要前端直接使用GeoJSON时传true
 -- 返回：
---   code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+--   code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 -- check_type：
 --   b_generated  已生成缓冲/立体几何
 --   b_empty      未查询到有效围栏数据
 -- ============================================================================
-SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_buffer(
     '2c95908e958f3b75019593551f520126',
     '2052290479526682626',
@@ -29,7 +29,7 @@ FROM public.gis_electric_fence_buffer(
 );
 
 -- p_fence_id 为空：返回全部围栏缓冲数据
-SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_buffer(
     '2c95908e958f3b75019593551f520126',
     NULL,
@@ -38,7 +38,7 @@ FROM public.gis_electric_fence_buffer(
 );
 
 -- 无项目ID且 p_fence_id 为空：返回公共表全部围栏
-SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_buffer(
     NULL,
     NULL,
@@ -55,12 +55,12 @@ FROM public.gis_electric_fence_buffer(
 --   p_buffer_radius   double precision   缓冲半径，单位：米；0表示不缓冲
 --   p_return_geojson  boolean            是否返回围栏/缓冲/立体GeoJSON，默认false；需要前端直接使用GeoJSON时传true
 -- 返回：
---   code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+--   code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 -- check_type：
 --   p_inner  点在内部
 --   p_outer  点在外部
 -- ============================================================================
-SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_point_buffer(
     '2c95908e958f3b75019593551f520126',
     '{"type":"Point","coordinates":[113.405861,34.769437,120]}',
@@ -68,7 +68,7 @@ FROM public.gis_electric_fence_check_point_buffer(
     true
 );
 
-SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_point_buffer(
     '2c95908e958f3b75019593551f520126',
     '[113.405861,34.769437,120]',
@@ -85,7 +85,7 @@ FROM public.gis_electric_fence_check_point_buffer(
 --   p_buffer_radius   double precision   缓冲半径，单位：米；0表示不缓冲
 --   p_return_geojson  boolean            是否返回围栏/缓冲/立体GeoJSON，默认false；需要前端直接使用GeoJSON时传true
 -- 返回：
---   code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+--   code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 -- check_type：
 --   ln_within    线与面：包含于
 --   ln_outside   线与面：相离
@@ -93,7 +93,7 @@ FROM public.gis_electric_fence_check_point_buffer(
 --   ln_enters    线与面：穿入/穿出
 --   ln_overlaps  线与面：重叠
 -- ============================================================================
-SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_line_buffer(
     '2c95908e958f3b75019593551f520126',
     '{
@@ -107,7 +107,7 @@ FROM public.gis_electric_fence_check_line_buffer(
     true
 );
 
-SELECT code, msg, ischeck, check_type, electric_id, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_line_buffer(
     '2c95908e958f3b75019593551f520126',
     '[

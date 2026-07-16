@@ -1,4 +1,4 @@
-# PGSQL / PostGIS 函数说明
+﻿# PGSQL / PostGIS 函数说明
 
 `PGSQL/` 目录保存电子围栏、三维网格、航线校验、自动规划相关 SQL 脚本。核心依赖 PostgreSQL + PostGIS。
 
