@@ -641,8 +641,8 @@ BEGIN
                 SELECT
                     200 AS code,
                     CASE
-                        WHEN hit.id IS NULL THEN format(''当前位置不在禁飞区内，check_type=p_outer(点在外部)，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
-                        ELSE format(''当前位置在禁飞区内，check_type=p_inner(点在内部)，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
+                        WHEN hit.id IS NULL THEN format(''当前位置不在禁飞区/管控区内，check_type=p_outer(点在外部)，执行时间 %%s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
+                        ELSE format(''当前位置在%%s内，check_type=p_inner(点在内部)，执行时间 %%s 秒'', CASE hit.fence_type WHEN ''1'' THEN ''禁飞区'' WHEN ''2'' THEN ''管控区'' ELSE ''电子围栏'' END, ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
                     END::varchar AS msg,
                     (hit.id IS NOT NULL) AS ischeck,
                     CASE WHEN hit.id IS NULL THEN ''p_outer'' ELSE ''p_inner'' END::varchar AS check_type,
@@ -659,12 +659,12 @@ BEGIN
                         SELECT
                             %L::varchar AS table_name,
                             f.id::varchar(32) AS id,
-                            ''1''::varchar AS fence_type,
+                            f.fence_type::varchar AS fence_type,
                             f.geom AS geom,
                             ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
                             1 AS priority
                         FROM %I f
-                        WHERE f.fence_type = ''1''
+                        WHERE f.fence_type IN (''1'',''2'')
                           AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
                           AND (
                               COALESCE(ST_Z(ip.geom), 0) = 0
@@ -681,7 +681,7 @@ BEGIN
                             ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
                             2 AS priority
                         FROM bo_electric_fence f
-                        WHERE f.fence_type = ''1''
+                        WHERE f.fence_type IN (''1'',''2'')
                           AND f.status = ''1''
                           AND f.del_flag = false
                           AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
@@ -709,8 +709,8 @@ BEGIN
                 SELECT
                     200 AS code,
                     CASE
-                        WHEN hit.id IS NULL THEN format(''当前位置不在禁飞区内，check_type=p_outer(点在外部)，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
-                        ELSE format(''当前位置在禁飞区内，check_type=p_inner(点在内部)，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
+                        WHEN hit.id IS NULL THEN format(''当前位置不在禁飞区/管控区内，check_type=p_outer(点在外部)，执行时间 %s 秒'', ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
+                        ELSE format(''当前位置在%s内，check_type=p_inner(点在内部)，执行时间 %s 秒'', CASE hit.fence_type WHEN ''1'' THEN ''禁飞区'' WHEN ''2'' THEN ''管控区'' ELSE ''电子围栏'' END, ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))
                     END::varchar AS msg,
                     (hit.id IS NOT NULL) AS ischeck,
                     CASE WHEN hit.id IS NULL THEN ''p_outer'' ELSE ''p_inner'' END::varchar AS check_type,
@@ -729,7 +729,7 @@ BEGIN
                         f.geom AS geom,
                         ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                     FROM bo_electric_fence f
-                    WHERE f.fence_type = ''1''
+                    WHERE f.fence_type IN (''1'',''2'')
                       AND f.status = ''1''
                       AND f.del_flag = false
                       AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
@@ -757,9 +757,10 @@ BEGIN
         SELECT
             200 AS code,
             CASE
-                WHEN hit.id IS NULL THEN format('当前位置不在禁飞区内，check_type=p_outer(点在外部)，执行时间 %s 秒',
+                WHEN hit.id IS NULL THEN format('当前位置不在禁飞区/管控区内，check_type=p_outer(点在外部)，执行时间 %s 秒',
                     ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
-                ELSE format('当前位置在禁飞区内，check_type=p_inner(点在内部)，执行时间 %s 秒',
+                ELSE format('当前位置在%s内，check_type=p_inner(点在内部)，执行时间 %s 秒',
+                    CASE hit.fence_type WHEN '1' THEN '禁飞区' WHEN '2' THEN '管控区' ELSE '电子围栏' END,
                     ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
             END::varchar AS msg,
             (hit.id IS NOT NULL) AS ischeck,
@@ -782,7 +783,7 @@ BEGIN
                 f.geom AS geom,
                 ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
             FROM bo_electric_fence f
-            WHERE f.fence_type = '1'        -- 围栏类型：禁飞区
+            WHERE f.fence_type IN ('1','2') -- 围栏类型：禁飞区/管控区
               AND f.status = '1'            -- 状态：启用
               AND f.del_flag = false        -- 未删
               AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
@@ -803,11 +804,11 @@ BEGIN
     END IF;
 
     -- =============================================
-    -- 00 成功】未检测到闯入任何禁飞区
+    -- 00 成功】未检测到闯入任何禁飞区/管控区
     -- =============================================
     IF NOT v_found THEN
         RETURN QUERY SELECT
-            200, format('当前位置不在禁飞区内，check_type=p_outer(点在外部)，执行时间 %s 秒',
+            200, format('当前位置不在禁飞区/管控区内，check_type=p_outer(点在外部)，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::varchar,
             false, 'p_outer'::varchar, ''::varchar, v_point, NULL::varchar, NULL::varchar, NULL::geometry, NULL::json;
         RETURN;
@@ -1041,12 +1042,13 @@ BEGIN
                         SELECT
                             %L::varchar AS table_name,
                             f.id::varchar(32) AS id,
-                            ''1''::varchar AS fence_type,
+                            f.fence_type::varchar AS fence_type,
                             f.geom AS geom,
                             ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
                             1 AS priority
                         FROM %I f
-                        WHERE (
+                        WHERE f.fence_type IN (''1'',''2'')
+                          AND (
                             (COALESCE(f.height, 0) = 0 AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom)))
                             OR
                             (COALESCE(f.height, 0) > 0 AND ST_3DIntersects(
@@ -1066,7 +1068,8 @@ BEGIN
                             ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson,
                             2 AS priority
                         FROM bo_electric_fence f
-                        WHERE f.del_flag = false
+                        WHERE f.fence_type IN (''1'',''2'')
+                          AND f.del_flag = false
                           AND f.status = ''1''
                           AND (
                               (COALESCE(f.height, 0) = 0 AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom)))
@@ -1136,7 +1139,8 @@ BEGIN
                         f.geom AS geom,
                         ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                     FROM bo_electric_fence f
-                    WHERE f.del_flag = false
+                    WHERE f.fence_type IN (''1'',''2'')
+                      AND f.del_flag = false
                       AND f.status = ''1''
                       AND (
                           (COALESCE(f.height, 0) = 0 AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom)))
@@ -1203,7 +1207,8 @@ BEGIN
                     f.geom AS geom,
                     ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                 FROM bo_electric_fence f
-                WHERE f.del_flag = false
+                WHERE f.fence_type IN (''1'',''2'')
+                  AND f.del_flag = false
                   AND f.status = ''1''
                   AND (
                       (COALESCE(f.height, 0) = 0 AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom)))
@@ -2326,7 +2331,7 @@ BEGIN
             )
             SELECT
                 200 AS code,
-                format(''检测到航线缓冲区闯入电子围栏，check_type=%s，执行时间 %%s 秒'', ct.check_type_msg, ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
+                format(''检测到航线缓冲区闯入电子围栏，check_type=%%s，执行时间 %%s 秒'', ct.check_type_msg, ROUND(EXTRACT(epoch FROM clock_timestamp() - $3)::numeric, 3))::varchar AS msg,
                 true AS ischeck,
                 ct.check_type,
                 f.id::varchar(32) AS electric_id,
