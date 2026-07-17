@@ -152,6 +152,7 @@ AS $$
 DECLARE
     v_hit boolean := false;
     v_project_fence_table text;
+    v_project_fence_has_height boolean := false;
 BEGIN
     IF p_point IS NULL THEN
         RETURN false;
@@ -166,6 +167,10 @@ BEGIN
               AND f.status = '1'
               AND f.del_flag = false
               AND (COALESCE(p_project_id, '') = '' OR f.project_id::text = p_project_id::text)
+              AND (
+                  COALESCE(f.height, 0) = 0
+                  OR COALESCE(ST_Z(p_point), 0) <= f.height
+              )
               AND ST_Covers(
                   ST_SetSRID(ST_MakeValid(ST_Force2D(f.geom)), 4326),
                   ST_Force2D(p_point)
@@ -180,19 +185,33 @@ BEGIN
     IF p_project_id IS NOT NULL AND trim(p_project_id) <> '' THEN
         v_project_fence_table := 'gis_electric_fence_' || trim(p_project_id);
         IF to_regclass(format('%I.%I', 'public', v_project_fence_table)) IS NOT NULL THEN
+            SELECT EXISTS(
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = v_project_fence_table
+                  AND column_name = 'height'
+            ) INTO v_project_fence_has_height;
+
             EXECUTE format('
                 SELECT EXISTS(
                     SELECT 1
                     FROM %I.%I f
                     WHERE f.geom IS NOT NULL
                       AND f.fence_type IN (''1'', ''2'')
+                      %s
                       AND ST_Covers(
                           ST_SetSRID(ST_MakeValid(ST_Force2D(f.geom)), 4326),
                           ST_Force2D($1)
                       )
                 )',
                 'public',
-                v_project_fence_table
+                v_project_fence_table,
+                CASE WHEN v_project_fence_has_height THEN
+                    'AND (COALESCE(f.height, 0) = 0 OR COALESCE(ST_Z($1), 0) <= f.height)'
+                ELSE
+                    ''
+                END
             )
             INTO v_hit
             USING p_point;
@@ -229,6 +248,7 @@ AS $$
 DECLARE
     v_hit boolean := false;
     v_project_fence_table text;
+    v_project_fence_has_height boolean := false;
 BEGIN
     IF p_line IS NULL THEN
         RETURN false;
@@ -243,6 +263,13 @@ BEGIN
               AND f.status = '1'
               AND f.del_flag = false
               AND (COALESCE(p_project_id, '') = '' OR f.project_id::text = p_project_id::text)
+              AND (
+                  COALESCE(f.height, 0) = 0
+                  OR (
+                      SELECT MIN(ST_Z((dp).geom))
+                      FROM ST_DumpPoints(p_line) AS dp
+                  ) <= f.height
+              )
               AND ST_Intersects(
                   ST_SetSRID(ST_MakeValid(ST_Force2D(f.geom)), 4326),
                   ST_Force2D(p_line)
@@ -257,19 +284,33 @@ BEGIN
     IF p_project_id IS NOT NULL AND trim(p_project_id) <> '' THEN
         v_project_fence_table := 'gis_electric_fence_' || trim(p_project_id);
         IF to_regclass(format('%I.%I', 'public', v_project_fence_table)) IS NOT NULL THEN
+            SELECT EXISTS(
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = v_project_fence_table
+                  AND column_name = 'height'
+            ) INTO v_project_fence_has_height;
+
             EXECUTE format('
                 SELECT EXISTS(
                     SELECT 1
                     FROM %I.%I f
                     WHERE f.geom IS NOT NULL
                       AND f.fence_type IN (''1'', ''2'')
+                      %s
                       AND ST_Intersects(
                           ST_SetSRID(ST_MakeValid(ST_Force2D(f.geom)), 4326),
                           ST_Force2D($1)
                       )
                 )',
                 'public',
-                v_project_fence_table
+                v_project_fence_table,
+                CASE WHEN v_project_fence_has_height THEN
+                    'AND (COALESCE(f.height, 0) = 0 OR (SELECT MIN(ST_Z((dp).geom)) FROM ST_DumpPoints($1) AS dp) <= f.height)'
+                ELSE
+                    ''
+                END
             )
             INTO v_hit
             USING p_line;
@@ -338,6 +379,8 @@ DECLARE
     v_start_pt      geometry(PointZ,4326);
     -- 3D终点几何对象
     v_end_pt        geometry(PointZ,4326);
+    v_start_safe_pt geometry(PointZ,4326);
+    v_end_safe_pt   geometry(PointZ,4326);
     
     -- ====================== 历史航线复用 ======================
     -- 存储查询到的匹配历史航线记录
@@ -390,6 +433,10 @@ DECLARE
     v_use_astar     BOOLEAN := false;
     -- 实际参与本次规划的网格表名；优先使用项目网格表 gis_grid_nodes_{项目ID}
     v_grid_table     TEXT;
+    v_debug_tmp_grid_count BIGINT;
+    v_debug_start_node TEXT;
+    v_debug_goal_node TEXT;
+    v_debug_path_ids_before_trim INT[];
     
     -- ====================== 边检查辅助变量 ======================
     v_edge_line     geometry(LineStringZ,4326);   -- 节点间的线段几何
@@ -437,6 +484,33 @@ BEGIN
     -- 将输入的经纬度+高度构造成PostGIS 3D点，并指定WGS84坐标系（SRID 4326）
     v_start_pt := ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_start_alt), 4326);
     v_end_pt   := ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_end_alt), 4326);
+    v_start_safe_pt := ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_safe_altitude), 4326);
+    v_end_safe_pt   := ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_safe_altitude), 4326);
+    RAISE NOTICE '【A*调试】规划安全高度点：start_safe=(%,%,%), end_safe=(%,%,%)',
+        ST_X(v_start_safe_pt), ST_Y(v_start_safe_pt), ST_Z(v_start_safe_pt),
+        ST_X(v_end_safe_pt), ST_Y(v_end_safe_pt), ST_Z(v_end_safe_pt);
+
+    IF gis_flight_point_in_fence(v_start_pt, p_project_id) THEN
+        code := 400;
+        msg := format('参数错误：起点在禁飞区或管控区内，start=(%s,%s,%s)，执行时间 %s 秒',
+                      p_start_lon, p_start_lat, p_start_alt,
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
+
+    IF gis_flight_point_in_fence(v_end_pt, p_project_id) THEN
+        code := 400;
+        msg := format('参数错误：终点在禁飞区或管控区内，end=(%s,%s,%s)，执行时间 %s 秒',
+                      p_end_lon, p_end_lat, p_end_alt,
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
 
     -- ====================== 2. 非强制生成时，优先复用历史航线 ======================
     -- 未开启强制重算 → 尝试查询完全相同条件的历史航线（避免重复计算）
@@ -483,20 +557,22 @@ BEGIN
             SELECT id
             FROM %I
             WHERE is_flyable = true
+              AND ST_Z(geom) <= $2
             ORDER BY geom <-> $1
             LIMIT 1', v_grid_table)
         INTO v_start_id
-        USING v_start_pt;
+        USING v_start_safe_pt, p_safe_altitude;
 
         -- 查找终点最近的可通行网格，优先使用综合 is_flyable 标记。
         EXECUTE format('
             SELECT id
             FROM %I
             WHERE is_flyable = true
+              AND ST_Z(geom) <= $2
             ORDER BY geom <-> $1
             LIMIT 1', v_grid_table)
         INTO v_goal_id
-        USING v_end_pt;
+        USING v_end_safe_pt, p_safe_altitude;
     END IF;
 
     -- A*启用条件：
@@ -509,12 +585,12 @@ BEGIN
         -- 所有条件满足，启用A*寻路
         EXECUTE format('
             SELECT
-                EXISTS(SELECT 1 FROM %I WHERE id = $1 AND is_flyable = true)
-                AND EXISTS(SELECT 1 FROM %I WHERE id = $2 AND is_flyable = true)
-                AND EXISTS(SELECT 1 FROM %I WHERE is_flyable = true)',
+                EXISTS(SELECT 1 FROM %I WHERE id = $1 AND is_flyable = true AND ST_Z(geom) <= $3)
+                AND EXISTS(SELECT 1 FROM %I WHERE id = $2 AND is_flyable = true AND ST_Z(geom) <= $3)
+                AND EXISTS(SELECT 1 FROM %I WHERE is_flyable = true AND ST_Z(geom) <= $3)',
             v_grid_table, v_grid_table, v_grid_table)
         INTO v_use_astar
-        USING v_start_id, v_goal_id;
+        USING v_start_id, v_goal_id, p_safe_altitude;
     ELSE
         v_use_astar := false;
     END IF;
@@ -522,6 +598,38 @@ BEGIN
     -- ====================== 分支1：不满足A* → 直接生成两点直线航线（兜底方案） ======================
     -- 此分支处理以下情况：网格表为空、起点或终点在禁飞区、无法匹配网格等
     IF NOT v_use_astar THEN
+        IF v_grid_table IS NULL THEN
+            code := 500;
+            msg := format('规划失败：未找到可用网格表，无法启用A*，执行时间 %s 秒',
+                          ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        ELSIF v_start_id IS NULL AND v_goal_id IS NULL THEN
+            code := 400;
+            msg := format('规划失败：起点和终点附近均未找到可飞网格节点，grid_table=%s，执行时间 %s 秒',
+                          v_grid_table,
+                          ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        ELSIF v_start_id IS NULL THEN
+            code := 400;
+            msg := format('规划失败：起点附近未找到可飞网格节点，grid_table=%s，执行时间 %s 秒',
+                          v_grid_table,
+                          ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        ELSIF v_goal_id IS NULL THEN
+            code := 400;
+            msg := format('规划失败：终点附近未找到可飞网格节点，grid_table=%s，执行时间 %s 秒',
+                          v_grid_table,
+                          ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        ELSE
+            code := 500;
+            msg := format('规划失败：网格数据状态不一致，A*启用校验未通过，grid_table=%s，start_id=%s，goal_id=%s，执行时间 %s 秒',
+                          v_grid_table,
+                          COALESCE(v_start_id::text, 'NULL'),
+                          COALESCE(v_goal_id::text, 'NULL'),
+                          ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        END IF;
+
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
         -- 构建符合直升直降规则的3D直线航线。
         v_path_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
         v_path_line := ST_AddPoint(v_path_line, v_start_pt);
@@ -602,23 +710,51 @@ BEGIN
         FROM %I
         WHERE x BETWEEN %s AND %s AND y BETWEEN %s AND %s
           AND is_flyable = true
-    ', v_grid_table, v_min_x, v_max_x, v_min_y, v_max_y);
+          AND ST_Z(geom) <= %s
+    ', v_grid_table, v_min_x, v_max_x, v_min_y, v_max_y, p_safe_altitude);
 
     CREATE INDEX idx_tmp_grid_xyz ON tmp_grid (x, y, z);
     CREATE INDEX idx_tmp_grid_geom ON tmp_grid USING GIST (geom);
     ANALYZE tmp_grid;
 
+    SELECT COUNT(*) INTO v_debug_tmp_grid_count FROM tmp_grid;
+    RAISE NOTICE '【A*调试】tmp_grid_count=%, safe_altitude=%, x_range=[%,%], y_range=[%,%]',
+        v_debug_tmp_grid_count, p_safe_altitude, v_min_x, v_max_x, v_min_y, v_max_y;
+    FOR v_debug_start_node IN
+        SELECT format('z=%s, alt=%s, count=%s', z, ST_Z(geom), count(*))
+        FROM tmp_grid
+        GROUP BY z, ST_Z(geom)
+        ORDER BY z
+    LOOP
+        RAISE NOTICE '【A*调试】tmp_grid高度层：%', v_debug_start_node;
+    END LOOP;
+
     -- 在临时表中重新匹配最近的起点/终点网格（确保在搜索范围内）
-    SELECT g.id INTO v_start_id FROM tmp_grid g ORDER BY g.geom <-> v_start_pt LIMIT 1;
-    SELECT g.id INTO v_goal_id  FROM tmp_grid g ORDER BY g.geom <-> v_end_pt LIMIT 1;
+    SELECT g.id INTO v_start_id FROM tmp_grid g ORDER BY g.geom <-> v_start_safe_pt LIMIT 1;
+    SELECT g.id INTO v_goal_id  FROM tmp_grid g ORDER BY g.geom <-> v_end_safe_pt LIMIT 1;
+
+    SELECT format('id=%s,x=%s,y=%s,z=%s,lon=%s,lat=%s,alt=%s,dist_m=%s',
+                  g.id, g.x, g.y, g.z, ST_X(g.geom), ST_Y(g.geom), ST_Z(g.geom),
+                  ROUND(ST_Distance(g.geom::geography, v_start_safe_pt::geography)::numeric, 3))
+    INTO v_debug_start_node
+    FROM tmp_grid g
+    WHERE g.id = v_start_id;
+    SELECT format('id=%s,x=%s,y=%s,z=%s,lon=%s,lat=%s,alt=%s,dist_m=%s',
+                  g.id, g.x, g.y, g.z, ST_X(g.geom), ST_Y(g.geom), ST_Z(g.geom),
+                  ROUND(ST_Distance(g.geom::geography, v_end_safe_pt::geography)::numeric, 3))
+    INTO v_debug_goal_node
+    FROM tmp_grid g
+    WHERE g.id = v_goal_id;
+    RAISE NOTICE '【A*调试】tmp重选start：%', COALESCE(v_debug_start_node, 'NULL');
+    RAISE NOTICE '【A*调试】tmp重选goal ：%', COALESCE(v_debug_goal_node, 'NULL');
 
     -- 初始化起点代价：g_cost = 0（起点到自身代价为0）
     -- h_cost = 起点到终点的3D直线距离（启发函数）
     -- f_cost = g_cost + h_cost
     UPDATE tmp_grid g
     SET g_cost = 0,
-        h_cost = ST_3DDistance(g.geom, v_end_pt),
-        f_cost = 0 + ST_3DDistance(g.geom, v_end_pt)
+        h_cost = ST_3DDistance(g.geom, v_end_safe_pt),
+        f_cost = 0 + ST_3DDistance(g.geom, v_end_safe_pt)
     WHERE g.id = v_start_id;
 
     -- ====================== A* 算法核心循环 ======================
@@ -686,6 +822,11 @@ BEGIN
                     WHERE f.fence_type IN ('1', '2')   -- 禁飞区+管控区
                       AND f.status = '1'
                       AND f.del_flag = false
+                      AND (COALESCE(p_project_id, '') = '' OR f.project_id::text = p_project_id::text)
+                      AND (
+                          COALESCE(f.height, 0) = 0
+                          OR LEAST(ST_Z(v_curr_geom), ST_Z(v_n_geom)) <= f.height
+                      )
                       AND ST_Intersects(ST_SetSRID(f.geom, 4326), v_edge_line)   -- 若需三维精确判断，改为 ST_3DIntersects
                 ) THEN
                     CONTINUE;   -- 该边穿越禁飞区，不可通行，跳过此邻居
@@ -696,8 +837,8 @@ BEGIN
                 IF v_nid <> ALL(v_open) OR new_g < v_n_g THEN
                     UPDATE tmp_grid g
                     SET g_cost = new_g,
-                        h_cost = ST_3DDistance(v_n_geom, v_end_pt),
-                        f_cost = new_g + ST_3DDistance(v_n_geom, v_end_pt),
+                        h_cost = ST_3DDistance(v_n_geom, v_end_safe_pt),
+                        f_cost = new_g + ST_3DDistance(v_n_geom, v_end_safe_pt),
                         parent_id = v_curr
                     WHERE g.id = v_nid;
 
@@ -718,10 +859,16 @@ BEGIN
             -- 获取当前节点的父节点ID
             SELECT g.parent_id INTO v_current_id FROM tmp_grid g WHERE g.id = v_current_id;
         END LOOP;
-        -- 移除首尾虚拟节点（起点ID=-1，终点ID=-2），只保留中间的网格路径节点
-        IF array_length(v_path_ids, 1) >= 2 THEN
+        -- 仅当路径中确实包含虚拟节点（起点ID=-1，终点ID=-2）时才移除首尾。
+        -- 当前A*回溯使用真实网格节点ID，不能无条件裁掉首尾，否则两节点路径会被裁空。
+        v_debug_path_ids_before_trim := v_path_ids;
+        RAISE NOTICE '【A*调试】回溯裁剪前 path_ids=%', v_debug_path_ids_before_trim;
+        IF array_length(v_path_ids, 1) >= 2
+           AND v_path_ids[1] = -1
+           AND v_path_ids[array_length(v_path_ids, 1)] = -2 THEN
             v_path_ids := v_path_ids[2:array_length(v_path_ids, 1)-1];
         END IF;
+        RAISE NOTICE '【A*调试】回溯裁剪后 path_ids=%', v_path_ids;
         
         -- 输出A*路径所有节点的坐标信息
         DECLARE
@@ -748,6 +895,14 @@ BEGIN
     -- ====================== A* 寻路失败（路径点数量 < 2）→ 降级为直线航线 ======================
     -- 路径点少于2说明没有有效路径（可能起点终点不连通，或搜索失败），此时使用直线航线
     IF COALESCE(array_length(v_path_ids, 1), 0) < 1 THEN
+        DROP TABLE IF EXISTS tmp_grid;
+        code := 400;
+        msg := format('规划失败：A*未找到有效路径，无法生成避障航线，执行时间 %s 秒',
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
         DROP TABLE IF EXISTS tmp_grid;-- 清理临时表
         -- 生成符合直升直降规则的直线航线（与分支1逻辑相同）
         v_path_line := ST_SetSRID('LINESTRING Z EMPTY'::geometry, 4326);
@@ -866,6 +1021,14 @@ BEGIN
                 WHERE f.fence_type IN ('1', '2')
                   AND f.status = '1'
                   AND f.del_flag = false
+                  AND (COALESCE(p_project_id, '') = '' OR f.project_id::text = p_project_id::text)
+                  AND (
+                      COALESCE(f.height, 0) = 0
+                      OR LEAST(
+                          ST_Z(ST_PointN(v_direct_line, 1)),
+                          ST_Z(ST_PointN(v_direct_line, ST_NumPoints(v_direct_line)))
+                      ) <= f.height
+                  )
                   AND ST_Intersects(
                       ST_SetSRID(ST_MakeValid(ST_Force2D(f.geom)), 4326),
                       ST_Force2D(v_direct_line)
@@ -920,6 +1083,16 @@ BEGIN
 
 -- ====================== 全局异常捕获：任何错误都返回直线航线（保证服务不崩溃） ======================
 EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '【调试】规划异常，拒绝直线兜底，触发原因：%（SQLSTATE=%）', SQLERRM, SQLSTATE;
+    DROP TABLE IF EXISTS tmp_grid;
+    code := 500;
+    msg := format('执行异常：%s，已拒绝生成直线兜底航线，执行时间 %s 秒',
+                  SQLERRM,
+                  ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+    VALUES (code, msg, v_log_sql);
+    RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+    RETURN;
       -- 确保临时表被删除（如果存在）
     RAISE NOTICE '【调试】自动返回直线兜底航线，触发原因：%（SQLSTATE=%）', SQLERRM, SQLSTATE;
     DROP TABLE IF EXISTS tmp_grid;
@@ -1099,6 +1272,29 @@ BEGIN
 
     v_start_pt := ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_start_alt), 4326);
     v_end_pt := ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_end_alt), 4326);
+
+    IF gis_flight_point_in_fence(v_start_pt, p_project_id) THEN
+        code := 400;
+        msg := format('参数错误：起点在禁飞区或管控区内，start=(%s,%s,%s)，执行时间 %s 秒',
+                      p_start_lon, p_start_lat, p_start_alt,
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
+
+    IF gis_flight_point_in_fence(v_end_pt, p_project_id) THEN
+        code := 400;
+        msg := format('参数错误：终点在禁飞区或管控区内，end=(%s,%s,%s)，执行时间 %s 秒',
+                      p_end_lon, p_end_lat, p_end_alt,
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
+
     v_direct_line := ST_MakeLine(v_start_pt, v_end_pt);
 
     -- 长距离但整条直线不经过禁飞区/管控区时，直接返回一条总航线，避免进入 5km 循环。
@@ -1253,6 +1449,10 @@ DECLARE
     v_point_idx INT;
     v_point_count INT;
     v_append_start INT;
+    v_bad_point_seq INT;
+    v_bad_point_lon DOUBLE PRECISION;
+    v_bad_point_lat DOUBLE PRECISION;
+    v_bad_point_alt DOUBLE PRECISION;
     v_log_sql      text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
     v_log_sql := format('SELECT * FROM public.gis_flight_paths_plan(%L, %s, %L, %L, %L, %s);',
@@ -1324,6 +1524,27 @@ BEGIN
     ) THEN
         code := 400;
         msg := format('参数错误：p_points 中存在无效坐标点，必须包含 lon/lat/alt 或 [lon,lat,alt]，执行时间 %s 秒',
+                      ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN QUERY SELECT code, msg, (NULL::gis_flight_paths).*;
+        RETURN;
+    END IF;
+
+    SELECT seq, lon, lat, alt
+    INTO v_bad_point_seq, v_bad_point_lon, v_bad_point_lat, v_bad_point_alt
+    FROM tmp_flight_plan_input_points
+    WHERE gis_flight_point_in_fence(
+        ST_SetSRID(ST_MakePoint(lon, lat, alt), 4326),
+        p_project_id
+    )
+    ORDER BY seq
+    LIMIT 1;
+
+    IF v_bad_point_seq IS NOT NULL THEN
+        code := 400;
+        msg := format('参数错误：规划点 seq=%s 在禁飞区或管控区内，point=(%s,%s,%s)，执行时间 %s 秒',
+                      v_bad_point_seq, v_bad_point_lon, v_bad_point_lat, v_bad_point_alt,
                       ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         INSERT INTO public.gis_error_log(code, msg, sqlstring)
         VALUES (code, msg, v_log_sql);

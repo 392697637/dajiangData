@@ -1124,10 +1124,10 @@ BEGIN
     v_end_safe_pt := ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_safe_altitude), 4326);
 
     -- 找到离真实起点/终点最近的可飞网格点，作为 A* 的 start/goal。
-    EXECUTE format('SELECT id FROM %I WHERE is_flyable = true ORDER BY geom <-> $1 LIMIT 1', p_grid_table)
-    INTO v_start_id USING v_start_pt;
-    EXECUTE format('SELECT id FROM %I WHERE is_flyable = true ORDER BY geom <-> $1 LIMIT 1', p_grid_table)
-    INTO v_goal_id USING v_end_pt;
+    EXECUTE format('SELECT id FROM %I WHERE is_flyable = true AND ST_Z(geom) <= $2 ORDER BY geom <-> $1 LIMIT 1', p_grid_table)
+    INTO v_start_id USING v_start_pt, p_safe_altitude;
+    EXECUTE format('SELECT id FROM %I WHERE is_flyable = true AND ST_Z(geom) <= $2 ORDER BY geom <-> $1 LIMIT 1', p_grid_table)
+    INTO v_goal_id USING v_end_pt, p_safe_altitude;
 
     IF v_start_id IS NULL OR v_goal_id IS NULL THEN
         code := 400;
@@ -1174,10 +1174,11 @@ BEGIN
             false AS closed
         FROM %I
         WHERE is_flyable = true
+          AND ST_Z(geom) <= $5
           AND x BETWEEN $1 AND $2
           AND y BETWEEN $3 AND $4
     ', p_grid_table)
-    USING v_min_x - v_margin, v_max_x + v_margin, v_min_y - v_margin, v_max_y + v_margin;
+    USING v_min_x - v_margin, v_max_x + v_margin, v_min_y - v_margin, v_max_y + v_margin, p_safe_altitude;
 
     -- A* 会频繁按 id 回溯、按 x/y/z 找邻居、按 f_cost 取最优开放点，因此建三个索引。
     CREATE UNIQUE INDEX IF NOT EXISTS idx_tmp_fine_astar_grid_id ON tmp_fine_astar_grid(id);
@@ -1266,7 +1267,8 @@ BEGIN
     CROSS JOIN LATERAL (
         SELECT ST_SetSRID(ST_MakeLine(ST_Force2D(v_start_safe_pt), ST_Force2D(g.geom)), 4326) AS geom2d
     ) seg
-    WHERE NOT EXISTS (
+    WHERE ST_Z(g.geom) <= p_safe_altitude
+      AND NOT EXISTS (
         SELECT 1
         FROM tmp_fine_astar_buildings b
         WHERE b.max_height >= LEAST(ST_Z(v_start_safe_pt), ST_Z(g.geom))
@@ -1282,7 +1284,8 @@ BEGIN
     CROSS JOIN LATERAL (
         SELECT ST_SetSRID(ST_MakeLine(ST_Force2D(g.geom), ST_Force2D(v_end_safe_pt)), 4326) AS geom2d
     ) seg
-    WHERE NOT EXISTS (
+    WHERE ST_Z(g.geom) <= p_safe_altitude
+      AND NOT EXISTS (
         SELECT 1
         FROM tmp_fine_astar_buildings b
         WHERE b.max_height >= LEAST(ST_Z(g.geom), ST_Z(v_end_safe_pt))
