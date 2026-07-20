@@ -379,7 +379,7 @@ COMMENT ON FUNCTION gis_check_electric_fence(varchar, text, text) IS '校验电�
 -- 函数功能无人机定位点 3D 电子围栏碰撞检测（无缓冲，纯原始围栏判断）
 -- 函数描述1. 传入 项目ID + 点的GeoJSON（支持Feature和Point格式
 --            2. 高度=0（默认）：仅执行2D平面包含判断
---            3. 管控区按禁飞区平面逻辑处理；非管控区height>0时按高度校验
+--            3. 禁飞区和管控区统一按同一套平面+高度逻辑校验
 --            4. 项目ID不为空时查询 gis_electric_fence_{project_id} 表（注意表不存在的情况）
 --            5. 项目ID为空时查bo_electric_fence
 --            6. 只查询禁飞区、启用状态、未删除的有效围栏
@@ -453,7 +453,7 @@ BEGIN
     -- =============================================
     IF p_point_geojson IS NULL OR p_point_geojson = '' THEN
         code := 400;
-        msg := format('点的GeoJSON不能为空，执行时间 %s 秒',
+        msg := format('点参数为空，执行时间 %s 秒',
                 ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         INSERT INTO public.gis_error_log(code, msg, sqlstring)
         VALUES (
@@ -667,8 +667,6 @@ BEGIN
                         WHERE f.fence_type IN (''1'',''2'')
                           AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
                           AND (
-                              f.fence_type = ''2''
-                              OR
                               COALESCE(ST_Z(ip.geom), 0) = 0
                               OR COALESCE(f.height, 0) = 0
                               OR
@@ -686,15 +684,9 @@ BEGIN
                         WHERE f.fence_type IN (''1'',''2'')
                           AND f.status = ''1''
                           AND f.del_flag = false
-                          AND (
-                              $2 IS NULL OR btrim($2) = ''''
-                              OR f.project_id IS NULL OR btrim(f.project_id::text) = ''''
-                              OR f.project_id::text = btrim($2)
-                          )
+                          AND f.project_id::text = btrim($2)
                           AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
                           AND (
-                              f.fence_type = ''2''
-                              OR
                               COALESCE(ST_Z(ip.geom), 0) = 0
                               OR COALESCE(f.height, 0) = 0
                               OR
@@ -743,15 +735,9 @@ BEGIN
                     WHERE f.fence_type IN (''1'',''2'')
                       AND f.status = ''1''
                       AND f.del_flag = false
-                      AND (
-                          $2 IS NULL OR btrim($2) = ''''
-                          OR f.project_id IS NULL OR btrim(f.project_id::text) = ''''
-                          OR f.project_id::text = btrim($2)
-                      )
+                      AND f.project_id::text = btrim($2)
                       AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
                       AND (
-                          f.fence_type = ''2''
-                          OR
                           COALESCE(ST_Z(ip.geom), 0) = 0
                           OR COALESCE(f.height, 0) = 0
                           OR
@@ -808,8 +794,6 @@ BEGIN
               AND f.del_flag = false        -- 未删
               AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
               AND (
-                  f.fence_type = '2'
-                  OR
                   COALESCE(ST_Z(ip.geom), 0) = 0
                   OR COALESCE(f.height, 0) = 0
                   OR
@@ -1891,8 +1875,6 @@ BEGIN
             ) buf
             WHERE ST_Covers(buf.buffer_geom, $1)
               AND (
-                  f.fence_type = ''2''
-                  OR
                   COALESCE(ST_Z($1), 0) = 0
                   OR COALESCE(f.height, 0) = 0
                   OR (COALESCE(ST_Z($1), 0) > 0 AND COALESCE(ST_Z($1), 0) <= f.height)
@@ -1940,8 +1922,6 @@ BEGIN
             ) buf
             WHERE ST_Covers(buf.buffer_geom, $1)
               AND (
-                  f.fence_type = ''2''
-                  OR
                   COALESCE(ST_Z($1), 0) = 0
                   OR COALESCE(f.height, 0) = 0
                   OR (COALESCE(ST_Z($1), 0) > 0 AND COALESCE(ST_Z($1), 0) <= f.height)
@@ -2003,7 +1983,7 @@ COMMENT ON FUNCTION public.gis_electric_fence_check_point_buffer(text, text, dou
 -- 函数注意
 --   1. 依赖函数：gis_electric_fence_buffer 必须提前创建
 --   2. bo_electric_fence 必须存在，且包含字段：id, geom, height, del_flag
---   3. 管控区按禁飞区平面逻辑处理；非管控区height>0时使用 ST_3DIntersects
+--   3. 禁飞区和管控区统一按同一套缓冲区/高度逻辑校验
 --   4. 缓冲半径单位**，坐标系转换保证距离计算准确
 -- 适用场景无人机航线规划、飞行轨迹闯入禁管控/试飞区自动检
 -- ====================================================================================
@@ -2111,7 +2091,7 @@ BEGIN
     END;
 
     -- ==============================================
-    -- 2. 核心逻辑：管控区按平面缓冲相交判断，非管控区保留高度/3D判断
+    -- 2. 核心逻辑：禁飞区和管控区统一按缓冲区/高度逻辑判断
     -- ==============================================
     RETURN QUERY
     SELECT
@@ -2164,14 +2144,12 @@ BEGIN
         f.del_flag = false  -- 仅有效围栏
         AND f.status = '1'  -- 仅启用围栏
         AND (
-            (f.fence_type = '2' AND ST_Intersects(ST_Force2D(v_line), buf_data.buf))
-            OR
             (COALESCE(f.height, 0) = 0 AND ST_Intersects(ST_Force2D(v_line), buf_data.buf))
             OR
-            (f.fence_type <> '2' AND COALESCE(f.height, 0) > 0 AND ST_3DIntersects(v_line, solid_geom))
+            (COALESCE(f.height, 0) > 0 AND ST_3DIntersects(v_line, solid_geom))
         )
     ORDER BY f.id
-    LIMIT 1; -- 管控区按平面判断；非管控区有高度按3D判断，无高度/0高度按2D判断
+    LIMIT 1; -- 禁飞区和管控区统一：有高度按3D判断，无高度/0高度按2D判断
 
     IF NOT FOUND THEN
         RETURN QUERY SELECT
@@ -2366,11 +2344,9 @@ BEGIN
                 ) x
             ) ct
             WHERE (
-                (f.fence_type = ''2'' AND ST_Intersects(ST_Force2D($4), buf.buffer_geom))
-                OR
                 (COALESCE(f.height, 0) = 0 AND ST_Intersects(ST_Force2D($4), buf.buffer_geom))
                 OR
-                (f.fence_type <> ''2'' AND COALESCE(f.height, 0) > 0 AND ST_3DIntersects($4, solid.solid_geom))
+                (COALESCE(f.height, 0) > 0 AND ST_3DIntersects($4, solid.solid_geom))
             )
             ORDER BY f.priority, f.id
             LIMIT 1',
@@ -2436,11 +2412,9 @@ BEGIN
                 ) x
             ) ct
             WHERE (
-                (f.fence_type = ''2'' AND ST_Intersects(ST_Force2D($4), buf.buffer_geom))
-                OR
                 (COALESCE(f.height, 0) = 0 AND ST_Intersects(ST_Force2D($4), buf.buffer_geom))
                 OR
-                (f.fence_type <> ''2'' AND COALESCE(f.height, 0) > 0 AND ST_3DIntersects($4, solid.solid_geom))
+                (COALESCE(f.height, 0) > 0 AND ST_3DIntersects($4, solid.solid_geom))
             )
             ORDER BY f.id
             LIMIT 1';
