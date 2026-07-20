@@ -388,6 +388,7 @@ COMMENT ON FUNCTION gis_check_electric_fence(varchar, text, text) IS '校验电�
 -- 参数说明
 --   p_project_id    text            输入参数：项目ID（可选），为空则查询公共
 --   p_point_geojson text            输入参数：点的GeoJSON字符串（必填，支持Feature和Point格式
+--   p_is_3d         boolean         输入参数：是否启用高度判断，默认true；false时只做二维平面判断
 -- 返回值： 标准TABLE结构，与航线检测函数完全一
 --   code      integer    状态码00=执行成功 400=参数错误 500=执行异常
 --   msg       varchar    状态描述信息
@@ -411,13 +412,14 @@ SELECT gis_drop_function('gis_electric_fence_check_point');
 -- =============================================================================
 -- 函数介绍：gis_electric_fence_check_point
 -- 主要作用：判断单个航点是否落入启用中的禁飞区、管控区等电子围栏范围栏
--- 入参说明：p_point_json 为航点Point/PointZ GeoJSON；p_project_id 用于限定项目围栏范围栏
+-- 入参说明：p_point_json 为航点Point/PointZ GeoJSON；p_project_id 用于限定项目围栏范围栏；p_is_3d 控制二维/三维判断
 -- 返回说明：返回命中状态、围栏类型、围栏名称和提示信息，供航点合法性校验使用
 -- 注意事项：点位坐标默认WGS84；高度规则需结合围栏数据中的高度字段判断
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_point(
     p_project_id text,
-    p_point_geojson text
+    p_point_geojson text,
+    p_is_3d boolean DEFAULT true
 )
 RETURNS TABLE (
     code integer,
@@ -445,8 +447,8 @@ DECLARE
     v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
     v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
-    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_point(%L, %L);',
-        p_project_id, p_point_geojson);
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_point(%L, %L, %L);',
+        p_project_id, p_point_geojson, p_is_3d);
 
     -- =============================================
     -- 00 参数错误】第一步：校验点GeoJSON是否为空
@@ -667,6 +669,8 @@ BEGIN
                         WHERE f.fence_type IN (''1'',''2'')
                           AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
                           AND (
+                              NOT $4
+                              OR
                               COALESCE(ST_Z(ip.geom), 0) = 0
                               OR COALESCE(f.height, 0) = 0
                               OR
@@ -687,6 +691,8 @@ BEGIN
                           AND f.project_id::text = btrim($2)
                           AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
                           AND (
+                              NOT $4
+                              OR
                               COALESCE(ST_Z(ip.geom), 0) = 0
                               OR COALESCE(f.height, 0) = 0
                               OR
@@ -738,6 +744,8 @@ BEGIN
                       AND f.project_id::text = btrim($2)
                       AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
                       AND (
+                          NOT $4
+                          OR
                           COALESCE(ST_Z(ip.geom), 0) = 0
                           OR COALESCE(f.height, 0) = 0
                           OR
@@ -751,7 +759,7 @@ BEGIN
         END IF;
 
         -- 执行统一的查
-        RETURN QUERY EXECUTE v_sql USING v_point, p_project_id, v_start_time;
+        RETURN QUERY EXECUTE v_sql USING v_point, p_project_id, v_start_time, p_is_3d;
 
         -- 检查是否找到结果
         IF FOUND THEN
@@ -794,6 +802,8 @@ BEGIN
               AND f.del_flag = false        -- 未删
               AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
               AND (
+                  NOT p_is_3d
+                  OR
                   COALESCE(ST_Z(ip.geom), 0) = 0
                   OR COALESCE(f.height, 0) = 0
                   OR
@@ -840,19 +850,20 @@ EXCEPTION
             false, 'p_outer'::varchar, ''::varchar, NULL::geometry, NULL::varchar, NULL::varchar, NULL::geometry, NULL::json;
 END;
 $$;
-COMMENT ON FUNCTION public.gis_electric_fence_check_point(text, text) IS '检测航点落入围栏';
+COMMENT ON FUNCTION public.gis_electric_fence_check_point(text, text, boolean) IS '检测航点落入围栏';
 
 -- ====================================================================================
 -- 函数名称gis_electric_fence_check_line
--- 函数功能无人机航线/轨迹电子围栏平面穿越检测
+-- 函数功能无人机航线/轨迹电子围栏穿越检测
 -- 函数描述1. 传入航线 GeoJSON（LineString/LineStringZ/MultiLineString）
---            2. 禁飞区和管控区统一按二维平面相交规则判断
---            3. 不再根据 height 字段切换三维相交逻辑，避免两类围栏判断不一致
+--            2. 禁飞区和管控区统一按二维平面相交 + 航线高度过滤判断
+--            3. 围栏height为空或0时按无限高处理；航线未传高度或高度为0时通过高度判断
 --            4. 只查询未删除、有效状态的围栏
 --            5. 返回标准格式结果集，前端可直接渲
 -- 函数说明依赖PostGIS空间扩展，坐标系默认使用WGS84(4326)
 -- 参数说明
 --   p_line_geojson     text           输入参数：线轨迹/线段的GeoJSON字符串（必填
+--   p_is_3d            boolean        输入参数：是否启用高度判断，默认true；false时只做二维平面判断
 -- 返回值： 标准TABLE结构，包含状态码、提示信息、输入线几何、命中围栏信息
 --   code      integer    状态码00=执行成功 400=参数错误/未查询到数据 500=执行异常
 --   msg       varchar    状态描述信息
@@ -871,14 +882,15 @@ SELECT gis_drop_function('gis_electric_fence_check_line');
 -- 创建函数
 -- =============================================================================
 -- 函数介绍：gis_electric_fence_check_line
--- 主要作用：检测输入航线在二维平面上是否直接穿越或接触启用中的电子围栏区域
--- 入参说明：p_line_json 为航线LineString/LineStringZ GeoJSON、Feature或坐标数组
+-- 主要作用：检测输入航线是否直接穿越或接触启用中的电子围栏区域，并结合height做高度过滤
+-- 入参说明：p_line_json 为航线LineString/LineStringZ GeoJSON、Feature或坐标数组；p_is_3d 控制二维/三维判断
 -- 返回说明：返回是否冲突、命中围栏属性和相交结果，供航线提交前快速校验
--- 注意事项：本函数不额外扩航线缓冲，也不按height做三维判断；如需安全距离判断请使用带buffer的函数
+-- 注意事项：本函数不额外扩航线缓冲；高度判断使用航线最低高度 line_min_z 与围栏 height 比较
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_electric_fence_check_line(
     p_project_id text,
-    p_line_geojson text
+    p_line_geojson text,
+    p_is_3d boolean DEFAULT true
 )
 RETURNS TABLE (
     code integer,
@@ -905,8 +917,8 @@ DECLARE
     v_start_time timestamptz := clock_timestamp(); -- 函数开始时间，用于统一返回耗时
     v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
-    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_line(%L, %L);',
-        p_project_id, p_line_geojson);
+    v_log_sql := format('SELECT * FROM public.gis_electric_fence_check_line(%L, %L, %L);',
+        p_project_id, p_line_geojson, p_is_3d);
 
     -- 1. 参数校验
     IF p_line_geojson IS NULL OR p_line_geojson = '' THEN
@@ -1011,7 +1023,7 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 4. 航线二维平面相交校验：禁飞区和管控区统一使用同一套逻辑。
+    -- 4. 航线二维平面相交 + 高度过滤：禁飞区和管控区统一使用同一套逻辑。
     IF p_project_id IS NOT NULL AND trim(p_project_id) <> '' THEN
         v_table_name := 'gis_electric_fence_' || trim(p_project_id);
 
@@ -1024,8 +1036,14 @@ BEGIN
         IF v_table_exists THEN
             v_sql := format('
                 WITH input_lines AS (
-                    SELECT d.path, d.geom AS geom
+                    SELECT
+                        d.path,
+                        d.geom AS geom,
+                        COALESCE(MIN(ST_Z((dp).geom)), 0) AS line_min_z,
+                        COALESCE(MAX(ST_Z((dp).geom)), 0) AS line_max_z
                     FROM ST_Dump($1) AS d
+                    CROSS JOIN LATERAL ST_DumpPoints(d.geom) AS dp
+                    GROUP BY d.path, d.geom
                 )
                 SELECT
                     200 AS code,
@@ -1055,6 +1073,12 @@ BEGIN
                         FROM %I f
                         WHERE f.fence_type IN (''1'',''2'')
                           AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom))
+                          AND (
+                              NOT $3
+                              OR COALESCE(f.height, 0) = 0
+                              OR il.line_min_z = 0
+                              OR il.line_min_z <= f.height
+                          )
                         UNION ALL
                         SELECT
                             ''bo_electric_fence''::varchar AS table_name,
@@ -1068,6 +1092,12 @@ BEGIN
                           AND f.del_flag = false
                           AND f.status = ''1''
                           AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom))
+                          AND (
+                              NOT $3
+                              OR COALESCE(f.height, 0) = 0
+                              OR il.line_min_z = 0
+                              OR il.line_min_z <= f.height
+                          )
                     ) h
                     ORDER BY h.priority, h.id
                     LIMIT 1
@@ -1099,8 +1129,14 @@ BEGIN
         ELSE
             v_sql := '
                 WITH input_lines AS (
-                    SELECT d.path, d.geom AS geom
+                    SELECT
+                        d.path,
+                        d.geom AS geom,
+                        COALESCE(MIN(ST_Z((dp).geom)), 0) AS line_min_z,
+                        COALESCE(MAX(ST_Z((dp).geom)), 0) AS line_max_z
                     FROM ST_Dump($1) AS d
+                    CROSS JOIN LATERAL ST_DumpPoints(d.geom) AS dp
+                    GROUP BY d.path, d.geom
                 )
                 SELECT
                     200 AS code,
@@ -1129,6 +1165,12 @@ BEGIN
                       AND f.del_flag = false
                       AND f.status = ''1''
                       AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom))
+                      AND (
+                          NOT $3
+                          OR COALESCE(f.height, 0) = 0
+                          OR il.line_min_z = 0
+                          OR il.line_min_z <= f.height
+                      )
                     ORDER BY f.id
                     LIMIT 1
                 ) hit ON true
@@ -1157,8 +1199,14 @@ BEGIN
     ELSE
         v_sql := '
             WITH input_lines AS (
-                SELECT d.path, d.geom AS geom
+                SELECT
+                    d.path,
+                    d.geom AS geom,
+                    COALESCE(MIN(ST_Z((dp).geom)), 0) AS line_min_z,
+                    COALESCE(MAX(ST_Z((dp).geom)), 0) AS line_max_z
                 FROM ST_Dump($1) AS d
+                CROSS JOIN LATERAL ST_DumpPoints(d.geom) AS dp
+                GROUP BY d.path, d.geom
             )
             SELECT
                 200 AS code,
@@ -1187,6 +1235,12 @@ BEGIN
                   AND f.del_flag = false
                   AND f.status = ''1''
                   AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom))
+                  AND (
+                      NOT $3
+                      OR COALESCE(f.height, 0) = 0
+                      OR il.line_min_z = 0
+                      OR il.line_min_z <= f.height
+                  )
                 ORDER BY f.id
                 LIMIT 1
             ) hit ON true
@@ -1213,7 +1267,7 @@ BEGIN
             ORDER BY il.path';
     END IF;
 
-    RETURN QUERY EXECUTE v_sql USING v_line, v_start_time;
+    RETURN QUERY EXECUTE v_sql USING v_line, v_start_time, p_is_3d;
 
     -- 5. 无碰撞时返回空结果状00
     IF NOT FOUND THEN
@@ -1241,7 +1295,7 @@ EXCEPTION
             false, 'ln_outside'::varchar, ''::varchar, NULL::geometry, NULL::varchar, NULL::varchar, NULL::geometry, NULL::json;
 END;
 $$;
-COMMENT ON FUNCTION public.gis_electric_fence_check_line(text, text) IS '检测航线穿越围栏';
+COMMENT ON FUNCTION public.gis_electric_fence_check_line(text, text, boolean) IS '检测航线穿越围栏';
 
 
 -- ====================================================================================
