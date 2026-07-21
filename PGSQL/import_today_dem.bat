@@ -1,8 +1,8 @@
-@echo off
+﻿@echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
 rem Import today's DEM tif into PostGIS Raster.
-rem Default target table: public.gis_dem_yyyyMMdd
+rem Default target table: public.gis_dem_henan
 
 set "DB_HOST=192.168.110.6"
 set "DB_PORT=5432"
@@ -38,7 +38,7 @@ if "!MM:~1!"=="" set "MM=0!MM!"
 if "!DD:~1!"=="" set "DD=0!DD!"
 set "TODAY=!YY!!MM!!DD!"
 
-set "TABLE_NAME=gis_dem_!TODAY!"
+set "TABLE_NAME=gis_dem_henan"
 set "SQL_FILE=%SQL_DIR%\!TABLE_NAME!.sql"
 set "TIF_FILE="
 
@@ -106,3 +106,4 @@ if errorlevel 1 (
 
 echo [OK] DEM imported successfully: %SCHEMA_NAME%.!TABLE_NAME!
 endlocal
+
