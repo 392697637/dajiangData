@@ -4,7 +4,7 @@
 --
 -- 说明：
 --   1. DEM tif 推荐使用 raster2pgsql 入库为 PostGIS raster。
---   2. 默认表名：public.gis_dem，栅格字段：rast。
+--   2. 默认表名：public.gis_dem_henan，栅格字段：rast。
 --   3. 坐标系示例使用 EPSG:4326；实际项目请替换为 tif 的真实 SRID。
 --   4. 高程单位通常由 DEM 数据源决定，常见为米。
 --
@@ -28,18 +28,29 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS postgis_raster;
 
 -- 注意：
---   public.gis_dem 不在本脚本中手工创建。
+--   public.gis_dem_henan 不在本脚本中手工创建。
 --   正式 DEM 表应由 raster2pgsql 根据 tif 自动创建并导入数据。
 --   这样可以同时生成切片数据、空间索引、栅格约束和统计信息。
 --
 -- 推荐统一表名：
---   public.gis_dem
+--   public.gis_dem_henan
+--
+-- 表名说明：
+--   public
+--     PostgreSQL schema 名称，表示该表位于 public 命名空间。
+--
+--   gis_dem_henan
+--     河南 DEM 栅格主表名称，用于保存 raster2pgsql 导入后的 DEM 瓦片数据。
+--     后续高程查询、范围统计、线路剖面、坡度坡向分析函数均默认读取该表。
+--
+--   public.gis_dem_henan
+--     完整表名。推荐项目中统一使用该表名，避免函数和导入表不一致。
 --
 -- raster2pgsql 生成的表通常包含：
 --   rid  integer 主键
 --   rast raster  DEM 栅格瓦片
 --
--- public.gis_dem 字段说明：
+-- public.gis_dem_henan 字段说明：
 --   rid
 --     栅格瓦片主键。raster2pgsql 会为每个切片生成一条记录。
 --     例如使用 -t 256x256 后，一张 tif 会被拆成多条 256x256 瓦片记录。
@@ -61,45 +72,46 @@ CREATE EXTENSION IF NOT EXISTS postgis_raster;
 --   rast
 --
 -- 如果需要在导入后补充入库时间字段，可以执行：
--- ALTER TABLE public.gis_dem
+-- ALTER TABLE public.gis_dem_henan
 -- ADD COLUMN IF NOT EXISTS created_at timestamp without time zone DEFAULT now();
 --
 -- 如果需要记录文件名，推荐导入时使用 -F：
--- raster2pgsql -s 4326 -I -C -M -F -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem > E:\DEM\gis_dem.sql
+-- raster2pgsql -s 4326 -I -C -M -F -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
 --
 -- 本脚本后续函数默认读取：
---   public.gis_dem.rast
-
--- public.gis_dem 表注释。
--- 说明：执行本段前，应先使用 raster2pgsql 导入 DEM，确保 public.gis_dem 已存在。
-COMMENT ON TABLE public.gis_dem IS 'DEM GeoTIFF 导入后的 PostGIS Raster 主表，每条记录通常表示一个栅格瓦片。';
-COMMENT ON COLUMN public.gis_dem.rid IS '栅格瓦片主键。raster2pgsql 按切片生成记录时自动生成。';
-COMMENT ON COLUMN public.gis_dem.rast IS 'DEM 栅格瓦片数据，PostGIS raster 类型。高程查询、裁剪、统计、坡度坡向分析均基于该字段。';
+--   public.gis_dem_henan.rast
 
 DO $$
 BEGIN
+    IF to_regclass('public.gis_dem_henan') IS NULL THEN
+        RETURN;
+    END IF;
+
+    COMMENT ON TABLE public.gis_dem_henan IS 'DEM栅格表';
+    COMMENT ON COLUMN public.gis_dem_henan.rid IS '瓦片主键';
+    COMMENT ON COLUMN public.gis_dem_henan.rast IS '栅格数据';
+
     IF EXISTS (
         SELECT 1
         FROM information_schema.columns
         WHERE table_schema = 'public'
-          AND table_name = 'gis_dem'
+          AND table_name = 'gis_dem_henan'
           AND column_name = 'filename'
     ) THEN
-        COMMENT ON COLUMN public.gis_dem.filename IS '原始 DEM tif 文件名。通常由 raster2pgsql -F 参数生成。';
+        COMMENT ON COLUMN public.gis_dem_henan.filename IS '文件名';
     END IF;
 
     IF EXISTS (
         SELECT 1
         FROM information_schema.columns
         WHERE table_schema = 'public'
-          AND table_name = 'gis_dem'
+          AND table_name = 'gis_dem_henan'
           AND column_name = 'created_at'
     ) THEN
-        COMMENT ON COLUMN public.gis_dem.created_at IS 'DEM 数据入库时间。raster2pgsql 默认不生成该字段，需要时可手工添加。';
+        COMMENT ON COLUMN public.gis_dem_henan.created_at IS '入库时间';
     END IF;
 END;
 $$;
-
 
 -- =============================================================================
 -- 2. GeoTIFF DEM 入库命令
@@ -107,22 +119,22 @@ $$;
 
 -- Windows CMD 推荐流程：
 -- 1. 删除旧 SQL 文件：
--- del /f /q E:\DEM\gis_dem.sql
+-- del /f /q E:\DEM\gis_dem_henan.sql
 --
--- 2. 由 raster2pgsql 生成 SQL 文件。正式表名使用 public.gis_dem：
--- raster2pgsql -s 4326 -I -C -M -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem > E:\DEM\gis_dem.sql
+-- 2. 由 raster2pgsql 生成 SQL 文件。正式表名使用 public.gis_dem_henan：
+-- raster2pgsql -s 4326 -I -C -M -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
 --
 -- 3. 设置数据库密码：
 -- set PGPASSWORD=Ktd@postSQL@2026!@#
 --
 -- 4. 导入数据库：
--- psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f E:\DEM\gis_dem.sql
+-- psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f E:\DEM\gis_dem_henan.sql
 --
 -- 5. 验证切片数量：
--- psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -c "SELECT COUNT(*) FROM public.gis_dem;"
+-- psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -c "SELECT COUNT(*) FROM public.gis_dem_henan;"
 
 -- Linux 示例：
--- PGPASSWORD='Ktd@postSQL@2026!@#' raster2pgsql -s 4326 -I -C -M -t 256x256 "/data/dem/HENAN.tif" public.gis_dem | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis
+-- PGPASSWORD='Ktd@postSQL@2026!@#' raster2pgsql -s 4326 -I -C -M -t 256x256 "/data/dem/HENAN.tif" public.gis_dem_henan | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis
 
 -- 参数说明：
 --   -s 4326     设置 DEM 坐标系 SRID，按实际 tif 修改。
@@ -139,7 +151,7 @@ $$;
 
 -- 查看 DEM 表范围。
 SELECT ST_AsText(ST_Extent(ST_ConvexHull(rast))) AS dem_extent
-FROM public.gis_dem;
+FROM public.gis_dem_henan;
 
 -- 查看栅格元信息。
 SELECT
@@ -151,7 +163,7 @@ SELECT
     ST_PixelWidth(rast) AS pixel_width,
     ST_PixelHeight(rast) AS pixel_height,
     ST_BandNoDataValue(rast, 1) AS nodata
-FROM public.gis_dem
+FROM public.gis_dem_henan
 ORDER BY rid
 LIMIT 20;
 
@@ -173,7 +185,7 @@ STABLE
 AS $$
     WITH dem_srid AS (
         SELECT ST_SRID(rast) AS srid
-        FROM public.gis_dem
+        FROM public.gis_dem_henan
         WHERE rast IS NOT NULL
         LIMIT 1
     ),
@@ -184,7 +196,7 @@ AS $$
         ) AS geom
     )
     SELECT ST_Value(d.rast, 1, p.geom)
-    FROM public.gis_dem d
+    FROM public.gis_dem_henan d
     CROSS JOIN pt p
     WHERE ST_Intersects(d.rast, p.geom)
     ORDER BY d.rid
@@ -205,7 +217,7 @@ STABLE
 AS $$
     WITH dem_srid AS (
         SELECT ST_SRID(rast) AS srid
-        FROM public.gis_dem
+        FROM public.gis_dem_henan
         WHERE rast IS NOT NULL
         LIMIT 1
     ),
@@ -213,7 +225,7 @@ AS $$
         SELECT ST_Transform(p_geom, (SELECT srid FROM dem_srid)) AS geom
     )
     SELECT ST_Value(d.rast, 1, p.geom)
-    FROM public.gis_dem d
+    FROM public.gis_dem_henan d
     CROSS JOIN pt p
     WHERE ST_Intersects(d.rast, p.geom)
     ORDER BY d.rid
@@ -244,7 +256,7 @@ STABLE
 AS $$
     WITH dem_srid AS (
         SELECT ST_SRID(rast) AS srid
-        FROM public.gis_dem
+        FROM public.gis_dem_henan
         WHERE rast IS NOT NULL
         LIMIT 1
     ),
@@ -253,7 +265,7 @@ AS $$
     ),
     clipped AS (
         SELECT ST_Clip(d.rast, 1, a.geom, true) AS rast
-        FROM public.gis_dem d
+        FROM public.gis_dem_henan d
         CROSS JOIN area_geom a
         WHERE ST_Intersects(d.rast, a.geom)
     )
@@ -325,39 +337,39 @@ IS '沿线按固定间距采样 DEM 高程，生成线路高程剖面。';
 -- =============================================================================
 
 -- 坡度栅格。单位为度，适合 DEM 为米制投影坐标时使用。
-CREATE TABLE IF NOT EXISTS public.gis_dem_slope AS
+CREATE TABLE IF NOT EXISTS public.gis_dem_henan_slope AS
 SELECT
     rid,
     ST_Slope(rast, 1, '32BF', 'DEGREES') AS rast
-FROM public.gis_dem
+FROM public.gis_dem_henan
 WHERE rast IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_gis_dem_slope_rast_gist
-ON public.gis_dem_slope
+ON public.gis_dem_henan_slope
 USING gist (ST_ConvexHull(rast));
 
 -- 坡向栅格。单位为度，0/360 通常代表北向。
-CREATE TABLE IF NOT EXISTS public.gis_dem_aspect AS
+CREATE TABLE IF NOT EXISTS public.gis_dem_henan_aspect AS
 SELECT
     rid,
     ST_Aspect(rast, 1, '32BF', 'DEGREES') AS rast
-FROM public.gis_dem
+FROM public.gis_dem_henan
 WHERE rast IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_gis_dem_aspect_rast_gist
-ON public.gis_dem_aspect
+ON public.gis_dem_henan_aspect
 USING gist (ST_ConvexHull(rast));
 
 -- 阴影地形。azimuth 为光源方位角，altitude 为光源高度角。
-CREATE TABLE IF NOT EXISTS public.gis_dem_hillshade AS
+CREATE TABLE IF NOT EXISTS public.gis_dem_henan_hillshade AS
 SELECT
     rid,
     ST_HillShade(rast, 1, '8BUI', 315, 45) AS rast
-FROM public.gis_dem
+FROM public.gis_dem_henan
 WHERE rast IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_gis_dem_hillshade_rast_gist
-ON public.gis_dem_hillshade
+ON public.gis_dem_henan_hillshade
 USING gist (ST_ConvexHull(rast));
 
 
@@ -383,3 +395,8 @@ FROM public.gis_dem_profile_by_line(
     ST_GeomFromText('LINESTRING(116.38 39.90,116.40 39.92)', 4326),
     0.001
 );
+
+
+
+
+
