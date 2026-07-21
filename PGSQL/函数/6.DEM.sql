@@ -9,7 +9,7 @@
 --   4. 高程单位通常由 DEM 数据源决定，常见为米。
 --
 -- 文件内容：
---   1. 扩展与表结构：postgis、postgis_raster、gis_dem 主表、空间索引、栅格约束。
+--   1. 扩展：postgis、postgis_raster。
 --   2. GeoTIFF DEM 入库命令：Windows/Linux raster2pgsql 导入示例和参数说明。
 --   3. DEM 基础检查：表范围、SRID、像元大小、波段、NoData 信息。
 --   4. 点位高程函数：gis_dem_elevation、gis_dem_elevation_by_point。
@@ -21,38 +21,108 @@
 
 
 -- =============================================================================
--- 1. 扩展与表结构
+-- 1. 扩展
 -- =============================================================================
 
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS postgis_raster;
 
--- DEM 主表。一般由 raster2pgsql 自动创建，这里保留结构模板便于手工建表或核对。
-CREATE TABLE IF NOT EXISTS public.gis_dem (
-    rid serial PRIMARY KEY,
-    rast raster,
-    filename text,
-    created_at timestamp without time zone DEFAULT now()
-);
+-- 注意：
+--   public.gis_dem 不在本脚本中手工创建。
+--   正式 DEM 表应由 raster2pgsql 根据 tif 自动创建并导入数据。
+--   这样可以同时生成切片数据、空间索引、栅格约束和统计信息。
+--
+-- 推荐统一表名：
+--   public.gis_dem
+--
+-- raster2pgsql 生成的表通常包含：
+--   rid  integer 主键
+--   rast raster  DEM 栅格瓦片
+--
+-- public.gis_dem 字段说明：
+--   rid
+--     栅格瓦片主键。raster2pgsql 会为每个切片生成一条记录。
+--     例如使用 -t 256x256 后，一张 tif 会被拆成多条 256x256 瓦片记录。
+--
+--   rast
+--     PostGIS raster 类型字段，保存 DEM 栅格瓦片数据。
+--     后续 ST_Value、ST_Intersects、ST_Clip、ST_SummaryStatsAgg 等函数都读取该字段。
+--
+--   filename
+--     原始 tif 文件名字段。只有 raster2pgsql 使用 -F 参数时才会自动生成。
+--     当前推荐导入命令未使用 -F，因此默认表通常没有 filename 字段。
+--
+--   created_at
+--     入库时间字段。raster2pgsql 默认不会自动生成该字段。
+--     如果业务需要记录入库时间，可以导入后手工 ALTER TABLE 添加。
+--
+-- 当前推荐的正式表结构以 raster2pgsql 实际生成结果为准，核心必需字段是：
+--   rid
+--   rast
+--
+-- 如果需要在导入后补充入库时间字段，可以执行：
+-- ALTER TABLE public.gis_dem
+-- ADD COLUMN IF NOT EXISTS created_at timestamp without time zone DEFAULT now();
+--
+-- 如果需要记录文件名，推荐导入时使用 -F：
+-- raster2pgsql -s 4326 -I -C -M -F -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem > E:\DEM\gis_dem.sql
+--
+-- 本脚本后续函数默认读取：
+--   public.gis_dem.rast
 
--- 栅格空间索引。使用 ST_ConvexHull(rast) 建立 GIST 索引，用于按范围快速过滤瓦片。
-CREATE INDEX IF NOT EXISTS idx_gis_dem_rast_gist
-ON public.gis_dem
-USING gist (ST_ConvexHull(rast));
+-- public.gis_dem 表注释。
+-- 说明：执行本段前，应先使用 raster2pgsql 导入 DEM，确保 public.gis_dem 已存在。
+COMMENT ON TABLE public.gis_dem IS 'DEM GeoTIFF 导入后的 PostGIS Raster 主表，每条记录通常表示一个栅格瓦片。';
+COMMENT ON COLUMN public.gis_dem.rid IS '栅格瓦片主键。raster2pgsql 按切片生成记录时自动生成。';
+COMMENT ON COLUMN public.gis_dem.rast IS 'DEM 栅格瓦片数据，PostGIS raster 类型。高程查询、裁剪、统计、坡度坡向分析均基于该字段。';
 
--- 栅格元数据约束。入库后执行，便于 PostGIS 识别 SRID、像元大小、波段等信息。
-SELECT AddRasterConstraints('public'::name, 'gis_dem'::name, 'rast'::name);
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'gis_dem'
+          AND column_name = 'filename'
+    ) THEN
+        COMMENT ON COLUMN public.gis_dem.filename IS '原始 DEM tif 文件名。通常由 raster2pgsql -F 参数生成。';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'gis_dem'
+          AND column_name = 'created_at'
+    ) THEN
+        COMMENT ON COLUMN public.gis_dem.created_at IS 'DEM 数据入库时间。raster2pgsql 默认不生成该字段，需要时可手工添加。';
+    END IF;
+END;
+$$;
 
 
 -- =============================================================================
 -- 2. GeoTIFF DEM 入库命令
 -- =============================================================================
 
--- Windows 示例：
--- raster2pgsql -s 4326 -I -C -M -t 256x256 "E:\data\dem.tif" public.gis_dem | psql -h 127.0.0.1 -p 5432 -U postgres -d your_db
+-- Windows CMD 推荐流程：
+-- 1. 删除旧 SQL 文件：
+-- del /f /q E:\DEM\gis_dem.sql
+--
+-- 2. 由 raster2pgsql 生成 SQL 文件。正式表名使用 public.gis_dem：
+-- raster2pgsql -s 4326 -I -C -M -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem > E:\DEM\gis_dem.sql
+--
+-- 3. 设置数据库密码：
+-- set PGPASSWORD=Ktd@postSQL@2026!@#
+--
+-- 4. 导入数据库：
+-- psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f E:\DEM\gis_dem.sql
+--
+-- 5. 验证切片数量：
+-- psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -c "SELECT COUNT(*) FROM public.gis_dem;"
 
 -- Linux 示例：
--- raster2pgsql -s 4326 -I -C -M -t 256x256 /data/dem.tif public.gis_dem | psql -h 127.0.0.1 -p 5432 -U postgres -d your_db
+-- PGPASSWORD='Ktd@postSQL@2026!@#' raster2pgsql -s 4326 -I -C -M -t 256x256 "/data/dem/HENAN.tif" public.gis_dem | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis
 
 -- 参数说明：
 --   -s 4326     设置 DEM 坐标系 SRID，按实际 tif 修改。
@@ -313,4 +383,3 @@ FROM public.gis_dem_profile_by_line(
     ST_GeomFromText('LINESTRING(116.38 39.90,116.40 39.92)', 4326),
     0.001
 );
-
