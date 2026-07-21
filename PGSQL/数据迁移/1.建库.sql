@@ -11,8 +11,7 @@
 -- =============================================================================
 
 -- -- 强制断开所有连接 + 删除数据库
--- 
-DROP DATABASE IF EXISTS ktd_lx_2026gis WITH (FORCE);
+-- DROP DATABASE IF EXISTS ktd_lx_2026gis WITH (FORCE);
 
 -- 创建空间时序数据库：ktd_lx_2026gis（适用于GIS+PostGIS+TimescaleDB场景）
 CREATE DATABASE ktd_lx_2026gis
