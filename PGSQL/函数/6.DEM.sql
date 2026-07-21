@@ -5,7 +5,7 @@
 -- 说明：
 --   1. DEM tif 推荐使用 raster2pgsql 入库为 PostGIS raster。
 --   2. 默认表名：public.gis_dem_henan，栅格字段：rast。
---   3. 坐标系示例使用 EPSG:4326；实际项目请替换为 tif 的真实 SRID。
+--   3. 坐标系示例使用 EPSG:32650；河南 DEM 使用 WGS 84 / UTM zone 50N。
 --   4. 高程单位通常由 DEM 数据源决定，常见为米。
 --
 -- 文件内容：
@@ -76,7 +76,7 @@ CREATE EXTENSION IF NOT EXISTS postgis_raster;
 -- ADD COLUMN IF NOT EXISTS created_at timestamp without time zone DEFAULT now();
 --
 -- 如果需要记录文件名，推荐导入时使用 -F：
--- raster2pgsql -s 4326 -I -C -M -F -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
+-- raster2pgsql -s 32650 -I -C -M -F -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
 --
 -- 本脚本后续函数默认读取：
 --   public.gis_dem_henan.rast
@@ -122,7 +122,7 @@ $$;
 -- del /f /q E:\DEM\gis_dem_henan.sql
 --
 -- 2. 由 raster2pgsql 生成 SQL 文件。正式表名使用 public.gis_dem_henan：
--- raster2pgsql -s 4326 -I -C -M -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
+-- raster2pgsql -s 32650 -I -C -M -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
 --
 -- 3. 设置数据库密码：
 -- set PGPASSWORD=Ktd@postSQL@2026!@#
@@ -134,10 +134,10 @@ $$;
 -- psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -c "SELECT COUNT(*) FROM public.gis_dem_henan;"
 
 -- Linux 示例：
--- PGPASSWORD='Ktd@postSQL@2026!@#' raster2pgsql -s 4326 -I -C -M -t 256x256 "/data/dem/HENAN.tif" public.gis_dem_henan | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis
+-- PGPASSWORD='Ktd@postSQL@2026!@#' raster2pgsql -s 32650 -I -C -M -t 256x256 "/data/dem/HENAN.tif" public.gis_dem_henan | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis
 
 -- 参数说明：
---   -s 4326     设置 DEM 坐标系 SRID，按实际 tif 修改。
+--   -s 32650     设置 DEM 坐标系 SRID，按实际 tif 修改。
 --   -I          创建栅格空间索引。
 --   -C          添加栅格约束。
 --   -M          入库后执行 VACUUM ANALYZE。
@@ -149,8 +149,165 @@ $$;
 -- 3. DEM 基础检查
 -- =============================================================================
 
--- 查看 DEM 表范围。
-SELECT ST_AsText(ST_Extent(ST_ConvexHull(rast))) AS dem_extent
+-- 河南 DEM 入库校验。
+-- 校验内容：
+--   1. public.gis_dem_henan 是否存在。
+--   2. DEM SRID 是否为旧 SRID。
+--   3. DEM 范围从旧 SRID 转换到新 SRID 后是否落在河南附近。
+--   4. 如果 bo_electric_fence.geom 存在，统计与 DEM 范围相交的电子围栏数量。
+DROP FUNCTION IF EXISTS public.gis_dem_henan_validate(integer, integer);
+
+CREATE OR REPLACE FUNCTION public.gis_dem_validate(
+    p_old_srid integer DEFAULT 32650,
+    p_new_srid integer DEFAULT 4326
+)
+RETURNS TABLE (
+    code integer,
+    msg text,
+    dem_exists boolean,
+    dem_srid integer,
+    old_srid integer,
+    new_srid integer,
+    tile_count bigint,
+    extent_dem text,
+    extent_new_srid text,
+    in_henan_range boolean,
+    fence_total bigint,
+    fence_intersects bigint
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_extent geometry;
+    v_extent_4326 geometry;
+    v_has_fence_geom boolean;
+BEGIN
+    IF to_regclass('public.gis_dem_henan') IS NULL THEN
+        RETURN QUERY SELECT
+            400,
+            'DEM表不存在'::text,
+            false,
+            NULL::integer,
+            p_old_srid,
+            p_new_srid,
+            0::bigint,
+            NULL::text,
+            NULL::text,
+            false,
+            NULL::bigint,
+            NULL::bigint;
+        RETURN;
+    END IF;
+
+    SELECT
+        ST_SRID(rast),
+        count(*),
+        ST_SetSRID(ST_Envelope(ST_Collect(ST_ConvexHull(rast))), ST_SRID(rast))
+    INTO dem_srid, tile_count, v_extent
+    FROM public.gis_dem_henan
+    WHERE rast IS NOT NULL
+    GROUP BY ST_SRID(rast)
+    ORDER BY count(*) DESC
+    LIMIT 1;
+
+    IF dem_srid IS NULL OR tile_count = 0 THEN
+        RETURN QUERY SELECT
+            400,
+            'DEM表无有效栅格'::text,
+            true,
+            dem_srid,
+            p_old_srid,
+            p_new_srid,
+            COALESCE(tile_count, 0),
+            NULL::text,
+            NULL::text,
+            false,
+            NULL::bigint,
+            NULL::bigint;
+        RETURN;
+    END IF;
+
+    -- 如果 DEM 曾经用错误 SRID 导入，可用 p_old_srid 重新解释其坐标系，再转到 p_new_srid。
+    v_extent_4326 := ST_Transform(ST_SetSRID(v_extent, p_old_srid), p_new_srid);
+
+    in_henan_range :=
+        p_new_srid = 4326
+        AND
+        ST_XMin(v_extent_4326) >= 108
+        AND ST_XMax(v_extent_4326) <= 118
+        AND ST_YMin(v_extent_4326) >= 30
+        AND ST_YMax(v_extent_4326) <= 38;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'bo_electric_fence'
+          AND column_name = 'geom'
+    )
+    INTO v_has_fence_geom;
+
+    fence_total := NULL;
+    fence_intersects := NULL;
+
+    IF v_has_fence_geom THEN
+        SELECT count(*)
+        INTO fence_total
+        FROM public.bo_electric_fence
+        WHERE geom IS NOT NULL;
+
+        SELECT count(*)
+        INTO fence_intersects
+        FROM public.bo_electric_fence
+        WHERE geom IS NOT NULL
+          AND CASE
+              WHEN p_new_srid = 4326 THEN ST_Intersects(geom, v_extent_4326)
+              ELSE ST_Intersects(ST_Transform(geom, p_new_srid), v_extent_4326)
+          END;
+    END IF;
+
+    RETURN QUERY SELECT
+        CASE
+            WHEN dem_srid <> p_old_srid THEN 400
+            WHEN NOT in_henan_range THEN 400
+            ELSE 200
+        END,
+        CASE
+            WHEN dem_srid <> p_old_srid THEN format('DEM SRID不是%s', p_old_srid)
+            WHEN NOT in_henan_range THEN 'DEM范围不在河南附近'
+            ELSE 'DEM校验通过'
+        END,
+        true,
+        dem_srid,
+        p_old_srid,
+        p_new_srid,
+        tile_count,
+        ST_AsText(v_extent),
+        ST_AsText(v_extent_4326),
+        in_henan_range,
+        fence_total,
+        fence_intersects;
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_dem_validate(integer, integer)
+IS '河南DEM校验';
+
+-- 执行校验。默认将 EPSG:32650 转为 EPSG:4326。
+SELECT * FROM public.gis_dem_validate();
+
+-- 查看 DEM 表范围，原始坐标系 EPSG:32650。
+SELECT ST_AsText(ST_Envelope(ST_Collect(ST_ConvexHull(rast)))) AS dem_extent
+FROM public.gis_dem_henan;
+
+-- 查看 DEM 表范围，转换为 EPSG:4326 经纬度。
+SELECT ST_AsText(
+    ST_Transform(
+        ST_SetSRID(ST_Envelope(ST_Collect(ST_ConvexHull(rast))), 32650),
+        4326
+    )
+) AS dem_extent_4326
 FROM public.gis_dem_henan;
 
 -- 查看栅格元信息。
@@ -395,6 +552,8 @@ FROM public.gis_dem_profile_by_line(
     ST_GeomFromText('LINESTRING(116.38 39.90,116.40 39.92)', 4326),
     0.001
 );
+
+
 
 
 
