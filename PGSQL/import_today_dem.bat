@@ -42,7 +42,8 @@ set "TABLE_NAME=gis_dem_henan"
 set "SQL_FILE=%SQL_DIR%\!TABLE_NAME!.sql"
 set "TIF_FILE="
 
-if exist "%DEM_DIR%\!TODAY!.tif" set "TIF_FILE=%DEM_DIR%\!TODAY!.tif"
+if exist "%DEM_DIR%\HENAN_4326.tif" set "TIF_FILE=%DEM_DIR%\HENAN_4326.tif"
+if not defined TIF_FILE if exist "%DEM_DIR%\!TODAY!.tif" set "TIF_FILE=%DEM_DIR%\!TODAY!.tif"
 if not defined TIF_FILE if exist "%DEM_DIR%\DEM_!TODAY!.tif" set "TIF_FILE=%DEM_DIR%\DEM_!TODAY!.tif"
 if not defined TIF_FILE if exist "%DEM_DIR%\HENAN_!TODAY!.tif" set "TIF_FILE=%DEM_DIR%\HENAN_!TODAY!.tif"
 
@@ -55,6 +56,7 @@ if not defined TIF_FILE (
 if not defined TIF_FILE (
     echo [ERROR] No tif found for today in %DEM_DIR%.
     echo Expected names:
+    echo   %DEM_DIR%\HENAN_4326.tif
     echo   %DEM_DIR%\!TODAY!.tif
     echo   %DEM_DIR%\DEM_!TODAY!.tif
     echo   %DEM_DIR%\HENAN_!TODAY!.tif

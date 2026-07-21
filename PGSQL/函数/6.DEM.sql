@@ -5,7 +5,7 @@
 -- 说明：
 --   1. DEM tif 推荐使用 raster2pgsql 入库为 PostGIS raster。
 --   2. 默认表名：public.gis_dem_henan，栅格字段：rast。
---   3. 坐标系示例使用 EPSG:32650；河南 DEM 使用 WGS 84 / UTM zone 50N。
+--   3. 坐标系示例使用 EPSG:4326；正式入库使用 QGIS 转换后的 WGS 84 经纬度 DEM。
 --   4. 高程单位通常由 DEM 数据源决定，常见为米。
 --
 -- 文件内容：
@@ -76,7 +76,7 @@ CREATE EXTENSION IF NOT EXISTS postgis_raster;
 -- ADD COLUMN IF NOT EXISTS created_at timestamp without time zone DEFAULT now();
 --
 -- 如果需要记录文件名，推荐导入时使用 -F：
--- raster2pgsql -s 32650 -I -C -M -F -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
+-- raster2pgsql -s 4326 -I -C -M -F -t 256x256 "E:\DEM\HENAN_4326.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
 --
 -- 本脚本后续函数默认读取：
 --   public.gis_dem_henan.rast
@@ -122,7 +122,7 @@ $$;
 -- del /f /q E:\DEM\gis_dem_henan.sql
 --
 -- 2. 由 raster2pgsql 生成 SQL 文件。正式表名使用 public.gis_dem_henan：
--- raster2pgsql -s 32650 -I -C -M -t 256x256 "E:\DEM\HENAN.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
+-- raster2pgsql -s 4326 -I -C -M -t 256x256 "E:\DEM\HENAN_4326.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
 --
 -- 3. 设置数据库密码：
 -- set PGPASSWORD=Ktd@postSQL@2026!@#
@@ -134,10 +134,10 @@ $$;
 -- psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -c "SELECT COUNT(*) FROM public.gis_dem_henan;"
 
 -- Linux 示例：
--- PGPASSWORD='Ktd@postSQL@2026!@#' raster2pgsql -s 32650 -I -C -M -t 256x256 "/data/dem/HENAN.tif" public.gis_dem_henan | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis
+-- PGPASSWORD='Ktd@postSQL@2026!@#' raster2pgsql -s 4326 -I -C -M -t 256x256 "/data/dem/HENAN_4326.tif" public.gis_dem_henan | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis
 
 -- 参数说明：
---   -s 32650     设置 DEM 坐标系 SRID，按实际 tif 修改。
+--   -s 4326     设置 DEM 坐标系 SRID，按实际 tif 修改。
 --   -I          创建栅格空间索引。
 --   -C          添加栅格约束。
 --   -M          入库后执行 VACUUM ANALYZE。
@@ -158,7 +158,7 @@ $$;
 DROP FUNCTION IF EXISTS public.gis_dem_henan_validate(integer, integer);
 
 CREATE OR REPLACE FUNCTION public.gis_dem_validate(
-    p_old_srid integer DEFAULT 32650,
+    p_old_srid integer DEFAULT 4326,
     p_new_srid integer DEFAULT 4326
 )
 RETURNS TABLE (
@@ -294,20 +294,15 @@ $$;
 COMMENT ON FUNCTION public.gis_dem_validate(integer, integer)
 IS '河南DEM校验';
 
--- 执行校验。默认将 EPSG:32650 转为 EPSG:4326。
+-- 执行校验。默认按 EPSG:4326 校验。
 SELECT * FROM public.gis_dem_validate();
 
--- 查看 DEM 表范围，原始坐标系 EPSG:32650。
+-- 查看 DEM 表范围，原始坐标系 EPSG:4326。
 SELECT ST_AsText(ST_Envelope(ST_Collect(ST_ConvexHull(rast)))) AS dem_extent
 FROM public.gis_dem_henan;
 
--- 查看 DEM 表范围，转换为 EPSG:4326 经纬度。
-SELECT ST_AsText(
-    ST_Transform(
-        ST_SetSRID(ST_Envelope(ST_Collect(ST_ConvexHull(rast))), 32650),
-        4326
-    )
-) AS dem_extent_4326
+-- 查看 DEM 表范围，正式入库数据已经是 EPSG:4326。
+SELECT ST_AsText(ST_Envelope(ST_Collect(ST_ConvexHull(rast)))) AS dem_extent_4326
 FROM public.gis_dem_henan;
 
 -- 查看栅格元信息。
@@ -552,6 +547,7 @@ FROM public.gis_dem_profile_by_line(
     ST_GeomFromText('LINESTRING(116.38 39.90,116.40 39.92)', 4326),
     0.001
 );
+
 
 
 
