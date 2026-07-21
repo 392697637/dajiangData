@@ -70,6 +70,7 @@ DECLARE
 
     -- 项目范围 GeoJSON。PostGIS 函数入参要求文本格式 GeoJSON。
     v_geom_json text;
+    v_log_geom_json text;
 
     -- 单个函数调用开始时间，用于统计执行耗时。
     v_start_time timestamptz;
@@ -78,9 +79,16 @@ DECLARE
 
     -- 是否实际循环到项目，用于最后返回空数据提示。
     v_has_project boolean := false;
+    v_step_sql text;
     v_log_sql text; -- 当前函数调用SQL，用于错误日志
 BEGIN
-    v_log_sql := format('SELECT * FROM public.gis_project_data(%L);', p_project_id);
+    IF p_project_id IS NULL OR p_project_id = '' THEN
+        v_log_sql := 'SELECT * FROM public.gis_project_data();';
+    ELSE
+        v_log_sql := format('SELECT * FROM public.gis_project_data(%L);', p_project_id);
+    END IF;
+
+    RAISE NOTICE '[gis_project_data] start, sql=%', v_log_sql;
     -- 按项目循环执行；p_project_id 为空时处理全部未删除项目。
     FOR v_project IN
         SELECT bp.id, bp.region_shape
@@ -92,10 +100,23 @@ BEGIN
     LOOP
         v_has_project := true;
         v_geom_json := ST_AsGeoJSON(v_project.region_shape)::text;
+        v_log_geom_json := ST_AsGeoJSON(ST_Envelope(v_project.region_shape))::text;
+
+        RAISE NOTICE '[gis_project_data] project start, project_id=%', v_project.id;
 
         -- 1. 生成项目三维网格表，默认参数：最低高度50、最高高度280、网格分辨率100。
         BEGIN
             v_start_time := clock_timestamp();
+            v_step_sql := format(
+                'SELECT * FROM public.gis_generate_3d_grid(%L, %L, %s, %s, %s);',
+                v_project.id,
+                v_log_geom_json,
+                50,
+                280,
+                100
+            );
+            RAISE NOTICE '[gis_project_data] call start, project_id=%, sql_name=%', v_project.id, 'gis_generate_3d_grid';
+            RAISE NOTICE '[gis_project_data] call sql=%', v_step_sql;
 
             SELECT *
             INTO v_result
@@ -108,6 +129,13 @@ BEGIN
             );
             v_end_time := clock_timestamp();
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
+            RAISE NOTICE '[gis_project_data] call end, project_id=%, sql_name=%, code=%, table_name=%, table_count=%, exec_time=%s',
+                v_project.id,
+                'gis_generate_3d_grid',
+                COALESCE(v_result.code, 500),
+                COALESCE(v_result.table_name, ''),
+                COALESCE(v_result.count, 0),
+                v_exec_time;
 
             IF COALESCE(v_result.code, 500) IN (400, 500) THEN
                 INSERT INTO public.gis_error_log(code, msg, sqlstring)
@@ -128,6 +156,8 @@ BEGIN
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
             code := 500;
             msg := SQLERRM::text;
+            RAISE NOTICE '[gis_project_data] call error, project_id=%, sql_name=%, msg=%, exec_time=%s',
+                v_project.id, 'gis_generate_3d_grid', msg, v_exec_time;
             INSERT INTO public.gis_error_log(code, msg, sqlstring)
             VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
@@ -145,6 +175,13 @@ BEGIN
         -- 2. 创建并导入项目专属电子围栏表。
         BEGIN
             v_start_time := clock_timestamp();
+            v_step_sql := format(
+                'SELECT * FROM public.gis_electric_fence_project(%L, %L);',
+                v_project.id,
+                v_log_geom_json
+            );
+            RAISE NOTICE '[gis_project_data] call start, project_id=%, sql_name=%', v_project.id, 'gis_electric_fence_project';
+            RAISE NOTICE '[gis_project_data] call sql=%', v_step_sql;
 
             SELECT *
             INTO v_result
@@ -154,6 +191,13 @@ BEGIN
             );
             v_end_time := clock_timestamp();
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
+            RAISE NOTICE '[gis_project_data] call end, project_id=%, sql_name=%, code=%, table_name=%, table_count=%, exec_time=%s',
+                v_project.id,
+                'gis_electric_fence_project',
+                COALESCE(v_result.code, 500),
+                COALESCE(v_result.table_name, ''),
+                COALESCE(v_result.count, 0),
+                v_exec_time;
 
             IF COALESCE(v_result.code, 500) IN (400, 500) THEN
                 INSERT INTO public.gis_error_log(code, msg, sqlstring)
@@ -174,6 +218,8 @@ BEGIN
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
             code := 500;
             msg := SQLERRM::text;
+            RAISE NOTICE '[gis_project_data] call error, project_id=%, sql_name=%, msg=%, exec_time=%s',
+                v_project.id, 'gis_electric_fence_project', msg, v_exec_time;
             INSERT INTO public.gis_error_log(code, msg, sqlstring)
             VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
@@ -191,12 +237,25 @@ BEGIN
         -- 3. 根据项目电子围栏刷新三维网格点的围栏标记。
         BEGIN
             v_start_time := clock_timestamp();
+            v_step_sql := format(
+                'SELECT * FROM public.gis_mark_electric_fence(%L);',
+                v_project.id
+            );
+            RAISE NOTICE '[gis_project_data] call start, project_id=%, sql_name=%', v_project.id, 'gis_mark_electric_fence';
+            RAISE NOTICE '[gis_project_data] call sql=%', v_step_sql;
 
             SELECT *
             INTO v_result
             FROM public.gis_mark_electric_fence(v_project.id);
             v_end_time := clock_timestamp();
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
+            RAISE NOTICE '[gis_project_data] call end, project_id=%, sql_name=%, code=%, table_name=%, table_count=%, exec_time=%s',
+                v_project.id,
+                'gis_mark_electric_fence',
+                COALESCE(v_result.code, 500),
+                COALESCE(v_result.table_name, ''),
+                COALESCE(v_result.count, 0),
+                v_exec_time;
 
             IF COALESCE(v_result.code, 500) IN (400, 500) THEN
                 INSERT INTO public.gis_error_log(code, msg, sqlstring)
@@ -217,6 +276,8 @@ BEGIN
             v_exec_time := ROUND(EXTRACT(EPOCH FROM v_end_time - v_start_time)::numeric, 3);
             code := 500;
             msg := SQLERRM::text;
+            RAISE NOTICE '[gis_project_data] call error, project_id=%, sql_name=%, msg=%, exec_time=%s',
+                v_project.id, 'gis_mark_electric_fence', msg, v_exec_time;
             INSERT INTO public.gis_error_log(code, msg, sqlstring)
             VALUES (code, msg, v_log_sql);
             RETURN QUERY SELECT
@@ -230,12 +291,15 @@ BEGIN
                 v_end_time,
                 v_exec_time;
         END;
+
+        RAISE NOTICE '[gis_project_data] project end, project_id=%', v_project.id;
     END LOOP;
 
     -- 指定项目不存在或没有 region_shape 时，给出明确提示。
     IF NOT v_has_project THEN
         code := 400;
         msg := 'bo_project 中没有找到 del_flag=false 且 region_shape 不为空的项目数据'::text;
+        RAISE NOTICE '[gis_project_data] no project, msg=%', msg;
         INSERT INTO public.gis_error_log(code, msg, sqlstring)
         VALUES (code, msg, v_log_sql);
         RETURN QUERY SELECT
