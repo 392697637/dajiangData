@@ -658,7 +658,7 @@ SELECT gis_drop_function('gis_refresh_electric_fence');
 -- 函数名：gis_refresh_electric_fence
 -- 功能描述：刷新三维网格的电子围栏标记。先清空已标记的zone_type，再重新标记。
 -- 参数：p_project_id - 项目ID（可选，空表示公共表）
---       p_fence_id   - 可选围栏ID；为空时全量刷新，不为空时只刷新该围栏影响范围。
+--       p_refresh_json - 可选刷新JSON；包含fence_id时只刷新该围栏影响范围。
 -- 返回值：标准TABLE结构
 --   code        integer     返回码：200成功，500执行异常
 --   table_name  text        操作的网格表名
@@ -673,13 +673,13 @@ SELECT gis_drop_function('gis_refresh_electric_fence');
 -- =============================================================================
 -- 函数介绍：gis_refresh_electric_fence
 -- 主要作用：刷新网格中的电子围栏标记，可全量刷新，也可按单个围栏局部刷新。
--- 入参说明：p_project_id 为项目ID；p_fence_id 为空时全量刷新，非空时按围栏影响范围局部刷新。
+-- 入参说明：p_project_id 为项目ID；p_refresh_json 为空或不含fence_id时全量刷新，包含fence_id时按围栏范围局部刷新。
 -- 返回说明：返回清除和更新后的总影响行数，以及本次刷新状态信息。
 -- 注意事项：局部刷新依赖围栏原始geom确定影响范围；删除围栏后建议保留软删除记录再刷新。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION gis_refresh_electric_fence(
     p_project_id VARCHAR DEFAULT '',
-    p_fence_id VARCHAR DEFAULT NULL
+    p_refresh_json jsonb DEFAULT NULL
 )
 RETURNS TABLE (
     code integer,
@@ -697,24 +697,54 @@ DECLARE
     v_project_fence_table TEXT;
     v_project_fence_regclass REGCLASS;
     v_scope_extent box3d;
-    v_is_partial boolean := COALESCE(NULLIF(btrim(p_fence_id), ''), '') <> '';
+    v_fence_id varchar;
+    v_is_partial boolean;
+    v_start_time timestamptz := clock_timestamp();
+    v_action text;
+    v_fence_type text;
+    v_new_geojson jsonb;
+    v_old_geojson jsonb;
     v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
 BEGIN
-    v_log_sql := format('SELECT * FROM public.gis_refresh_electric_fence(%L, %L);',
-        p_project_id, p_fence_id);
+    v_fence_id := COALESCE(
+        p_refresh_json ->> 'fence_id',
+        p_refresh_json ->> 'fenceId',
+        p_refresh_json ->> 'id'
+    );
+    v_is_partial := COALESCE(NULLIF(btrim(v_fence_id), ''), '') <> '';
 
-    IF p_project_id = '' OR p_project_id IS NULL THEN
-        v_table := 'gis_grid_nodes';
-        v_project_fence_table := NULL;
-    ELSE
-        v_table := 'gis_grid_nodes_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
-        v_project_fence_table := 'gis_electric_fence_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
+    v_log_sql := format('SELECT * FROM public.gis_refresh_electric_fence(%L, %L);',
+        p_project_id, p_refresh_json);
+
+    IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
+        code := 400;
+        table_name := '';
+        msg := format('参数错误：项目ID不能为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        count := 0;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN NEXT;
+        RETURN;
     END IF;
+
+    v_table := 'gis_grid_nodes_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
+    v_project_fence_table := 'gis_electric_fence_' || regexp_replace(p_project_id, '[^0-9a-zA-Z_]', '', 'g');
     table_name := v_table;
+    SELECT to_regclass(format('%I.%I', current_schema(), v_project_fence_table)) INTO v_project_fence_regclass;
+
+    IF v_project_fence_regclass IS NULL THEN
+        code := 500;
+        msg := format('执行异常：电子围栏表不存在：%s，执行时间 %s 秒', v_project_fence_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        count := 0;
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (code, msg, v_log_sql);
+        RETURN NEXT;
+        RETURN;
+    END IF;
 
     IF to_regclass(format('%I.%I', current_schema(), v_table)) IS NULL THEN
-        code := 400;
-        msg := format('参数错误：网格表不存在：%s，执行时间 %s 秒', v_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        code := 500;
+        msg := format('执行异常：网格表不存在：%s，执行时间 %s 秒', v_table, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         count := 0;
         INSERT INTO public.gis_error_log(code, msg, sqlstring)
         VALUES (code, msg, v_log_sql);
@@ -740,6 +770,28 @@ BEGIN
         v_geom_col
     );
 
+    IF NOT v_is_partial THEN
+        EXECUTE format('
+            UPDATE %I
+            SET
+                zone_type = NULL,
+                block_mask = COALESCE(block_mask, 0) & ~1,
+                is_flyable = ((COALESCE(block_mask, 0) & ~1) = 0)
+            WHERE zone_type IS NOT NULL
+               OR (COALESCE(block_mask, 0) & 1) <> 0
+        ', v_table);
+        GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
+
+        RETURN QUERY
+        SELECT
+            m.code,
+            m.table_name,
+            format('已清空 %s 条电子围栏标记；%s', v_cleared_rows, m.msg)::text AS msg,
+            (v_cleared_rows + COALESCE(m.count, 0))::bigint AS count
+        FROM gis_mark_electric_fence(p_project_id) AS m;
+        RETURN;
+    END IF;
+
     DROP TABLE IF EXISTS tmp_refresh_electric_fence;
     CREATE TEMP TABLE tmp_refresh_electric_fence (
         id text,
@@ -755,15 +807,95 @@ BEGIN
         geom4326 geometry(Geometry,4326)
     ) ON COMMIT DROP;
 
-    IF v_project_fence_table IS NOT NULL THEN
-        SELECT to_regclass(format('%I.%I', current_schema(), v_project_fence_table)) INTO v_project_fence_regclass;
-    END IF;
-
     IF v_is_partial THEN
+        IF p_refresh_json IS NOT NULL THEN
+            v_action := lower(COALESCE(
+                p_refresh_json ->> 'action',
+                p_refresh_json ->> 'operate',
+                p_refresh_json ->> 'operation',
+                p_refresh_json ->> 'type',
+                ''
+            ));
+            v_fence_type := COALESCE(p_refresh_json ->> 'fence_type', p_refresh_json ->> 'fenceType');
+            v_new_geojson := COALESCE(
+                p_refresh_json -> 'geojson',
+                p_refresh_json -> 'geom',
+                p_refresh_json -> 'geometry',
+                p_refresh_json -> 'new_geojson',
+                p_refresh_json -> 'newGeom',
+                p_refresh_json -> 'new_geometry'
+            );
+            v_old_geojson := COALESCE(
+                p_refresh_json -> 'old_geojson',
+                p_refresh_json -> 'oldGeom',
+                p_refresh_json -> 'old_geometry'
+            );
+
+            IF v_action IN ('add', 'insert', 'create', '新增') THEN
+                IF v_new_geojson IS NULL THEN
+                    code := 400;
+                    msg := format('参数错误：新增刷新必须提供geojson，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+                    count := 0;
+                    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                    VALUES (code, msg, v_log_sql);
+                    RETURN NEXT;
+                    RETURN;
+                END IF;
+
+                INSERT INTO tmp_refresh_scope_fence (geom4326)
+                SELECT ST_SetSRID(ST_Force2D(ST_GeomFromGeoJSON(CASE WHEN v_new_geojson ->> 'type' = 'Feature' THEN v_new_geojson ->> 'geometry' ELSE v_new_geojson::text END)), 4326);
+
+            ELSIF v_action IN ('edit', 'update', 'modify', '编辑') THEN
+                IF v_new_geojson IS NULL THEN
+                    code := 400;
+                    msg := format('参数错误：编辑刷新必须提供geojson，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+                    count := 0;
+                    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                    VALUES (code, msg, v_log_sql);
+                    RETURN NEXT;
+                    RETURN;
+                END IF;
+
+                IF v_new_geojson IS NOT NULL THEN
+                    INSERT INTO tmp_refresh_scope_fence (geom4326)
+                    SELECT ST_SetSRID(ST_Force2D(ST_GeomFromGeoJSON(CASE WHEN v_new_geojson ->> 'type' = 'Feature' THEN v_new_geojson ->> 'geometry' ELSE v_new_geojson::text END)), 4326);
+                END IF;
+
+                IF v_old_geojson IS NOT NULL THEN
+                    INSERT INTO tmp_refresh_scope_fence (geom4326)
+                    SELECT ST_SetSRID(ST_Force2D(ST_GeomFromGeoJSON(CASE WHEN v_old_geojson ->> 'type' = 'Feature' THEN v_old_geojson ->> 'geometry' ELSE v_old_geojson::text END)), 4326);
+                END IF;
+
+            ELSIF v_action IN ('delete', 'remove', 'del', '删除') THEN
+                IF v_new_geojson IS NOT NULL THEN
+                    INSERT INTO tmp_refresh_scope_fence (geom4326)
+                    SELECT ST_SetSRID(ST_Force2D(ST_GeomFromGeoJSON(CASE WHEN v_new_geojson ->> 'type' = 'Feature' THEN v_new_geojson ->> 'geometry' ELSE v_new_geojson::text END)), 4326);
+                END IF;
+            ELSE
+                code := 400;
+                msg := format('参数错误：refresh_json.action必须是新增/编辑/删除，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+                count := 0;
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (code, msg, v_log_sql);
+                RETURN NEXT;
+                RETURN;
+            END IF;
+
+            IF v_fence_type IS NULL OR v_fence_type NOT IN ('1', '2', '3') THEN
+                code := 400;
+                msg := format('参数错误：fence_type必须是1/2/3，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+                count := 0;
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (code, msg, v_log_sql);
+                RETURN NEXT;
+                RETURN;
+            END IF;
+        END IF;
+
         INSERT INTO tmp_refresh_scope_fence (geom4326)
         SELECT ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
         FROM bo_electric_fence
-        WHERE id::text = p_fence_id::text
+        WHERE id::text = v_fence_id::text
           AND geom IS NOT NULL
           AND (COALESCE(p_project_id, '') = '' OR project_id::TEXT = p_project_id::TEXT);
 
@@ -775,14 +907,14 @@ BEGIN
                 WHERE id::text = $1
                   AND geom IS NOT NULL
             ', v_project_fence_regclass)
-            USING p_fence_id;
+            USING v_fence_id;
         END IF;
 
         SELECT ST_Extent(geom4326) INTO v_scope_extent FROM tmp_refresh_scope_fence;
 
         IF v_scope_extent IS NULL THEN
             code := 400;
-            msg := format('参数错误：未找到可刷新的电子围栏或围栏无geom：%s，执行时间 %s 秒', p_fence_id, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+            msg := format('参数错误：未找到可刷新的电子围栏或围栏无geom：%s，执行时间 %s 秒', v_fence_id, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
             count := 0;
             INSERT INTO public.gis_error_log(code, msg, sqlstring)
             VALUES (code, msg, v_log_sql);
@@ -966,7 +1098,7 @@ BEGIN
     count := v_updated_match_rows + v_cleared_rows;
     code := 200;
     msg := CASE
-        WHEN v_is_partial THEN format('按围栏 %s 局部刷新完成，更新 %s 条，清空 %s 条，执行时间 %s 秒', p_fence_id, v_updated_match_rows, v_cleared_rows, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
+        WHEN v_is_partial THEN format('按围栏 %s 局部刷新完成，更新 %s 条，清空 %s 条，执行时间 %s 秒', v_fence_id, v_updated_match_rows, v_cleared_rows, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
         ELSE format('按 bo_electric_fence 当前有效数据和项目专属围栏刷新完成，更新 %s 条，清空 %s 条，执行时间 %s 秒', v_updated_match_rows, v_cleared_rows, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))
     END;
     RETURN NEXT;
@@ -981,7 +1113,7 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NEXT;
 END;
 $$;
-COMMENT ON FUNCTION gis_refresh_electric_fence(VARCHAR, VARCHAR) IS '刷新网格电子围栏标记';
+COMMENT ON FUNCTION gis_refresh_electric_fence(VARCHAR, jsonb) IS '刷新网格电子围栏标记';
  
 
 
@@ -1238,9 +1370,30 @@ COMMENT ON FUNCTION gis_mark_buildings(VARCHAR, DOUBLE PRECISION) IS '标记网�
 -- SELECT * FROM gis_mark_electric_fence('2c95908e958f3b75019593551f520126');
 
 -- 当围栏数据发生变更（如新增、修改、删除），调用此函数刷新全部区域标记。
--- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
+-- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126', NULL::jsonb);
 
 -- 只刷新指定围栏影响范围。
--- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126', '围栏ID');
+-- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126', '{"fence_id":"围栏ID"}'::jsonb);
+
+-- 新增围栏后：用新geojson确定刷新范围
+-- SELECT * FROM gis_refresh_electric_fence(
+--     '2c95908e958f3b75019593551f520126',
+--     '围栏ID',
+--     '{"action":"add","fence_type":"1","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+-- );
+
+-- 编辑围栏后：用新geojson + old_geojson共同确定刷新范围；old_geojson不传时按围栏ID查询
+-- SELECT * FROM gis_refresh_electric_fence(
+--     '2c95908e958f3b75019593551f520126',
+--     '围栏ID',
+--     '{"action":"edit","fence_type":"2","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.3,34.1],[113.3,34.3],[113.1,34.3],[113.1,34.1]]]},"old_geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+-- );
+
+-- 删除围栏后：优先用geojson确定旧范围；geojson不传时按围栏ID查询
+-- SELECT * FROM gis_refresh_electric_fence(
+--     '2c95908e958f3b75019593551f520126',
+--     '围栏ID',
+--     '{"action":"delete","fence_type":"3","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+-- );
 
 -- SELECT * FROM gis_mark_buildings('2c95908e958f3b75019593551f520126');

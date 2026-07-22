@@ -104,7 +104,8 @@ SELECT * FROM gis_check_electric_fence(
 -- ========================================================================================
 -- 函数名：gis_refresh_electric_fence
 -- 功能描述：刷新三维网格的电子围栏标记。先清空已标记的zone_type，再重新标记。
--- 参数：p_project_id - 项目ID（可选，空表示公共表）
+-- 参数：p_project_id - 项目ID（必填）
+-- 参数：p_refresh_json - 刷新动作JSON（可选），包含 fence_id/action/fence_type/geojson/old_geojson
 -- 返回值：标准TABLE结构
 --   code        integer     返回码：200成功，500执行异常
 --   table_name  text        操作的网格表名
@@ -113,7 +114,26 @@ SELECT * FROM gis_check_electric_fence(
 -- 适用场景：电子围栏数据修改后，快速刷新网格区域标记
 -- ========================================================================================
 SELECT * FROM gis_refresh_electric_fence(
-    '2c95908e958f3b75019593551f520126'
+    '2c95908e958f3b75019593551f520126',
+    NULL::jsonb
+);
+
+-- 新增围栏：用geojson确定刷新范围
+SELECT * FROM gis_refresh_electric_fence(
+    '2c95908e958f3b75019593551f520126',
+    '{"fence_id":"围栏ID","action":"add","fence_type":"1","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+);
+
+-- 编辑围栏：用新geojson和old_geojson共同确定刷新范围；old_geojson不传时按围栏ID查询
+SELECT * FROM gis_refresh_electric_fence(
+    '2c95908e958f3b75019593551f520126',
+    '{"fence_id":"围栏ID","action":"edit","fence_type":"2","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.3,34.1],[113.3,34.3],[113.1,34.3],[113.1,34.1]]]},"old_geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+);
+
+-- 删除围栏：优先用geojson确定旧范围；geojson不传时按围栏ID查询
+SELECT * FROM gis_refresh_electric_fence(
+    '2c95908e958f3b75019593551f520126',
+    '{"fence_id":"围栏ID","action":"delete","fence_type":"3","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
 );
 
 -- ========================================================================================
