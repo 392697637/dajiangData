@@ -14,8 +14,8 @@ SELECT gis_drop_function('gis_mark_electric_fence');
 
 -- ==============================================
 -- 函数名：gis_mark_electric_fence
--- 功能描述：根据电子围栏表 bo_electric_fence 和项目专属围栏表，更新三维网格表电子围栏标记。
---          fence_type：1禁飞区、2管控区、3适飞区；禁飞区/管控区写入 block_mask & 1。
+-- 功能描述：先查询禁飞区、管控区，再按围栏范围快速定位网格并写入阻塞标记。
+--          bo_electric_fence 写 block_mask & 1；gis_electric_fence_<project_id> 写 block_mask & 32。
 -- 参数：p_project_id - 项目ID；为空时使用默认网格表 gis_grid_nodes
 -- 返回值：标准TABLE结构
 -- ==============================================
@@ -105,11 +105,10 @@ BEGIN
     SELECT
         id::text,
         'bo_electric_fence',
-        CASE fence_type WHEN '1' THEN 10 WHEN '2' THEN 20 WHEN '3' THEN 30 END AS priority,
+        CASE fence_type WHEN '1' THEN 10 WHEN '2' THEN 20 END AS priority,
         CASE fence_type
             WHEN '1' THEN '禁飞区'
             WHEN '2' THEN '管控区'
-            WHEN '3' THEN '适飞区'
         END::varchar(20) AS zone_type,
         NULLIF(COALESCE(height, 0), 0)::double precision AS max_height,
         ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
@@ -117,7 +116,7 @@ BEGIN
     WHERE del_flag = false
       AND status = '1'
       AND geom IS NOT NULL
-      AND fence_type IN ('1','2','3')
+      AND fence_type IN ('1','2')
       AND (COALESCE(p_project_id, '') = '' OR project_id::text = p_project_id::text);
 
     IF v_project_fence_table IS NOT NULL THEN
@@ -130,17 +129,16 @@ BEGIN
                 SELECT
                     id::text,
                     %L,
-                    CASE fence_type WHEN ''1'' THEN 10 WHEN ''2'' THEN 20 WHEN ''3'' THEN 30 END AS priority,
+                    CASE fence_type WHEN ''1'' THEN 10 WHEN ''2'' THEN 20 END AS priority,
                     CASE fence_type
                         WHEN ''1'' THEN ''禁飞区''
                         WHEN ''2'' THEN ''管控区''
-                        WHEN ''3'' THEN ''适飞区''
                     END::varchar(20) AS zone_type,
-                    NULL::double precision AS max_height,
+                    NULLIF(COALESCE(height, 0), 0)::double precision AS max_height,
                     ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
                 FROM %s
                 WHERE geom IS NOT NULL
-                  AND fence_type IN (''1'',''2'',''3'')
+                  AND fence_type IN (''1'',''2'')
             ', v_project_fence_table, v_project_fence_regclass);
         END IF;
     END IF;
@@ -155,10 +153,10 @@ BEGIN
             UPDATE %I
             SET
                 zone_type = NULL,
-                block_mask = COALESCE(block_mask, 0) & ~1,
-                is_flyable = ((COALESCE(block_mask, 0) & ~1) = 0)
+                block_mask = COALESCE(block_mask, 0) & ~33,
+                is_flyable = ((COALESCE(block_mask, 0) & ~33) = 0)
             WHERE zone_type IS NOT NULL
-               OR (COALESCE(block_mask, 0) & 1) <> 0
+               OR (COALESCE(block_mask, 0) & 33) <> 0
         ', v_table);
         GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
         count := v_cleared_rows;
@@ -180,7 +178,8 @@ BEGIN
                 f.zone_type,
                 f.max_height,
                 f.priority,
-                f.id AS fence_id
+                f.id AS fence_id,
+                CASE WHEN f.source_table = ''bo_electric_fence'' THEN 1 ELSE 32 END AS block_bit
             FROM (
                 SELECT DISTINCT x, y, %I AS geom2d
                 FROM %I
@@ -191,16 +190,17 @@ BEGIN
               ON n.geom2d && f.geom4326
              AND ST_Intersects(n.geom2d, f.geom4326)
         )
-        SELECT DISTINCT ON (n.id)
+        SELECT
             n.id,
-            xy.zone_type
+            (array_agg(xy.zone_type ORDER BY xy.priority, xy.fence_id))[1]::varchar(20) AS zone_type,
+            bit_or(xy.block_bit) AS block_bit
         FROM %I n
         JOIN xy_match xy
           ON n.x = xy.x
          AND n.y = xy.y
         WHERE xy.max_height IS NULL
            OR n.alt <= xy.max_height
-        ORDER BY n.id, xy.priority, xy.fence_id
+        GROUP BY n.id
     ', v_geom_col, v_table, v_geom_col, v_table)
     USING ST_XMin(v_extent), ST_YMin(v_extent), ST_XMax(v_extent), ST_YMax(v_extent);
 
@@ -211,26 +211,14 @@ BEGIN
         UPDATE %I n
         SET
             zone_type = t.zone_type,
-            block_mask = CASE
-                WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN COALESCE(n.block_mask, 0) | 1
-                ELSE COALESCE(n.block_mask, 0) & ~1
-            END,
-            is_flyable = CASE
-                WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN false
-                ELSE ((COALESCE(n.block_mask, 0) & ~1) = 0)
-            END
+            block_mask = (COALESCE(n.block_mask, 0) & ~33) | t.block_bit,
+            is_flyable = false
         FROM tmp_mark_desired_zone t
         WHERE n.id = t.id
           AND (
               n.zone_type IS DISTINCT FROM t.zone_type
-              OR n.block_mask IS DISTINCT FROM CASE
-                    WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN COALESCE(n.block_mask, 0) | 1
-                    ELSE COALESCE(n.block_mask, 0) & ~1
-                 END
-              OR n.is_flyable IS DISTINCT FROM CASE
-                    WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN false
-                    ELSE ((COALESCE(n.block_mask, 0) & ~1) = 0)
-                 END
+              OR n.block_mask IS DISTINCT FROM ((COALESCE(n.block_mask, 0) & ~33) | t.block_bit)
+              OR n.is_flyable IS DISTINCT FROM false
           )
     ', v_table);
     GET DIAGNOSTICS v_updated_rows = ROW_COUNT;
@@ -239,9 +227,9 @@ BEGIN
         UPDATE %I n
         SET
             zone_type = NULL,
-            block_mask = COALESCE(n.block_mask, 0) & ~1,
-            is_flyable = ((COALESCE(n.block_mask, 0) & ~1) = 0)
-        WHERE (n.zone_type IS NOT NULL OR (COALESCE(n.block_mask, 0) & 1) <> 0)
+            block_mask = COALESCE(n.block_mask, 0) & ~33,
+            is_flyable = ((COALESCE(n.block_mask, 0) & ~33) = 0)
+        WHERE (n.zone_type IS NOT NULL OR (COALESCE(n.block_mask, 0) & 33) <> 0)
           AND NOT EXISTS (SELECT 1 FROM tmp_mark_desired_zone t WHERE t.id = n.id)
     ', v_table);
     GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
@@ -284,7 +272,7 @@ SELECT gis_drop_function('gis_refresh_electric_fence');
 --   count       bigint      更新记录数
 -- 刷新规则：
 --   1. 全量刷新：清空电子围栏标记后调用 gis_mark_electric_fence 重新打标。
---   2. 局部刷新：按 fence_id/action/geojson/old_geojson 确定影响范围，只重算范围内网格。
+--   2. 局部刷新：按 fence_id/action/geojson/old_geojson 确定影响范围，只重算范围内禁飞区/管控区网格。
 --   3. 删除场景：优先使用JSON里的geojson；未传时按fence_id查询旧geom。
 -- ==============================================
 CREATE OR REPLACE FUNCTION gis_refresh_electric_fence(
@@ -385,10 +373,10 @@ BEGIN
             UPDATE %I
             SET
                 zone_type = NULL,
-                block_mask = COALESCE(block_mask, 0) & ~1,
-                is_flyable = ((COALESCE(block_mask, 0) & ~1) = 0)
+                block_mask = COALESCE(block_mask, 0) & ~33,
+                is_flyable = ((COALESCE(block_mask, 0) & ~33) = 0)
             WHERE zone_type IS NOT NULL
-               OR (COALESCE(block_mask, 0) & 1) <> 0
+               OR (COALESCE(block_mask, 0) & 33) <> 0
         ', v_table);
         GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
 
@@ -539,11 +527,10 @@ BEGIN
     SELECT
         id::text,
         'bo_electric_fence',
-        CASE fence_type WHEN '1' THEN 10 WHEN '2' THEN 20 WHEN '3' THEN 30 END AS priority,
+        CASE fence_type WHEN '1' THEN 10 WHEN '2' THEN 20 END AS priority,
         CASE fence_type
             WHEN '1' THEN '禁飞区'
             WHEN '2' THEN '管控区'
-            WHEN '3' THEN '适飞区'
         END::varchar(20) AS zone_type,
         NULLIF(COALESCE(height, 0), 0)::double precision AS max_height,
         ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
@@ -551,7 +538,7 @@ BEGIN
     WHERE del_flag = false
       AND status = '1'
       AND geom IS NOT NULL
-      AND fence_type IN ('1', '2', '3')
+      AND fence_type IN ('1', '2')
       AND (COALESCE(p_project_id, '') = '' OR project_id::TEXT = p_project_id::TEXT)
       AND (
           NOT v_is_partial
@@ -570,17 +557,16 @@ BEGIN
                 SELECT
                     id::text,
                     %L,
-                    CASE fence_type WHEN ''1'' THEN 10 WHEN ''2'' THEN 20 WHEN ''3'' THEN 30 END AS priority,
+                    CASE fence_type WHEN ''1'' THEN 10 WHEN ''2'' THEN 20 END AS priority,
                     CASE fence_type
                         WHEN ''1'' THEN ''禁飞区''
                         WHEN ''2'' THEN ''管控区''
-                        WHEN ''3'' THEN ''适飞区''
                     END::varchar(20) AS zone_type,
-                    NULL::double precision AS max_height,
+                    NULLIF(COALESCE(height, 0), 0)::double precision AS max_height,
                     ST_SetSRID(ST_Force2D(geom), 4326) AS geom4326
                 FROM %s
                 WHERE geom IS NOT NULL
-                  AND fence_type IN (''1'',''2'',''3'')
+                  AND fence_type IN (''1'',''2'')
                   AND (
                       NOT $1
                       OR ST_SetSRID(ST_Force2D(geom), 4326) && ST_MakeEnvelope($2, $3, $4, $5, 4326)
@@ -606,10 +592,10 @@ BEGIN
             UPDATE %I
             SET
                 zone_type = NULL,
-                block_mask = COALESCE(block_mask, 0) & ~1,
-                is_flyable = ((COALESCE(block_mask, 0) & ~1) = 0)
+                block_mask = COALESCE(block_mask, 0) & ~33,
+                is_flyable = ((COALESCE(block_mask, 0) & ~33) = 0)
             WHERE zone_type IS NOT NULL
-               OR (COALESCE(block_mask, 0) & 1) <> 0
+               OR (COALESCE(block_mask, 0) & 33) <> 0
         ', v_table);
         GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
         count := v_cleared_rows;
@@ -642,7 +628,8 @@ BEGIN
                 f.zone_type,
                 f.max_height,
                 f.priority,
-                f.id AS fence_id
+                f.id AS fence_id,
+                CASE WHEN f.source_table = ''bo_electric_fence'' THEN 1 ELSE 32 END AS block_bit
             FROM (
                 SELECT x, y, geom2d
                 FROM tmp_refresh_scope_xy
@@ -651,16 +638,17 @@ BEGIN
               ON n.geom2d && f.geom4326
              AND ST_Intersects(n.geom2d, f.geom4326)
         )
-        SELECT DISTINCT ON (n.id)
+        SELECT
             n.id,
-            xy.zone_type
+            (array_agg(xy.zone_type ORDER BY xy.priority, xy.fence_id))[1]::varchar(20) AS zone_type,
+            bit_or(xy.block_bit) AS block_bit
         FROM %I n
         JOIN xy_match xy
           ON n.x = xy.x
          AND n.y = xy.y
         WHERE xy.max_height IS NULL
            OR n.alt <= xy.max_height
-        ORDER BY n.id, xy.priority, xy.fence_id
+        GROUP BY n.id
     ', v_table);
 
     EXECUTE 'CREATE INDEX IF NOT EXISTS idx_tmp_desired_zone_id ON tmp_desired_zone(id);';
@@ -670,26 +658,14 @@ BEGIN
         UPDATE %I n
         SET
             zone_type = t.zone_type,
-            block_mask = CASE
-                WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN COALESCE(n.block_mask, 0) | 1
-                ELSE COALESCE(n.block_mask, 0) & ~1
-            END,
-            is_flyable = CASE
-                WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN false
-                ELSE ((COALESCE(n.block_mask, 0) & ~1) = 0)
-            END
+            block_mask = (COALESCE(n.block_mask, 0) & ~33) | t.block_bit,
+            is_flyable = false
         FROM tmp_desired_zone t
         WHERE n.id = t.id
           AND (
               n.zone_type IS DISTINCT FROM t.zone_type
-              OR n.block_mask IS DISTINCT FROM CASE
-                    WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN COALESCE(n.block_mask, 0) | 1
-                    ELSE COALESCE(n.block_mask, 0) & ~1
-                 END
-              OR n.is_flyable IS DISTINCT FROM CASE
-                    WHEN t.zone_type IN (''禁飞区'', ''管控区'') THEN false
-                    ELSE ((COALESCE(n.block_mask, 0) & ~1) = 0)
-                 END
+              OR n.block_mask IS DISTINCT FROM ((COALESCE(n.block_mask, 0) & ~33) | t.block_bit)
+              OR n.is_flyable IS DISTINCT FROM false
           )
     ', v_table);
     GET DIAGNOSTICS v_updated_match_rows = ROW_COUNT;
@@ -698,9 +674,9 @@ BEGIN
         UPDATE %I n
         SET
             zone_type = NULL,
-            block_mask = COALESCE(n.block_mask, 0) & ~1,
-            is_flyable = ((COALESCE(n.block_mask, 0) & ~1) = 0)
-        WHERE (n.zone_type IS NOT NULL OR (COALESCE(n.block_mask, 0) & 1) <> 0)
+            block_mask = COALESCE(n.block_mask, 0) & ~33,
+            is_flyable = ((COALESCE(n.block_mask, 0) & ~33) = 0)
+        WHERE (n.zone_type IS NOT NULL OR (COALESCE(n.block_mask, 0) & 33) <> 0)
           AND EXISTS (SELECT 1 FROM tmp_refresh_scope_xy s WHERE s.x = n.x AND s.y = n.y)
           AND NOT EXISTS (SELECT 1 FROM tmp_desired_zone t WHERE t.id = n.id)
     ', v_table);
