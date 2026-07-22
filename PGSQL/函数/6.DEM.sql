@@ -1,85 +1,35 @@
-﻿-- =============================================================================
+-- =============================================================================
 -- 6.DEM.sql
---   GeoTIFF DEM 数据在 PostgreSQL/PostGIS 中的入库、查询和常用函数
+--   gis_dem_validate                 校验河南 DEM 表入库状态
+--   gis_dem_elevation                按经纬度查询 DEM 高程
+--   gis_dem_elevation_by_point       按 Point 几何查询 DEM 高程
+--   gis_dem_stats_by_polygon         按面统计 DEM 高程
+--   gis_dem_profile_by_line          按线生成 DEM 高程剖面
+--   gis_dem_point_with_elevation     点补充 DEM 高程，返回 PointZ
+--   gis_dem_line_with_elevation      线补充 DEM 高程，返回 LineStringZ
+--   gis_dem_polygon_with_elevation   面补充 DEM 高程，返回 PolygonZ
+--   gis_dem_geom_with_elevation      点线面通用补充 DEM 高程
 --
--- 说明：
---   1. DEM tif 推荐使用 raster2pgsql 入库为 PostGIS raster。
---   2. 默认表名：public.gis_dem_henan，栅格字段：rast。
---   3. 坐标系示例使用 EPSG:4326；正式入库使用 QGIS 转换后的 WGS 84 经纬度 DEM。
---   4. 高程单位通常由 DEM 数据源决定，常见为米。
---
--- 文件内容：
---   1. 扩展：postgis、postgis_raster。
---   2. GeoTIFF DEM 入库命令：Windows/Linux raster2pgsql 导入示例和参数说明。
---   3. DEM 基础检查：表范围、SRID、像元大小、波段、NoData 信息。
---   4. 点位高程函数：gis_dem_elevation、gis_dem_elevation_by_point。
---   5. 面范围统计函数：gis_dem_stats_by_polygon。
---   6. 线路剖面函数：gis_dem_profile_by_line。
---   7. 派生地形表：gis_dem_slope、gis_dem_aspect、gis_dem_hillshade。
---   8. 调用示例：统一放在文件最后。
+-- 统一约定：
+--   1. DEM 正式表为 public.gis_dem_henan。
+--   2. DEM 正式坐标系为 EPSG:4326。
+--   3. DEM 表由 raster2pgsql 导入生成，本文件不负责导入 tif。
+--   4. 电子围栏、航点、航线、业务面默认使用 EPSG:4326。
 -- =============================================================================
 
 
 -- =============================================================================
--- 1. 扩展
+-- 1. 扩展依赖与 DEM 表注释
 -- =============================================================================
-
+-- 作用说明：启用 PostGIS Raster 能力，并给 DEM 表和核心字段补充数据库注释。
+-- 表说明：public.gis_dem_henan 为河南 DEM 栅格主表，每条记录通常是一块栅格瓦片。
+-- 字段说明：
+--   rid       瓦片主键，raster2pgsql 自动生成。
+--   rast      DEM 栅格数据，PostGIS raster 类型。
+--   filename  可选字段，导入时使用 raster2pgsql -F 才会生成。
+-- =============================================================================
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS postgis_raster;
-
--- 注意：
---   public.gis_dem_henan 不在本脚本中手工创建。
---   正式 DEM 表应由 raster2pgsql 根据 tif 自动创建并导入数据。
---   这样可以同时生成切片数据、空间索引、栅格约束和统计信息。
---
--- 推荐统一表名：
---   public.gis_dem_henan
---
--- 表名说明：
---   public
---     PostgreSQL schema 名称，表示该表位于 public 命名空间。
---
---   gis_dem_henan
---     河南 DEM 栅格主表名称，用于保存 raster2pgsql 导入后的 DEM 瓦片数据。
---     后续高程查询、范围统计、线路剖面、坡度坡向分析函数均默认读取该表。
---
---   public.gis_dem_henan
---     完整表名。推荐项目中统一使用该表名，避免函数和导入表不一致。
---
--- raster2pgsql 生成的表通常包含：
---   rid  integer 主键
---   rast raster  DEM 栅格瓦片
---
--- public.gis_dem_henan 字段说明：
---   rid
---     栅格瓦片主键。raster2pgsql 会为每个切片生成一条记录。
---     例如使用 -t 256x256 后，一张 tif 会被拆成多条 256x256 瓦片记录。
---
---   rast
---     PostGIS raster 类型字段，保存 DEM 栅格瓦片数据。
---     后续 ST_Value、ST_Intersects、ST_Clip、ST_SummaryStatsAgg 等函数都读取该字段。
---
---   filename
---     原始 tif 文件名字段。只有 raster2pgsql 使用 -F 参数时才会自动生成。
---     当前推荐导入命令未使用 -F，因此默认表通常没有 filename 字段。
---
---   created_at
---     入库时间字段。raster2pgsql 默认不会自动生成该字段。
---     如果业务需要记录入库时间，可以导入后手工 ALTER TABLE 添加。
---
--- 当前推荐的正式表结构以 raster2pgsql 实际生成结果为准，核心必需字段是：
---   rid
---   rast
---
--- 如果需要在导入后补充入库时间字段，可以执行：
--- ALTER TABLE public.gis_dem_henan
--- ADD COLUMN IF NOT EXISTS created_at timestamp without time zone DEFAULT now();
---
--- 如果需要记录文件名，推荐导入时使用 -F：
--- raster2pgsql -s 4326 -I -C -M -F -t 256x256 "E:\DEM\HENAN_4326.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
---
--- 本脚本后续函数默认读取：
---   public.gis_dem_henan.rast
 
 DO $$
 BEGIN
@@ -100,63 +50,52 @@ BEGIN
     ) THEN
         COMMENT ON COLUMN public.gis_dem_henan.filename IS '文件名';
     END IF;
-
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'gis_dem_henan'
-          AND column_name = 'created_at'
-    ) THEN
-        COMMENT ON COLUMN public.gis_dem_henan.created_at IS '入库时间';
-    END IF;
 END;
 $$;
 
+
 -- =============================================================================
--- 2. GeoTIFF DEM 入库命令
+-- 2. 删除函数
 -- =============================================================================
+-- 作用说明：按项目统一工具删除同名重载函数，避免 CREATE OR REPLACE 时参数变化导致冲突。
+-- 注意事项：gis_drop_function 由建库脚本提供，内部使用 CASCADE 删除依赖函数。
+-- =============================================================================
+SELECT gis_drop_function('gis_dem_geom_with_elevation');
+SELECT gis_drop_function('gis_dem_polygon_with_elevation');
+SELECT gis_drop_function('gis_dem_line_with_elevation');
+SELECT gis_drop_function('gis_dem_point_with_elevation');
+SELECT gis_drop_function('gis_dem_profile_by_line');
+SELECT gis_drop_function('gis_dem_stats_by_polygon');
+SELECT gis_drop_function('gis_dem_elevation_by_point');
+SELECT gis_drop_function('gis_dem_elevation');
+SELECT gis_drop_function('gis_dem_henan_validate');
+SELECT gis_drop_function('gis_dem_validate');
 
--- Windows CMD 推荐流程：
--- 1. 删除旧 SQL 文件：
--- del /f /q E:\DEM\gis_dem_henan.sql
---
--- 2. 由 raster2pgsql 生成 SQL 文件。正式表名使用 public.gis_dem_henan：
--- raster2pgsql -s 4326 -I -C -M -t 256x256 "E:\DEM\HENAN_4326.tif" public.gis_dem_henan > E:\DEM\gis_dem_henan.sql
---
--- 3. 设置数据库密码：
--- set PGPASSWORD=Ktd@postSQL@2026!@#
---
--- 4. 导入数据库：
--- psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f E:\DEM\gis_dem_henan.sql
---
--- 5. 验证切片数量：
--- psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -c "SELECT COUNT(*) FROM public.gis_dem_henan;"
 
--- Linux 示例：
--- PGPASSWORD='Ktd@postSQL@2026!@#' raster2pgsql -s 4326 -I -C -M -t 256x256 "/data/dem/HENAN_4326.tif" public.gis_dem_henan | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis
-
+-- =============================================================================
+-- 函数名称：gis_dem_validate
+-- 函数功能：校验河南 DEM 表是否可用
+-- 函数描述：
+--   1. 检查 public.gis_dem_henan 是否存在。
+--   2. 读取 DEM 实际 SRID、瓦片数量和栅格范围。
+--   3. 判断 DEM 是否为 EPSG:4326。
+--   4. 判断 DEM 范围是否落在河南经纬度附近。
+--   5. 如果存在 public.bo_electric_fence.geom，统计电子围栏与 DEM 范围相交数量。
 -- 参数说明：
---   -s 4326     设置 DEM 坐标系 SRID，按实际 tif 修改。
---   -I          创建栅格空间索引。
---   -C          添加栅格约束。
---   -M          入库后执行 VACUUM ANALYZE。
---   -t 256x256  将大 tif 切片入库，提高查询效率。
---   -a          追加到已有表；首次建表不加 -a。
-
-
+--   p_old_srid  integer  兼容旧调用，正式固定使用 4326
+--   p_new_srid  integer  兼容旧调用，正式固定使用 4326
+-- 返回值：
+--   code              integer  200=通过，400=失败
+--   msg               text     校验说明
+--   dem_exists        boolean  DEM 表是否存在
+--   dem_srid          integer  DEM 栅格实际 SRID
+--   tile_count        bigint   DEM 瓦片数量
+--   extent_4326       text     DEM 范围，EPSG:4326 WKT
+--   in_henan_range    boolean  是否在河南附近
+--   fence_total       bigint   电子围栏总数
+--   fence_intersects  bigint   与 DEM 范围相交的电子围栏数量
+-- 适用场景：DEM 导入完成后，先执行该函数确认 SRID 和范围是否正确。
 -- =============================================================================
--- 3. DEM 基础检查
--- =============================================================================
-
--- 河南 DEM 入库校验。
--- 校验内容：
---   1. public.gis_dem_henan 是否存在。
---   2. DEM SRID 是否为旧 SRID。
---   3. DEM 范围从旧 SRID 转换到新 SRID 后是否落在河南附近。
---   4. 如果 bo_electric_fence.geom 存在，统计与 DEM 范围相交的电子围栏数量。
-DROP FUNCTION IF EXISTS public.gis_dem_henan_validate(integer, integer);
-
 CREATE OR REPLACE FUNCTION public.gis_dem_validate(
     p_old_srid integer DEFAULT 4326,
     p_new_srid integer DEFAULT 4326
@@ -166,11 +105,8 @@ RETURNS TABLE (
     msg text,
     dem_exists boolean,
     dem_srid integer,
-    old_srid integer,
-    new_srid integer,
     tile_count bigint,
-    extent_dem text,
-    extent_new_srid text,
+    extent_4326 text,
     in_henan_range boolean,
     fence_total bigint,
     fence_intersects bigint
@@ -179,6 +115,8 @@ LANGUAGE plpgsql
 STABLE
 AS $$
 DECLARE
+    v_dem_srid integer;
+    v_tile_count bigint;
     v_extent geometry;
     v_extent_4326 geometry;
     v_has_fence_geom boolean;
@@ -189,10 +127,7 @@ BEGIN
             'DEM表不存在'::text,
             false,
             NULL::integer,
-            p_old_srid,
-            p_new_srid,
             0::bigint,
-            NULL::text,
             NULL::text,
             false,
             NULL::bigint,
@@ -204,23 +139,20 @@ BEGIN
         ST_SRID(rast),
         count(*),
         ST_SetSRID(ST_Envelope(ST_Collect(ST_ConvexHull(rast))), ST_SRID(rast))
-    INTO dem_srid, tile_count, v_extent
+    INTO v_dem_srid, v_tile_count, v_extent
     FROM public.gis_dem_henan
     WHERE rast IS NOT NULL
     GROUP BY ST_SRID(rast)
     ORDER BY count(*) DESC
     LIMIT 1;
 
-    IF dem_srid IS NULL OR tile_count = 0 THEN
+    IF v_tile_count IS NULL OR v_tile_count = 0 THEN
         RETURN QUERY SELECT
             400,
             'DEM表无有效栅格'::text,
             true,
-            dem_srid,
-            p_old_srid,
-            p_new_srid,
-            COALESCE(tile_count, 0),
-            NULL::text,
+            v_dem_srid,
+            0::bigint,
             NULL::text,
             false,
             NULL::bigint,
@@ -228,16 +160,15 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 如果 DEM 曾经用错误 SRID 导入，可用 p_old_srid 重新解释其坐标系，再转到 p_new_srid。
-    v_extent_4326 := ST_Transform(ST_SetSRID(v_extent, p_old_srid), p_new_srid);
-
+    v_extent_4326 := ST_Transform(v_extent, 4326);
     in_henan_range :=
-        p_new_srid = 4326
-        AND
         ST_XMin(v_extent_4326) >= 108
         AND ST_XMax(v_extent_4326) <= 118
         AND ST_YMin(v_extent_4326) >= 30
         AND ST_YMax(v_extent_4326) <= 38;
+
+    fence_total := NULL;
+    fence_intersects := NULL;
 
     SELECT EXISTS (
         SELECT 1
@@ -247,9 +178,6 @@ BEGIN
           AND column_name = 'geom'
     )
     INTO v_has_fence_geom;
-
-    fence_total := NULL;
-    fence_intersects := NULL;
 
     IF v_has_fence_geom THEN
         SELECT count(*)
@@ -261,29 +189,32 @@ BEGIN
         INTO fence_intersects
         FROM public.bo_electric_fence
         WHERE geom IS NOT NULL
-          AND CASE
-              WHEN p_new_srid = 4326 THEN ST_Intersects(geom, v_extent_4326)
-              ELSE ST_Intersects(ST_Transform(geom, p_new_srid), v_extent_4326)
-          END;
+          AND ST_Intersects(
+              ST_Transform(
+                  CASE
+                      WHEN ST_SRID(geom) = 0 THEN ST_SetSRID(geom, 4326)
+                      ELSE geom
+                  END,
+                  4326
+              ),
+              v_extent_4326
+          );
     END IF;
 
     RETURN QUERY SELECT
         CASE
-            WHEN dem_srid <> p_old_srid THEN 400
+            WHEN v_dem_srid <> 4326 THEN 400
             WHEN NOT in_henan_range THEN 400
             ELSE 200
         END,
         CASE
-            WHEN dem_srid <> p_old_srid THEN format('DEM SRID不是%s', p_old_srid)
+            WHEN v_dem_srid <> 4326 THEN format('DEM SRID不是4326，当前为%s', v_dem_srid)
             WHEN NOT in_henan_range THEN 'DEM范围不在河南附近'
             ELSE 'DEM校验通过'
         END,
         true,
-        dem_srid,
-        p_old_srid,
-        p_new_srid,
-        tile_count,
-        ST_AsText(v_extent),
+        v_dem_srid,
+        v_tile_count,
         ST_AsText(v_extent_4326),
         in_henan_range,
         fence_total,
@@ -294,38 +225,21 @@ $$;
 COMMENT ON FUNCTION public.gis_dem_validate(integer, integer)
 IS '河南DEM校验';
 
--- 执行校验。默认按 EPSG:4326 校验。
-SELECT * FROM public.gis_dem_validate();
-
--- 查看 DEM 表范围，原始坐标系 EPSG:4326。
-SELECT ST_AsText(ST_Envelope(ST_Collect(ST_ConvexHull(rast)))) AS dem_extent
-FROM public.gis_dem_henan;
-
--- 查看 DEM 表范围，正式入库数据已经是 EPSG:4326。
-SELECT ST_AsText(ST_Envelope(ST_Collect(ST_ConvexHull(rast)))) AS dem_extent_4326
-FROM public.gis_dem_henan;
-
--- 查看栅格元信息。
-SELECT
-    rid,
-    ST_SRID(rast) AS srid,
-    ST_Width(rast) AS width,
-    ST_Height(rast) AS height,
-    ST_NumBands(rast) AS bands,
-    ST_PixelWidth(rast) AS pixel_width,
-    ST_PixelHeight(rast) AS pixel_height,
-    ST_BandNoDataValue(rast, 1) AS nodata
-FROM public.gis_dem_henan
-ORDER BY rid
-LIMIT 20;
-
 
 -- =============================================================================
--- 4. 点位高程查询函数
+-- 函数名称：gis_dem_elevation
+-- 函数功能：按经纬度查询 DEM 高程
+-- 函数描述：
+--   1. 接收 lon、lat 两个经纬度参数。
+--   2. 默认输入坐标系为 EPSG:4326。
+--   3. 自动查询 public.gis_dem_henan.rast 第一波段高程值。
+-- 参数说明：
+--   p_lon   double precision  经度
+--   p_lat   double precision  纬度
+--   p_srid  integer           输入点 SRID，正式默认 4326
+-- 返回值：double precision，高程值；点不在 DEM 范围内时返回 NULL。
+-- 适用场景：按航点、设备点、地图点击点查询地面高程。
 -- =============================================================================
-
--- 按经纬度查询 DEM 高程。
--- 入参坐标默认 EPSG:4326，如 DEM 表不是 4326，会自动转换到 DEM SRID。
 CREATE OR REPLACE FUNCTION public.gis_dem_elevation(
     p_lon double precision,
     p_lat double precision,
@@ -335,31 +249,27 @@ RETURNS double precision
 LANGUAGE sql
 STABLE
 AS $$
-    WITH dem_srid AS (
-        SELECT ST_SRID(rast) AS srid
-        FROM public.gis_dem_henan
-        WHERE rast IS NOT NULL
-        LIMIT 1
-    ),
-    pt AS (
-        SELECT ST_Transform(
-            ST_SetSRID(ST_MakePoint(p_lon, p_lat), p_srid),
-            (SELECT srid FROM dem_srid)
-        ) AS geom
-    )
-    SELECT ST_Value(d.rast, 1, p.geom)
-    FROM public.gis_dem_henan d
-    CROSS JOIN pt p
-    WHERE ST_Intersects(d.rast, p.geom)
-    ORDER BY d.rid
-    LIMIT 1;
+    SELECT public.gis_dem_elevation_by_point(
+        ST_SetSRID(ST_MakePoint(p_lon, p_lat), p_srid)
+    );
 $$;
 
 COMMENT ON FUNCTION public.gis_dem_elevation(double precision, double precision, integer)
-IS '按点坐标查询 DEM 第一波段高程值。';
+IS '经纬度查高程';
 
 
--- 按 geometry 点查询 DEM 高程。
+-- =============================================================================
+-- 函数名称：gis_dem_elevation_by_point
+-- 函数功能：按 Point 几何查询 DEM 高程
+-- 函数描述：
+--   1. 接收 geometry(Point)。
+--   2. 输入无 SRID 时按 EPSG:4326 处理。
+--   3. 输入 SRID 与 DEM 不一致时自动转换到 DEM SRID。
+-- 参数说明：
+--   p_geom  geometry  点几何
+-- 返回值：double precision，高程值；点不在 DEM 范围内时返回 NULL。
+-- 适用场景：业务表中已有 geom 字段时直接查询高程。
+-- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_dem_elevation_by_point(
     p_geom geometry
 )
@@ -373,26 +283,45 @@ AS $$
         WHERE rast IS NOT NULL
         LIMIT 1
     ),
-    pt AS (
-        SELECT ST_Transform(p_geom, (SELECT srid FROM dem_srid)) AS geom
+    input_point AS (
+        SELECT
+            CASE
+                WHEN p_geom IS NULL THEN NULL::geometry
+                WHEN ST_SRID(p_geom) = 0 THEN ST_SetSRID(ST_Force2D(p_geom), 4326)
+                ELSE ST_Force2D(p_geom)
+            END AS geom
+    ),
+    point_dem AS (
+        SELECT ST_Transform(i.geom, d.srid) AS geom
+        FROM input_point i
+        CROSS JOIN dem_srid d
+        WHERE i.geom IS NOT NULL
+          AND ST_GeometryType(i.geom) = 'ST_Point'
     )
-    SELECT ST_Value(d.rast, 1, p.geom)
-    FROM public.gis_dem_henan d
-    CROSS JOIN pt p
-    WHERE ST_Intersects(d.rast, p.geom)
-    ORDER BY d.rid
+    SELECT ST_Value(r.rast, 1, p.geom)
+    FROM public.gis_dem_henan r
+    CROSS JOIN point_dem p
+    WHERE ST_Intersects(r.rast, p.geom)
+    ORDER BY r.rid
     LIMIT 1;
 $$;
 
 COMMENT ON FUNCTION public.gis_dem_elevation_by_point(geometry)
-IS '按 geometry 点查询 DEM 第一波段高程值。';
+IS '点几何查高程';
 
 
 -- =============================================================================
--- 5. 范围 DEM 统计函数
+-- 函数名称：gis_dem_stats_by_polygon
+-- 函数功能：按面范围统计 DEM 高程
+-- 函数描述：
+--   1. 接收 Polygon 或 MultiPolygon。
+--   2. 自动转换到 DEM SRID。
+--   3. 裁剪 DEM 后统计第一波段 count、min、max、mean、stddev。
+-- 参数说明：
+--   p_geom  geometry  面几何
+-- 返回值：TABLE，高程统计结果。
+-- 适用场景：统计电子围栏、任务区、测区范围内的高程分布。
 -- =============================================================================
-
--- 统计指定面范围内 DEM 的最小值、最大值、平均值、像元数。
 CREATE OR REPLACE FUNCTION public.gis_dem_stats_by_polygon(
     p_geom geometry
 )
@@ -412,14 +341,26 @@ AS $$
         WHERE rast IS NOT NULL
         LIMIT 1
     ),
-    area_geom AS (
-        SELECT ST_Transform(p_geom, (SELECT srid FROM dem_srid)) AS geom
+    input_area AS (
+        SELECT
+            CASE
+                WHEN p_geom IS NULL THEN NULL::geometry
+                WHEN ST_SRID(p_geom) = 0 THEN ST_SetSRID(ST_MakeValid(ST_Force2D(p_geom)), 4326)
+                ELSE ST_MakeValid(ST_Force2D(p_geom))
+            END AS geom
+    ),
+    area_dem AS (
+        SELECT ST_Transform(a.geom, d.srid) AS geom
+        FROM input_area a
+        CROSS JOIN dem_srid d
+        WHERE a.geom IS NOT NULL
+          AND ST_GeometryType(a.geom) IN ('ST_Polygon', 'ST_MultiPolygon')
     ),
     clipped AS (
-        SELECT ST_Clip(d.rast, 1, a.geom, true) AS rast
-        FROM public.gis_dem_henan d
-        CROSS JOIN area_geom a
-        WHERE ST_Intersects(d.rast, a.geom)
+        SELECT ST_Clip(r.rast, 1, a.geom, true) AS rast
+        FROM public.gis_dem_henan r
+        CROSS JOIN area_dem a
+        WHERE ST_Intersects(r.rast, a.geom)
     )
     SELECT
         (s).count::bigint,
@@ -434,18 +375,25 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION public.gis_dem_stats_by_polygon(geometry)
-IS '统计指定 geometry 范围内 DEM 高程的 count/min/max/mean/stddev。';
+IS '面统计高程';
 
 
 -- =============================================================================
--- 6. 线路高程剖面函数
+-- 函数名称：gis_dem_profile_by_line
+-- 函数功能：按线生成 DEM 高程剖面
+-- 函数描述：
+--   1. 接收 LineString。
+--   2. 按 p_step 间距在线上采样。
+--   3. 返回采样序号、线内距离、采样点和高程。
+-- 参数说明：
+--   p_line  geometry          线几何
+--   p_step  double precision  采样间距，单位与输入线坐标单位一致
+-- 返回值：TABLE，高程剖面点。
+-- 注意事项：EPSG:4326 的单位是度；如需按米采样，应先将线转换到米制坐标后生成采样点。
 -- =============================================================================
-
--- 沿线按固定距离采样，返回每个采样点的距离、坐标和高程。
--- p_step 使用线 geometry 的坐标单位；若线为 EPSG:4326，建议先转为米制投影再传入。
 CREATE OR REPLACE FUNCTION public.gis_dem_profile_by_line(
     p_line geometry,
-    p_step double precision DEFAULT 10
+    p_step double precision DEFAULT 0.001
 )
 RETURNS TABLE (
     seq integer,
@@ -456,17 +404,29 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 AS $$
-    WITH params AS (
+    WITH input_line AS (
         SELECT
-            p_line AS line_geom,
-            GREATEST(p_step, 0.000001) AS step_len,
-            ST_Length(p_line) AS line_len
+            CASE
+                WHEN p_line IS NULL THEN NULL::geometry
+                WHEN ST_SRID(p_line) = 0 THEN ST_SetSRID(ST_Force2D(p_line), 4326)
+                ELSE ST_Force2D(p_line)
+            END AS geom,
+            GREATEST(p_step, 0.000001) AS step_len
+    ),
+    params AS (
+        SELECT
+            geom,
+            step_len,
+            ST_Length(geom) AS line_len
+        FROM input_line
+        WHERE geom IS NOT NULL
+          AND ST_GeometryType(geom) = 'ST_LineString'
     ),
     samples AS (
         SELECT
-            row_number() OVER ()::integer AS seq,
+            row_number() OVER (ORDER BY g.dist)::integer AS seq,
             LEAST(g.dist, p.line_len) AS distance,
-            ST_LineInterpolatePoint(p.line_geom, LEAST(g.dist, p.line_len) / NULLIF(p.line_len, 0)) AS geom
+            ST_LineInterpolatePoint(p.geom, LEAST(g.dist, p.line_len) / NULLIF(p.line_len, 0)) AS geom
         FROM params p
         CROSS JOIN LATERAL generate_series(0, p.line_len, p.step_len) AS g(dist)
         WHERE p.line_len > 0
@@ -481,77 +441,275 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION public.gis_dem_profile_by_line(geometry, double precision)
-IS '沿线按固定间距采样 DEM 高程，生成线路高程剖面。';
+IS '线路高程剖面';
 
 
 -- =============================================================================
--- 7. 坡度、坡向和阴影地形派生示例
+-- 函数名称：gis_dem_point_with_elevation
+-- 函数功能：给点补充 DEM 高程
+-- 函数描述：接收 Point，查询 DEM 高程后返回 PointZ。
+-- 参数说明：p_point geometry，点几何。
+-- 返回值：geometry(PointZ)。
+-- 适用场景：给航点、兴趣点补充地面高程。
 -- =============================================================================
-
--- 坡度栅格。单位为度，适合 DEM 为米制投影坐标时使用。
-CREATE TABLE IF NOT EXISTS public.gis_dem_henan_slope AS
-SELECT
-    rid,
-    ST_Slope(rast, 1, '32BF', 'DEGREES') AS rast
-FROM public.gis_dem_henan
-WHERE rast IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_gis_dem_slope_rast_gist
-ON public.gis_dem_henan_slope
-USING gist (ST_ConvexHull(rast));
-
--- 坡向栅格。单位为度，0/360 通常代表北向。
-CREATE TABLE IF NOT EXISTS public.gis_dem_henan_aspect AS
-SELECT
-    rid,
-    ST_Aspect(rast, 1, '32BF', 'DEGREES') AS rast
-FROM public.gis_dem_henan
-WHERE rast IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_gis_dem_aspect_rast_gist
-ON public.gis_dem_henan_aspect
-USING gist (ST_ConvexHull(rast));
-
--- 阴影地形。azimuth 为光源方位角，altitude 为光源高度角。
-CREATE TABLE IF NOT EXISTS public.gis_dem_henan_hillshade AS
-SELECT
-    rid,
-    ST_HillShade(rast, 1, '8BUI', 315, 45) AS rast
-FROM public.gis_dem_henan
-WHERE rast IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_gis_dem_hillshade_rast_gist
-ON public.gis_dem_henan_hillshade
-USING gist (ST_ConvexHull(rast));
-
-
--- =============================================================================
--- 8. 常用查询示例
--- =============================================================================
-
--- 查询单点高程。
-SELECT public.gis_dem_elevation(116.3913, 39.9075, 4326) AS elevation;
-
--- 查询 WKT 面范围内高程统计。
-SELECT *
-FROM public.gis_dem_stats_by_polygon(
-    ST_GeomFromText(
-        'POLYGON((116.38 39.90,116.40 39.90,116.40 39.92,116.38 39.92,116.38 39.90))',
-        4326
+CREATE OR REPLACE FUNCTION public.gis_dem_point_with_elevation(
+    p_point geometry
+)
+RETURNS geometry
+LANGUAGE sql
+STABLE
+AS $$
+    WITH input_point AS (
+        SELECT
+            CASE
+                WHEN p_point IS NULL THEN NULL::geometry
+                WHEN ST_SRID(p_point) = 0 THEN ST_SetSRID(ST_Force2D(p_point), 4326)
+                ELSE ST_Force2D(p_point)
+            END AS geom,
+            COALESCE(NULLIF(ST_SRID(p_point), 0), 4326) AS srid
     )
-);
+    SELECT
+        CASE
+            WHEN geom IS NULL OR ST_GeometryType(geom) <> 'ST_Point' THEN NULL::geometry
+            ELSE ST_SetSRID(
+                ST_MakePoint(
+                    ST_X(geom),
+                    ST_Y(geom),
+                    COALESCE(public.gis_dem_elevation_by_point(geom), 0)
+                ),
+                srid
+            )
+        END
+    FROM input_point;
+$$;
 
--- 查询 WKT 线路高程剖面。
-SELECT *
-FROM public.gis_dem_profile_by_line(
-    ST_GeomFromText('LINESTRING(116.38 39.90,116.40 39.92)', 4326),
-    0.001
-);
+COMMENT ON FUNCTION public.gis_dem_point_with_elevation(geometry)
+IS '点补DEM高程';
 
 
+-- =============================================================================
+-- 函数名称：gis_dem_line_with_elevation
+-- 函数功能：给线补充 DEM 高程
+-- 函数描述：拆分 LineString 顶点，逐点查询 DEM 高程后重新组成 LineStringZ。
+-- 参数说明：p_line geometry，线几何。
+-- 返回值：geometry(LineStringZ)。
+-- 适用场景：给航线顶点补充地面高程。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.gis_dem_line_with_elevation(
+    p_line geometry
+)
+RETURNS geometry
+LANGUAGE sql
+STABLE
+AS $$
+    WITH input_line AS (
+        SELECT
+            CASE
+                WHEN p_line IS NULL THEN NULL::geometry
+                WHEN ST_SRID(p_line) = 0 THEN ST_SetSRID(ST_Force2D(p_line), 4326)
+                ELSE ST_Force2D(p_line)
+            END AS geom,
+            COALESCE(NULLIF(ST_SRID(p_line), 0), 4326) AS srid
+    ),
+    points AS (
+        SELECT
+            (dp).path[1] AS seq,
+            (dp).geom AS geom
+        FROM input_line i
+        CROSS JOIN LATERAL ST_DumpPoints(i.geom) AS dp
+        WHERE i.geom IS NOT NULL
+          AND ST_GeometryType(i.geom) = 'ST_LineString'
+    )
+    SELECT
+        CASE
+            WHEN count(*) = 0 THEN NULL::geometry
+            ELSE ST_SetSRID(
+                ST_MakeLine(
+                    ST_MakePoint(
+                        ST_X(geom),
+                        ST_Y(geom),
+                        COALESCE(public.gis_dem_elevation_by_point(geom), 0)
+                    )
+                    ORDER BY seq
+                ),
+                (SELECT srid FROM input_line)
+            )
+        END
+    FROM points;
+$$;
+
+COMMENT ON FUNCTION public.gis_dem_line_with_elevation(geometry)
+IS '线补DEM高程';
 
 
+-- =============================================================================
+-- 函数名称：gis_dem_polygon_with_elevation
+-- 函数功能：给面补充 DEM 高程
+-- 函数描述：拆分 Polygon 外环和内环顶点，逐点查询 DEM 高程后重新组成 PolygonZ。
+-- 参数说明：p_polygon geometry，面几何。
+-- 返回值：geometry(PolygonZ)。
+-- 适用场景：给电子围栏、作业区边界补充地面高程。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.gis_dem_polygon_with_elevation(
+    p_polygon geometry
+)
+RETURNS geometry
+LANGUAGE sql
+STABLE
+AS $$
+    WITH input_polygon AS (
+        SELECT
+            CASE
+                WHEN p_polygon IS NULL THEN NULL::geometry
+                WHEN ST_SRID(p_polygon) = 0 THEN ST_SetSRID(ST_Force2D(p_polygon), 4326)
+                ELSE ST_Force2D(p_polygon)
+            END AS geom,
+            COALESCE(NULLIF(ST_SRID(p_polygon), 0), 4326) AS srid
+    ),
+    rings AS (
+        SELECT
+            (dr).path[1] AS ring_no,
+            (dr).geom AS geom
+        FROM input_polygon i
+        CROSS JOIN LATERAL ST_DumpRings(i.geom) AS dr
+        WHERE i.geom IS NOT NULL
+          AND ST_GeometryType(i.geom) = 'ST_Polygon'
+    ),
+    ring_points AS (
+        SELECT
+            r.ring_no,
+            (dp).path[1] AS point_no,
+            (dp).geom AS geom
+        FROM rings r
+        CROSS JOIN LATERAL ST_DumpPoints(r.geom) AS dp
+    ),
+    z_rings AS (
+        SELECT
+            ring_no,
+            ST_MakeLine(
+                ST_MakePoint(
+                    ST_X(geom),
+                    ST_Y(geom),
+                    COALESCE(public.gis_dem_elevation_by_point(geom), 0)
+                )
+                ORDER BY point_no
+            ) AS geom
+        FROM ring_points
+        GROUP BY ring_no
+    )
+    SELECT
+        CASE
+            WHEN NOT EXISTS (SELECT 1 FROM z_rings WHERE ring_no = 0) THEN NULL::geometry
+            ELSE ST_SetSRID(
+                ST_MakePolygon(
+                    (SELECT geom FROM z_rings WHERE ring_no = 0),
+                    COALESCE(
+                        ARRAY(SELECT geom FROM z_rings WHERE ring_no > 0 ORDER BY ring_no),
+                        ARRAY[]::geometry[]
+                    )
+                ),
+                (SELECT srid FROM input_polygon)
+            )
+        END;
+$$;
+
+COMMENT ON FUNCTION public.gis_dem_polygon_with_elevation(geometry)
+IS '面补DEM高程';
 
 
+-- =============================================================================
+-- 函数名称：gis_dem_geom_with_elevation
+-- 函数功能：点线面通用补充 DEM 高程
+-- 函数描述：根据输入几何类型自动调用点、线、面补高程函数。
+-- 参数说明：p_geom geometry，支持 Point、LineString、Polygon。
+-- 返回值：geometry，返回带 Z 值的几何；不支持的类型返回 NULL。
+-- 适用场景：接口层不确定输入类型时统一调用。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.gis_dem_geom_with_elevation(
+    p_geom geometry
+)
+RETURNS geometry
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT
+        CASE ST_GeometryType(p_geom)
+            WHEN 'ST_Point' THEN public.gis_dem_point_with_elevation(p_geom)
+            WHEN 'ST_LineString' THEN public.gis_dem_line_with_elevation(p_geom)
+            WHEN 'ST_Polygon' THEN public.gis_dem_polygon_with_elevation(p_geom)
+            ELSE NULL::geometry
+        END;
+$$;
+
+COMMENT ON FUNCTION public.gis_dem_geom_with_elevation(geometry)
+IS '几何补DEM高程';
 
 
+-- =============================================================================
+-- 调用示例
+-- =============================================================================
+-- 说明：以下示例默认输入 EPSG:4326，经纬度顺序为 lon lat。
+-- =============================================================================
+
+-- 1. 校验 DEM 入库状态
+-- SELECT * FROM public.gis_dem_validate();
+-- SELECT * FROM public.gis_dem_validate(4326, 4326);
+
+-- 2. 查看 DEM 表范围
+-- SELECT ST_AsText(ST_Envelope(ST_Collect(ST_ConvexHull(rast)))) AS dem_extent
+-- FROM public.gis_dem_henan;
+
+-- 3. 查询单点高程
+-- SELECT public.gis_dem_elevation(113.65, 34.76, 4326) AS elevation;
+
+-- 4. 查询 geometry 点高程
+-- SELECT public.gis_dem_elevation_by_point(
+--     ST_SetSRID(ST_MakePoint(113.65, 34.76), 4326)
+-- ) AS elevation;
+
+-- 5. 查询面范围高程统计
+-- SELECT *
+-- FROM public.gis_dem_stats_by_polygon(
+--     ST_GeomFromText(
+--         'POLYGON((113.60 34.70,113.70 34.70,113.70 34.80,113.60 34.80,113.60 34.70))',
+--         4326
+--     )
+-- );
+
+-- 6. 查询线路高程剖面
+-- SELECT *
+-- FROM public.gis_dem_profile_by_line(
+--     ST_GeomFromText('LINESTRING(113.60 34.70,113.65 34.76,113.70 34.80)', 4326),
+--     0.001
+-- );
+
+-- 7. 点补 DEM 高程，返回 PointZ
+-- SELECT ST_AsText(
+--     public.gis_dem_point_with_elevation(
+--         ST_SetSRID(ST_MakePoint(113.65, 34.76), 4326)
+--     )
+-- ) AS point_z;
+
+-- 8. 线补 DEM 高程，返回 LineStringZ
+-- SELECT ST_AsText(
+--     public.gis_dem_line_with_elevation(
+--         ST_GeomFromText('LINESTRING(113.60 34.70,113.65 34.76,113.70 34.80)', 4326)
+--     )
+-- ) AS line_z;
+
+-- 9. 面补 DEM 高程，返回 PolygonZ
+-- SELECT ST_AsText(
+--     public.gis_dem_polygon_with_elevation(
+--         ST_GeomFromText(
+--             'POLYGON((113.60 34.70,113.70 34.70,113.70 34.80,113.60 34.80,113.60 34.70))',
+--             4326
+--         )
+--     )
+-- ) AS polygon_z;
+
+-- 10. 通用点线面补高程
+-- SELECT ST_AsText(
+--     public.gis_dem_geom_with_elevation(
+--         ST_SetSRID(ST_MakePoint(113.65, 34.76), 4326)
+--     )
+-- ) AS geom_z;
