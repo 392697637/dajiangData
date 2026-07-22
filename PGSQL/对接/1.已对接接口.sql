@@ -107,16 +107,13 @@ SELECT * FROM gis_check_electric_fence(
 -- 参数：p_project_id - 项目ID（必填）
 -- 参数：p_refresh_json - 刷新动作JSON（可选），包含 fence_id/action/fence_type/geojson/old_geojson
 -- 返回值：标准TABLE结构
---   code        integer     返回码：200成功，500执行异常
+--   code        integer     返回码：200成功，400参数错误，500执行异常
 --   table_name  text        操作的网格表名
 --   msg         text        结果描述
 --   count       bigint      更新记录数
 -- 适用场景：电子围栏数据修改后，快速刷新网格区域标记
 -- ========================================================================================
-SELECT * FROM gis_refresh_electric_fence(
-    '2c95908e958f3b75019593551f520126',
-    NULL::jsonb
-);
+SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
 
 -- 新增围栏：用geojson确定刷新范围
 SELECT * FROM gis_refresh_electric_fence(
