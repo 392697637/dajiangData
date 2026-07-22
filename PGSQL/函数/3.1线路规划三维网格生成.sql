@@ -18,7 +18,7 @@
 --   GeoJSON面 + 高度范围 + 分辨率
 --     -> gis_generate_3d_grid 生成 gis_grid_nodes_<project_id>
 --     -> gis_mark_electric_fence / gis_refresh_electric_fence 写入电子围栏阻塞位 block_mask & 1
---     -> 建筑阻塞位 block_mask & 2 由 4.2建筑线路规划.sql 中的 gis_mark_buildings 写入
+--     -> 建筑阻塞位 block_mask & 2 由 4.2建筑标记.sql 中的 gis_mark_buildings 写入
 --     -> 3.2/3.3 基于 is_flyable=true 的节点做路径规划
 --
 -- 使用提醒：
@@ -1117,7 +1117,7 @@ COMMENT ON FUNCTION gis_refresh_electric_fence(VARCHAR, jsonb) IS '刷新网格�
 
 
 -- =============================================================================
--- 建筑障碍打标函数已拆分到 4.2建筑线路规划.sql
+-- 建筑障碍打标函数已拆分到 4.2建筑标记.sql
 -- =============================================================================
 
 -- =============================================================================
@@ -1142,21 +1142,18 @@ COMMENT ON FUNCTION gis_refresh_electric_fence(VARCHAR, jsonb) IS '刷新网格�
 -- 新增围栏后：用新geojson确定刷新范围
 -- SELECT * FROM gis_refresh_electric_fence(
 --     '2c95908e958f3b75019593551f520126',
---     '围栏ID',
---     '{"action":"add","fence_type":"1","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+--     '{"fence_id":"围栏ID","action":"add","fence_type":"1","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
 -- );
 
 -- 编辑围栏后：用新geojson + old_geojson共同确定刷新范围；old_geojson不传时按围栏ID查询
 -- SELECT * FROM gis_refresh_electric_fence(
 --     '2c95908e958f3b75019593551f520126',
---     '围栏ID',
---     '{"action":"edit","fence_type":"2","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.3,34.1],[113.3,34.3],[113.1,34.3],[113.1,34.1]]]},"old_geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+--     '{"fence_id":"围栏ID","action":"edit","fence_type":"2","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.3,34.1],[113.3,34.3],[113.1,34.3],[113.1,34.1]]]},"old_geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
 -- );
 
 -- 删除围栏后：优先用geojson确定旧范围；geojson不传时按围栏ID查询
 -- SELECT * FROM gis_refresh_electric_fence(
 --     '2c95908e958f3b75019593551f520126',
---     '围栏ID',
---     '{"action":"delete","fence_type":"3","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+--     '{"fence_id":"围栏ID","action":"delete","fence_type":"3","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
 -- );
 
