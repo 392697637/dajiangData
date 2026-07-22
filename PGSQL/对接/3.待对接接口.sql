@@ -55,12 +55,12 @@ FROM public.gis_electric_fence_buffer(
 --   p_buffer_radius   double precision   缓冲半径，单位：米；0表示不缓冲
 --   p_return_geojson  boolean            是否返回围栏/缓冲/立体GeoJSON，默认false；需要前端直接使用GeoJSON时传true
 -- 返回：
---   code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+--   code, msg, ischeck, check_type, electric_id, fence_type, electric_name, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 -- check_type：
 --   p_inner  点在内部
 --   p_outer  点在外部
 -- ============================================================================
-SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_name, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_point_buffer(
     '2c95908e958f3b75019593551f520126',
     '{"type":"Point","coordinates":[113.405861,34.769437,120]}',
@@ -68,7 +68,7 @@ FROM public.gis_electric_fence_check_point_buffer(
     true
 );
 
-SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_name, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_point_buffer(
     '2c95908e958f3b75019593551f520126',
     '[113.405861,34.769437,120]',
@@ -93,7 +93,7 @@ FROM public.gis_electric_fence_check_point_buffer(
 --   ln_enters    线与面：穿入/穿出
 --   ln_overlaps  线与面：重叠
 -- ============================================================================
-SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_name, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_line_buffer(
     '2c95908e958f3b75019593551f520126',
     '{
@@ -107,7 +107,7 @@ FROM public.gis_electric_fence_check_line_buffer(
     true
 );
 
-SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
+SELECT code, msg, ischeck, check_type, electric_id, fence_type, electric_name, electric_geom, electric_geojson, electric_buffer_geom, electric_buffer_geojson, electric_solid_geom, electric_solid_geojson
 FROM public.gis_electric_fence_check_line_buffer(
     '2c95908e958f3b75019593551f520126',
     '[

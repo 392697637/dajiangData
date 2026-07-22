@@ -70,7 +70,11 @@
 | `gis_electric_fence_check_point_buffer` | 命中缓冲区为 `true`，未命中为 `false` | `p_inner` 点在内部，`p_outer` 点在外部 |
 | `gis_electric_fence_check_line_buffer` | 命中缓冲区为 `true`，未命中为 `false` | `ln_within`、`ln_outside`、`ln_crosses`、`ln_enters`、`ln_overlaps` |
 
-缓冲区相关函数统一在 `msg` 中追加 `chek_type` 编码和中文含义；围栏字段统一返回为：`electric_id`、`electric_geom`、`electric_geojson`、`electric_buffer_geom`、`electric_buffer_geojson`、`electric_solid_geom`、`electric_solid_geojson`。
+点位/航线校验命中围栏时返回 `electric_id`、`fence_type`、`electric_name`、`electric_geom`、`electric_geojson`。
+
+缓冲区检测函数统一在 `msg` 中追加 `chek_type` 编码和中文含义；围栏字段统一返回为：`electric_id`、`fence_type`、`electric_name`、`electric_geom`、`electric_geojson`、`electric_buffer_geom`、`electric_buffer_geojson`、`electric_solid_geom`、`electric_solid_geojson`。
+
+`gis_electric_fence_buffer` 是缓冲生成函数，返回 `electric_id`、`fence_type`、`electric_geom`、`electric_geojson`、`electric_buffer_geom`、`electric_buffer_geojson`、`electric_solid_geom`、`electric_solid_geojson`。
 
 缓冲区相关函数新增可选参数 `p_return_geojson boolean DEFAULT false`。默认不生成 GeoJSON，`electric_geojson`、`electric_buffer_geojson`、`electric_solid_geojson` 返回 `NULL`；`electric_geom`、`electric_buffer_geom`、`electric_solid_geom` 仍正常返回。需要前端直接使用 GeoJSON 时传 `true`。
 
