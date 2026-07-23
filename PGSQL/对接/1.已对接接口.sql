@@ -105,7 +105,7 @@ SELECT * FROM gis_check_electric_fence(
 -- 函数名：gis_refresh_electric_fence
 -- 功能描述：刷新三维网格的电子围栏标记。全量刷新时先清空电子围栏标记，再重新打标。
 -- 参数：p_project_id - 项目ID（必填）
--- 参数：p_refresh_json - 刷新动作JSON（可选），包含 fence_id/action/geojson/old_geojson
+-- 参数：p_refresh_json - 刷新动作JSON文本（可选），包含 fence_id/action/geojson/old_geojson
 -- 返回值：标准TABLE结构
 --   code        integer     返回码：200成功，400参数错误，500执行异常
 --   table_name  text        操作的网格表名
@@ -116,16 +116,16 @@ SELECT * FROM gis_check_electric_fence(
 -- ========================================================================================
 SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
 
--- 显式全量刷新：第二个参数传 NULL::jsonb。
+-- 显式全量刷新：第二个参数传 NULL::text。
 SELECT * FROM gis_refresh_electric_fence(
     '2c95908e958f3b75019593551f520126',
-    NULL::jsonb
+    NULL::text
 );
 
 -- 第二个参数示例：只传 fence_id，按围栏ID查询旧 geom 并局部刷新。
 SELECT * FROM gis_refresh_electric_fence(
     '2c95908e958f3b75019593551f520126',
-    '{"fence_id":"fence_id"}'::jsonb
+    '{"fence_id":"fence_id"}'
 );
 
 -- 新增围栏局部刷新：项目ID + 围栏ID + 新围栏GeoJSON文本。
