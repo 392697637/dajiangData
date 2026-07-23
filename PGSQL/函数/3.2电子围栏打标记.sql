@@ -1,12 +1,16 @@
--- =============================================================================
--- 3.2电子围栏打标记.sql
- 
+﻿-- =============================================================================
+-- 3.2 电子围栏打标记.sql
+--
+-- 函数清单：
 --   gis_mark_electric_fence                 标记网格电子围栏障碍
 --   gis_refresh_electric_fence              刷新网格电子围栏标记
+--   gis_refresh_electric_fence_add          新增电子围栏后局部刷新
+--   gis_refresh_electric_fence_delete       删除电子围栏后局部刷新
+--   gis_refresh_electric_fence_edit         编辑电子围栏后局部刷新
 --
 -- =============================================================================
 
--- ========================================== gis_mark_electric_fence  更新三维网格表============================================================
+-- ============================================================ gis_mark_electric_fence
 -- =============================================================================
 -- 删除函数
 -- =============================================================================
@@ -14,10 +18,10 @@ SELECT gis_drop_function('gis_mark_electric_fence');
 
 -- ==============================================
 -- 函数名：gis_mark_electric_fence
--- 功能描述：先查询禁飞区、管控区，再按围栏范围快速定位网格并写入阻塞标记。
---          bo_electric_fence 写 block_mask & 1；gis_electric_fence_<project_id> 写 block_mask & 32。
--- 参数：p_project_id - 项目ID；为空时使用默认网格表 gis_grid_nodes
--- 返回值：标准TABLE结构
+-- 功能描述：查询公共电子围栏和项目专属电子围栏，按围栏范围定位网格并写入阻塞标记。
+-- 标记规则：bo_electric_fence 写入 block_mask & 1；gis_electric_fence_<project_id> 写入 block_mask & 32。
+-- 参数：p_project_id 项目ID；为空时使用默认网格表 gis_grid_nodes。
+-- 返回值：标准 TABLE 结构，包含 code、table_name、msg、count。
 -- ==============================================
 CREATE OR REPLACE FUNCTION gis_mark_electric_fence(p_project_id VARCHAR DEFAULT '')
 RETURNS TABLE (code integer, table_name text, msg text, count bigint)
@@ -252,8 +256,8 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 COMMENT ON FUNCTION gis_mark_electric_fence(VARCHAR) IS '标记网格电子围栏障碍';
- 
--- ============================================================ gis_refresh_electric_fence  重置所有网格====================================================================================
+
+-- ============================================================ gis_refresh_electric_fence
 -- =============================================================================
 -- 删除函数
 -- =============================================================================
@@ -263,17 +267,21 @@ SELECT gis_drop_function('gis_refresh_electric_fence');
 -- 函数名：gis_refresh_electric_fence
 -- 功能描述：刷新项目三维网格的电子围栏标记。
 -- 参数：
---   p_project_id   项目ID（必填）
---   p_refresh_json 刷新动作JSON（可选，默认NULL）；不传、为空或不含fence_id时全量刷新，包含fence_id时局部刷新
--- 返回值：标准TABLE结构
---   code        integer     返回码：200成功，400参数错误，500执行异常
---   table_name  text        操作的网格表名
---   msg         text        结果描述
---   count       bigint      更新记录数
+--   p_project_id   项目ID，必填。
+--   p_refresh_json 刷新动作 JSON，可选；NULL 表示全量刷新，传 action/fence_id/geojson 表示局部刷新。
+--                  对接接口建议调用拆参函数：
+--                  gis_refresh_electric_fence_add(project_id, fence_id, geojson_text)
+--                  gis_refresh_electric_fence_delete(project_id, fence_id)
+--                  gis_refresh_electric_fence_edit(project_id, fence_id, old_geojson_text, new_geojson_text)
+-- 返回值：
+--   code        integer     返回码：200 成功，400 参数错误，500 执行异常。
+--   table_name  text        操作的网格表名。
+--   msg         text        结果描述。
+--   count       bigint      本次实际更新或清空的记录数。
 -- 刷新规则：
---   1. 全量刷新：清空电子围栏标记后调用 gis_mark_electric_fence 重新打标。
+--   1. 全量刷新：先清空电子围栏标记，再调用 gis_mark_electric_fence 重新打标。
 --   2. 局部刷新：按 fence_id/action/geojson/old_geojson 确定影响范围，只重算范围内禁飞区/管控区网格。
---   3. 删除场景：优先使用JSON里的geojson；未传时按fence_id查询旧geom。
+--   3. 删除场景：优先使用 JSON 中的 geojson；未传时按 fence_id 查询旧 geom。
 -- ==============================================
 CREATE OR REPLACE FUNCTION gis_refresh_electric_fence(
     p_project_id VARCHAR DEFAULT '',
@@ -302,14 +310,25 @@ DECLARE
     v_fence_type text;
     v_new_geojson jsonb;
     v_old_geojson jsonb;
-    v_log_sql text;                 -- 当前函数调用SQL，用于错误日志
+    v_log_sql text;                 -- current function call SQL for error logging
 BEGIN
     v_fence_id := COALESCE(
         p_refresh_json ->> 'fence_id',
         p_refresh_json ->> 'fenceId',
         p_refresh_json ->> 'id'
     );
-    v_is_partial := COALESCE(NULLIF(btrim(v_fence_id), ''), '') <> '';
+    v_action := lower(COALESCE(
+        p_refresh_json ->> 'action',
+        p_refresh_json ->> 'operate',
+        p_refresh_json ->> 'operation',
+        p_refresh_json ->> 'type',
+        ''
+    ));
+    v_is_partial := p_refresh_json IS NOT NULL
+        AND (
+            COALESCE(NULLIF(btrim(v_fence_id), ''), '') <> ''
+            OR COALESCE(NULLIF(btrim(v_action), ''), '') <> ''
+        );
 
     v_log_sql := format('SELECT * FROM public.gis_refresh_electric_fence(%L, %L);',
         p_project_id, p_refresh_json);
@@ -407,13 +426,6 @@ BEGIN
 
     IF v_is_partial THEN
         IF p_refresh_json IS NOT NULL THEN
-            v_action := lower(COALESCE(
-                p_refresh_json ->> 'action',
-                p_refresh_json ->> 'operate',
-                p_refresh_json ->> 'operation',
-                p_refresh_json ->> 'type',
-                ''
-            ));
             v_fence_type := COALESCE(p_refresh_json ->> 'fence_type', p_refresh_json ->> 'fenceType');
             v_new_geojson := COALESCE(
                 p_refresh_json -> 'geojson',
@@ -479,7 +491,7 @@ BEGIN
                 RETURN;
             END IF;
 
-            IF v_fence_type IS NULL OR v_fence_type NOT IN ('1', '2', '3') THEN
+            IF v_fence_type IS NOT NULL AND v_fence_type NOT IN ('1', '2', '3') THEN
                 code := 400;
                 msg := format('参数错误：fence_type必须是1/2/3，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
                 count := 0;
@@ -619,7 +631,7 @@ BEGIN
     ANALYZE tmp_refresh_scope_xy;
 
     DROP TABLE IF EXISTS tmp_desired_zone;
-    EXECUTE format(' 
+    EXECUTE format('
         CREATE TEMP TABLE tmp_desired_zone ON COMMIT DROP AS
         WITH xy_match AS MATERIALIZED (
             SELECT
@@ -654,7 +666,7 @@ BEGIN
     EXECUTE 'CREATE INDEX IF NOT EXISTS idx_tmp_desired_zone_id ON tmp_desired_zone(id);';
     EXECUTE 'ANALYZE tmp_desired_zone;';
 
-    EXECUTE format(' 
+    EXECUTE format('
         UPDATE %I n
         SET
             zone_type = t.zone_type,
@@ -701,7 +713,118 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 COMMENT ON FUNCTION gis_refresh_electric_fence(VARCHAR, jsonb) IS '刷新网格电子围栏标记';
- 
+
+-- ============================================================ gis_refresh_electric_fence_add
+SELECT gis_drop_function('gis_refresh_electric_fence_add');
+
+-- 函数名：gis_refresh_electric_fence_add
+-- 功能描述：新增电子围栏后，根据新围栏 GeoJSON 做局部刷新。
+-- 参数：
+--   p_project_id 项目ID，必填。
+--   p_fence_id   围栏ID，必填。
+--   p_geojson    新围栏 GeoJSON 文本，必填。
+CREATE OR REPLACE FUNCTION gis_refresh_electric_fence_add(
+    p_project_id VARCHAR,
+    p_fence_id VARCHAR,
+    p_geojson text
+)
+RETURNS TABLE (
+    code integer,
+    table_name text,
+    msg text,
+    count bigint
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM gis_refresh_electric_fence(
+        p_project_id,
+        jsonb_build_object(
+            'action', 'add',
+            'fence_id', p_fence_id,
+            'geojson', p_geojson::jsonb
+        )
+    );
+END;
+$$;
+COMMENT ON FUNCTION gis_refresh_electric_fence_add(VARCHAR, VARCHAR, text) IS '新增电子围栏后局部刷新网格电子围栏标记';
+
+-- ============================================================ gis_refresh_electric_fence_delete
+SELECT gis_drop_function('gis_refresh_electric_fence_delete');
+
+-- 函数名：gis_refresh_electric_fence_delete
+-- 功能描述：删除电子围栏后，根据围栏ID查询旧 geom 并做局部刷新。
+-- 参数：
+--   p_project_id 项目ID，必填。
+--   p_fence_id   围栏ID，必填。
+CREATE OR REPLACE FUNCTION gis_refresh_electric_fence_delete(
+    p_project_id VARCHAR,
+    p_fence_id VARCHAR
+)
+RETURNS TABLE (
+    code integer,
+    table_name text,
+    msg text,
+    count bigint
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM gis_refresh_electric_fence(
+        p_project_id,
+        jsonb_build_object(
+            'action', 'delete',
+            'fence_id', p_fence_id
+        )
+    );
+END;
+$$;
+COMMENT ON FUNCTION gis_refresh_electric_fence_delete(VARCHAR, VARCHAR) IS '删除电子围栏后按围栏ID局部刷新网格电子围栏标记';
+
+-- ============================================================ gis_refresh_electric_fence_edit
+SELECT gis_drop_function('gis_refresh_electric_fence_edit');
+
+-- 函数名：gis_refresh_electric_fence_edit
+-- 功能描述：编辑电子围栏后，根据旧 GeoJSON 和新 GeoJSON 的共同范围做局部刷新。
+-- 参数：
+--   p_project_id  项目ID，必填。
+--   p_fence_id    围栏ID，必填。
+--   p_old_geojson 旧围栏 GeoJSON 文本，必填。
+--   p_new_geojson 新围栏 GeoJSON 文本，必填。
+CREATE OR REPLACE FUNCTION gis_refresh_electric_fence_edit(
+    p_project_id VARCHAR,
+    p_fence_id VARCHAR,
+    p_old_geojson text,
+    p_new_geojson text
+)
+RETURNS TABLE (
+    code integer,
+    table_name text,
+    msg text,
+    count bigint
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM gis_refresh_electric_fence(
+        p_project_id,
+        jsonb_build_object(
+            'action', 'edit',
+            'fence_id', p_fence_id,
+            'old_geojson', p_old_geojson::jsonb,
+            'geojson', p_new_geojson::jsonb
+        )
+    );
+END;
+$$;
+COMMENT ON FUNCTION gis_refresh_electric_fence_edit(VARCHAR, VARCHAR, text, text) IS '编辑电子围栏后按旧新范围局部刷新网格电子围栏标记';
+
 
 
 -- =============================================================================
@@ -709,30 +832,61 @@ COMMENT ON FUNCTION gis_refresh_electric_fence(VARCHAR, jsonb) IS '刷新网格�
 -- =============================================================================
 -- SELECT * FROM gis_mark_electric_fence('2c95908e958f3b75019593551f520126');
 
--- 当围栏数据发生变更且需要全量刷新时，可只传项目ID。
+-- 围栏数据发生变更且需要全量刷新时，只传项目ID。
 -- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
 
--- 也可以显式传NULL::jsonb刷新全部区域标记。
+-- 也可以显式传 NULL::jsonb 刷新全部区域标记。
 -- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126', NULL::jsonb);
 
--- 只刷新指定围栏影响范围。
--- SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126', '{"fence_id":"围栏ID"}'::jsonb);
-
--- 新增围栏后：用新geojson确定刷新范围
+-- 第二个参数示例1：只传 fence_id，按围栏ID查询旧 geom 并局部刷新。
 -- SELECT * FROM gis_refresh_electric_fence(
 --     '2c95908e958f3b75019593551f520126',
---     '{"fence_id":"围栏ID","action":"add","fence_type":"1","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+--     '{"fence_id":"fence_id"}'::jsonb
 -- );
 
--- 编辑围栏后：用新geojson + old_geojson共同确定刷新范围；old_geojson不传时按围栏ID查询
+-- 第二个参数示例2：新增围栏，使用新 geojson 确定局部刷新范围。
 -- SELECT * FROM gis_refresh_electric_fence(
 --     '2c95908e958f3b75019593551f520126',
---     '{"fence_id":"围栏ID","action":"edit","fence_type":"2","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.3,34.1],[113.3,34.3],[113.1,34.3],[113.1,34.1]]]},"old_geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+--     '{"fence_id":"fence_id","action":"add","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
 -- );
 
--- 删除围栏后：优先用geojson确定旧范围；geojson不传时按围栏ID查询
+-- 第二个参数示例3：编辑围栏，使用旧 geojson 和新 geojson 共同确定局部刷新范围。
 -- SELECT * FROM gis_refresh_electric_fence(
 --     '2c95908e958f3b75019593551f520126',
---     '{"fence_id":"围栏ID","action":"delete","fence_type":"3","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+--     '{"fence_id":"fence_id","action":"edit","old_geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]},"geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.3,34.1],[113.3,34.3],[113.1,34.3],[113.1,34.1]]]}}'::jsonb
+-- );
+
+-- 第二个参数示例4：删除围栏，只传 fence_id 时按表内旧 geom 确定局部刷新范围。
+-- SELECT * FROM gis_refresh_electric_fence(
+--     '2c95908e958f3b75019593551f520126',
+--     '{"fence_id":"fence_id","action":"delete"}'::jsonb
+-- );
+
+-- 第二个参数示例5：删除围栏，同时传旧 geojson，优先使用旧 geojson 确定局部刷新范围。
+-- SELECT * FROM gis_refresh_electric_fence(
+--     '2c95908e958f3b75019593551f520126',
+--     '{"fence_id":"fence_id","action":"delete","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+-- );
+
+-- 推荐对接方式：使用拆参函数，避免业务侧手写 refresh_json。
+-- 新增围栏后：项目ID + 围栏ID + 新围栏 GeoJSON 文本。
+-- SELECT * FROM gis_refresh_electric_fence_add(
+--     '2c95908e958f3b75019593551f520126',
+--     'fence_id',
+--     '{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}'
+-- );
+
+-- 删除围栏后：项目ID + 围栏ID。
+-- SELECT * FROM gis_refresh_electric_fence_delete(
+--     '2c95908e958f3b75019593551f520126',
+--     'fence_id'
+-- );
+
+-- 编辑围栏后：项目ID + 围栏ID + 旧围栏 GeoJSON 文本 + 新围栏 GeoJSON 文本。
+-- SELECT * FROM gis_refresh_electric_fence_edit(
+--     '2c95908e958f3b75019593551f520126',
+--     'fence_id',
+--     '{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}',
+--     '{"type":"Polygon","coordinates":[[[113.1,34.1],[113.3,34.1],[113.3,34.3],[113.1,34.3],[113.1,34.1]]]}'
 -- );
 

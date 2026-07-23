@@ -103,34 +103,50 @@ SELECT * FROM gis_check_electric_fence(
 -- 刷新三维网格的电子围栏标记
 -- ========================================================================================
 -- 函数名：gis_refresh_electric_fence
--- 功能描述：刷新三维网格的电子围栏标记。先清空已标记的zone_type，再重新标记。
+-- 功能描述：刷新三维网格的电子围栏标记。全量刷新时先清空电子围栏标记，再重新打标。
 -- 参数：p_project_id - 项目ID（必填）
--- 参数：p_refresh_json - 刷新动作JSON（可选），包含 fence_id/action/fence_type/geojson/old_geojson
+-- 参数：p_refresh_json - 刷新动作JSON（可选），包含 fence_id/action/geojson/old_geojson
 -- 返回值：标准TABLE结构
 --   code        integer     返回码：200成功，400参数错误，500执行异常
 --   table_name  text        操作的网格表名
 --   msg         text        结果描述
 --   count       bigint      更新记录数
--- 适用场景：电子围栏数据修改后，快速刷新网格区域标记
+-- 适用场景：电子围栏数据修改后，刷新网格区域标记。
+-- 对接建议：增删改优先调用 gis_refresh_electric_fence_add/delete/edit 拆参函数。
 -- ========================================================================================
 SELECT * FROM gis_refresh_electric_fence('2c95908e958f3b75019593551f520126');
 
--- 新增围栏：用geojson确定刷新范围
+-- 显式全量刷新：第二个参数传 NULL::jsonb。
 SELECT * FROM gis_refresh_electric_fence(
     '2c95908e958f3b75019593551f520126',
-    '{"fence_id":"围栏ID","action":"add","fence_type":"1","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+    NULL::jsonb
 );
 
--- 编辑围栏：用新geojson和old_geojson共同确定刷新范围；old_geojson不传时按围栏ID查询
+-- 第二个参数示例：只传 fence_id，按围栏ID查询旧 geom 并局部刷新。
 SELECT * FROM gis_refresh_electric_fence(
     '2c95908e958f3b75019593551f520126',
-    '{"fence_id":"围栏ID","action":"edit","fence_type":"2","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.3,34.1],[113.3,34.3],[113.1,34.3],[113.1,34.1]]]},"old_geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+    '{"fence_id":"fence_id"}'::jsonb
 );
 
--- 删除围栏：优先用geojson确定旧范围；geojson不传时按围栏ID查询
-SELECT * FROM gis_refresh_electric_fence(
+-- 新增围栏局部刷新：项目ID + 围栏ID + 新围栏GeoJSON文本。
+SELECT * FROM gis_refresh_electric_fence_add(
     '2c95908e958f3b75019593551f520126',
-    '{"fence_id":"围栏ID","action":"delete","fence_type":"3","geojson":{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}}'::jsonb
+    'fence_id',
+    '{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}'
+);
+
+-- 删除围栏局部刷新：项目ID + 围栏ID。
+SELECT * FROM gis_refresh_electric_fence_delete(
+    '2c95908e958f3b75019593551f520126',
+    'fence_id'
+);
+
+-- 编辑围栏局部刷新：项目ID + 围栏ID + 旧围栏GeoJSON文本 + 新围栏GeoJSON文本。
+SELECT * FROM gis_refresh_electric_fence_edit(
+    '2c95908e958f3b75019593551f520126',
+    'fence_id',
+    '{"type":"Polygon","coordinates":[[[113.1,34.1],[113.2,34.1],[113.2,34.2],[113.1,34.2],[113.1,34.1]]]}',
+    '{"type":"Polygon","coordinates":[[[113.1,34.1],[113.3,34.1],[113.3,34.3],[113.1,34.3],[113.1,34.1]]]}'
 );
 
 -- ========================================================================================

@@ -245,6 +245,35 @@ ORDER BY c.relname;
 
 
 -- =============================================================================
+-- 6. 项目电子围栏 MultiSurface 几何修复
+-- =============================================================================
+-- 功能说明：
+--   部分导入或编辑后的电子围栏 geom 可能是 ST_MultiSurface。
+--   某些 PostGIS 函数、GeoServer 渲染、空间分析或前端 GeoJSON 输出更适合使用 Polygon/MultiPolygon。
+--   本节用于先检查 MultiSurface 数据，再把曲面几何转为线性 MultiPolygon 风格几何。
+--
+-- 处理逻辑：
+--   1. ST_GeometryType(geom) = 'ST_MultiSurface' 用于筛选异常或不兼容的曲面几何。
+--   2. ST_CurveToLine(geom) 把曲线/曲面边界线性化。
+--   3. ST_Multi(...) 保持结果为 MULTI 几何，便于与项目电子围栏表的多面结构兼容。
+--
+-- 注意事项：
+--   1. UPDATE 会修改 geom 字段，执行前建议先 SELECT 核对数据。
+--   2. 示例中表名包含项目 ID，使用前请替换为目标项目表。
+--   3. 如果表内有几何索引，更新后建议执行 ANALYZE，必要时重建空间索引。
+
+-- 查询指定项目电子围栏表中 MultiSurface 类型的围栏，查看 ID、类型和 WKT。
+SELECT id, ST_GeometryType(geom), ST_AsText(geom)
+FROM public.gis_electric_fence_2c95908e958f3b75019593551f520126
+WHERE ST_GeometryType(geom) = 'ST_MultiSurface';
+
+-- 将指定项目电子围栏表中的 MultiSurface 转为线性 MULTI 几何，避免后续空间计算或渲染兼容问题。
+UPDATE public.gis_electric_fence_2c95908e958f3b75019593551f520126
+SET geom = ST_Multi(ST_CurveToLine(geom))
+WHERE ST_GeometryType(geom) = 'ST_MultiSurface';
+
+
+-- =============================================================================
 -- 调用示例
 -- =============================================================================
 
