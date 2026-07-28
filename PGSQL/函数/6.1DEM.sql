@@ -391,14 +391,18 @@ AS $$
             ELSE
                 -- MultiPoint/MultiLineString/MultiPolygon 按原输入类型提取对应维度后返回。
                 ST_SetSRID(
-                    ST_CollectionExtract(
-                        ST_Collect(geom ORDER BY path),
-                        CASE
-                            WHEN ST_GeometryType((SELECT geom FROM input_geom)) = 'ST_MultiPoint' THEN 1
-                            WHEN ST_GeometryType((SELECT geom FROM input_geom)) = 'ST_MultiLineString' THEN 2
-                            WHEN ST_GeometryType((SELECT geom FROM input_geom)) = 'ST_MultiPolygon' THEN 3
-                            ELSE 0
-                        END
+                    (
+                        SELECT ST_CollectionExtract(
+                            ST_Collect(geom ORDER BY path),
+                            CASE
+                                WHEN ST_GeometryType((SELECT geom FROM input_geom)) = 'ST_MultiPoint' THEN 1
+                                WHEN ST_GeometryType((SELECT geom FROM input_geom)) = 'ST_MultiLineString' THEN 2
+                                WHEN ST_GeometryType((SELECT geom FROM input_geom)) = 'ST_MultiPolygon' THEN 3
+                                ELSE 0
+                            END
+                        )
+                        FROM z_parts
+                        WHERE geom IS NOT NULL
                     ),
                     (SELECT srid FROM input_geom)
                 )
