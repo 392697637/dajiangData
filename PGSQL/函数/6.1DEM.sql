@@ -879,3 +879,558 @@ COMMENT ON FUNCTION public.gis_dem_elevation_text(text) IS '解析WKT、EWKT或G
 -- 11.4 GeoJSON Feature：函数自动读取 geometry 节点，properties 不参与计算。
 -- SELECT result_wkt
 -- FROM public.gis_dem_elevation_text('{"type":"Feature","properties":{"name":"demo"},"geometry":{"type":"Polygon","coordinates":[[[113.60,34.70],[113.70,34.70],[113.70,34.80],[113.60,34.80],[113.60,34.70]]]}}');
+
+
+-- =============================================================================
+-- 重建函数前清理
+-- =============================================================================
+SELECT gis_drop_function('gis_dem_update_table_z0');
+
+-- =============================================================================
+-- 函数名称：gis_dem_update_table_z0
+-- 函数功能：按表名和几何列名批量补 DEM 高程；二维面或 Z 全为 0 的面会更新，已有非 0 Z 的数据保持不变。
+-- 入参说明：
+--   1. p_table_name  表名，支持 'bo_electric_fence' 或 'public.bo_electric_fence'。
+--   2. p_geom_column 几何列名，例如 'geom'。
+-- 返回说明：
+--   code=200 执行成功；updated_count 为实际更新行数；skipped_count 为未更新的非空几何行数。
+-- 使用示例：
+--   SELECT * FROM public.gis_dem_update_table_z0('public.bo_electric_fence', 'geom');
+-- 注意事项：
+--   1. 仅处理 Polygon/MultiPolygon。
+--   2. 二维 geometry 也会视为需要补高程。
+--   3. 三维 geometry 只有 ST_ZMin=0 且 ST_ZMax=0 时才会补 DEM，已有真实高程不会覆盖。
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.gis_dem_update_table_z0(
+    -- p_table_name：目标表名；可以传不带 schema 的表名，也可以传 schema.table。
+    p_table_name text,
+    -- p_geom_column：目标几何列名；默认处理 geom 字段。
+    p_geom_column text DEFAULT 'geom'
+)
+RETURNS TABLE (
+    -- code：执行状态码，200=成功，400=参数错误，500=执行异常。
+    code integer,
+    -- msg：中文执行说明，包含更新数量和耗时。
+    msg text,
+    -- table_name：实际解析后的目标表名。
+    table_name text,
+    -- geom_column：实际处理的几何列名。
+    geom_column text,
+    -- candidate_count：满足“需要补高程”条件的候选行数。
+    candidate_count bigint,
+    -- updated_count：本次 UPDATE 实际更新行数。
+    updated_count bigint,
+    -- skipped_count：非空几何中未更新的行数。
+    skipped_count bigint,
+    -- elapsed_seconds：函数执行耗时，单位秒。
+    elapsed_seconds numeric
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    -- v_start_time：记录函数开始时间，用于最终返回耗时。
+    v_start_time timestamp := clock_timestamp();
+    -- v_table_reg：把文本表名解析成 regclass，后续动态 SQL 使用该对象名。
+    v_table_reg regclass;
+    -- v_column_exists：标记目标几何列是否存在。
+    v_column_exists boolean;
+    -- v_candidate_count：记录需要补 DEM 的候选行数。
+    v_candidate_count bigint := 0;
+    -- v_updated_count：记录 UPDATE 实际影响行数。
+    v_updated_count bigint := 0;
+    -- v_total_nonnull_count：记录目标几何列非空总数，用于计算跳过数量。
+    v_total_nonnull_count bigint := 0;
+BEGIN
+    -- 1. 基础参数校验：表名和列名都不能为空。
+    --    trim 后为空字符串时直接返回 400，不继续执行动态 SQL。
+    IF NULLIF(trim(p_table_name), '') IS NULL THEN
+        RETURN QUERY SELECT
+            400,                                                                   -- code：参数错误。
+            '参数错误：表名不能为空'::text,                                         -- msg：错误原因。
+            p_table_name,                                                          -- table_name：回显入参表名。
+            p_geom_column,                                                         -- geom_column：回显入参列名。
+            0::bigint,                                                             -- candidate_count：未执行统计，返回 0。
+            0::bigint,                                                             -- updated_count：未执行更新，返回 0。
+            0::bigint,                                                             -- skipped_count：未执行统计，返回 0。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3); -- elapsed_seconds：当前耗时。
+        RETURN;
+    END IF;
+
+    --    几何列名为空时也直接返回 400。
+    IF NULLIF(trim(p_geom_column), '') IS NULL THEN
+        RETURN QUERY SELECT
+            400,                                                                   -- code：参数错误。
+            '参数错误：几何列名不能为空'::text,                                     -- msg：错误原因。
+            p_table_name,                                                          -- table_name：回显入参表名。
+            p_geom_column,                                                         -- geom_column：回显入参列名。
+            0::bigint,                                                             -- candidate_count：未执行统计，返回 0。
+            0::bigint,                                                             -- updated_count：未执行更新，返回 0。
+            0::bigint,                                                             -- skipped_count：未执行统计，返回 0。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3); -- elapsed_seconds：当前耗时。
+        RETURN;
+    END IF;
+
+    -- 2. 将传入表名解析为 regclass，避免动态 SQL 直接拼接不存在的表。
+    --    p_table_name 支持 'bo_electric_fence' 和 'public.bo_electric_fence' 两种写法。
+    --    如果不带 schema，会按当前 search_path 解析。
+    v_table_reg := to_regclass(p_table_name);
+    IF v_table_reg IS NULL THEN
+        RETURN QUERY SELECT
+            400,                                                                   -- code：参数错误。
+            format('参数错误：表不存在：%s', p_table_name),                         -- msg：提示表不存在。
+            p_table_name,                                                          -- table_name：回显入参表名。
+            p_geom_column,                                                         -- geom_column：回显入参列名。
+            0::bigint,                                                             -- candidate_count：未执行统计，返回 0。
+            0::bigint,                                                             -- updated_count：未执行更新，返回 0。
+            0::bigint,                                                             -- skipped_count：未执行统计，返回 0。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3); -- elapsed_seconds：当前耗时。
+        RETURN;
+    END IF;
+
+    -- 3. 校验几何列是否真实存在，避免列名写错时进入 UPDATE。
+    --    pg_attribute.attrelid 使用 regclass 精确定位目标表。
+    --    NOT attisdropped 排除已经删除但仍残留在系统目录中的列。
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_attribute
+        WHERE attrelid = v_table_reg
+          AND attname = p_geom_column
+          AND NOT attisdropped
+    )
+    INTO v_column_exists;
+
+    IF NOT v_column_exists THEN
+        RETURN QUERY SELECT
+            400,                                                                   -- code：参数错误。
+            format('参数错误：几何列不存在：%s.%s', v_table_reg::text, p_geom_column), -- msg：提示列不存在。
+            v_table_reg::text,                                                     -- table_name：解析后的真实表名。
+            p_geom_column,                                                         -- geom_column：回显入参列名。
+            0::bigint,                                                             -- candidate_count：未执行统计，返回 0。
+            0::bigint,                                                             -- updated_count：未执行更新，返回 0。
+            0::bigint,                                                             -- skipped_count：未执行统计，返回 0。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3); -- elapsed_seconds：当前耗时。
+        RETURN;
+    END IF;
+
+    -- 4. 统计非空几何总数，用于返回 skipped_count。
+    --    %s 接收 regclass，输出已安全解析的表名；%I 接收列名，按标识符安全转义。
+    EXECUTE format(
+        'SELECT count(*) FROM %s WHERE %I IS NOT NULL',
+        v_table_reg,     -- %s：目标表。
+        p_geom_column    -- %I：目标几何列。
+    )
+    INTO v_total_nonnull_count;
+
+    -- 5. 统计候选数据：
+    --    - 只处理 Polygon/MultiPolygon；
+    --    - 二维几何 ST_NDims < 3，需要补高程；
+    --    - 三维几何只有 Z 最小值和最大值都为 0 时才补高程；
+    --    - 已有非 0 Z 值的数据不会进入候选集。
+    --    注意：ST_ZMin/ST_ZMax 对二维几何可能返回 NULL，所以二维几何单独用 ST_NDims < 3 判断。
+    EXECUTE format(
+        $sql$
+        SELECT count(*)
+        FROM %s
+        WHERE %I IS NOT NULL                                             -- 几何为空无法补高程，跳过。
+          AND ST_GeometryType(%I) IN ('ST_Polygon', 'ST_MultiPolygon')   -- 只处理面/多面。
+          AND (
+              ST_NDims(%I) < 3                                           -- 二维几何需要补 DEM Z。
+              OR (
+                  COALESCE(ST_ZMin(%I), 0) = 0                           -- 三维几何最小 Z 为 0。
+                  AND COALESCE(ST_ZMax(%I), 0) = 0                       -- 三维几何最大 Z 为 0，说明整条几何 Z 全为 0。
+              )
+          )
+        $sql$,
+        v_table_reg,     -- %s：目标表。
+        p_geom_column,   -- 第 1 个 %I：IS NOT NULL 的几何列。
+        p_geom_column,   -- 第 2 个 %I：ST_GeometryType 的几何列。
+        p_geom_column,   -- 第 3 个 %I：ST_NDims 的几何列。
+        p_geom_column,   -- 第 4 个 %I：ST_ZMin 的几何列。
+        p_geom_column    -- 第 5 个 %I：ST_ZMax 的几何列。
+    )
+    INTO v_candidate_count;
+
+    -- 6. 对候选数据执行 DEM 补高，并写回原几何列。
+    --    public.gis_dem_elevation_polygon 会返回 PolygonZ/MultiPolygonZ。
+    --    WHERE 条件与上面的候选统计保持一致，保证 candidate_count 与 updated_count 口径一致。
+    EXECUTE format(
+        $sql$
+        UPDATE %s
+        SET %I = public.gis_dem_elevation_polygon(%I)                    -- 用 DEM 高程重建 PolygonZ/MultiPolygonZ 并写回原列。
+        WHERE %I IS NOT NULL                                             -- 几何为空无法补高程，跳过。
+          AND ST_GeometryType(%I) IN ('ST_Polygon', 'ST_MultiPolygon')   -- 只处理面/多面。
+          AND (
+              ST_NDims(%I) < 3                                           -- 二维几何需要补 DEM Z。
+              OR (
+                  COALESCE(ST_ZMin(%I), 0) = 0                           -- 三维几何最小 Z 为 0。
+                  AND COALESCE(ST_ZMax(%I), 0) = 0                       -- 三维几何最大 Z 为 0，说明整条几何 Z 全为 0。
+              )
+          )
+        $sql$,
+        v_table_reg,     -- %s：目标表。
+        p_geom_column,   -- 第 1 个 %I：SET 的目标几何列。
+        p_geom_column,   -- 第 2 个 %I：传入 gis_dem_elevation_polygon 的几何列。
+        p_geom_column,   -- 第 3 个 %I：IS NOT NULL 的几何列。
+        p_geom_column,   -- 第 4 个 %I：ST_GeometryType 的几何列。
+        p_geom_column,   -- 第 5 个 %I：ST_NDims 的几何列。
+        p_geom_column,   -- 第 6 个 %I：ST_ZMin 的几何列。
+        p_geom_column    -- 第 7 个 %I：ST_ZMax 的几何列。
+    );
+
+    -- 7. 获取 UPDATE 实际影响行数。
+    --    ROW_COUNT 是上一条 UPDATE 影响的记录数。
+    GET DIAGNOSTICS v_updated_count = ROW_COUNT;
+
+    -- 8. 返回执行结果，方便接口或 SQL 控制台直接查看更新数量和耗时。
+    RETURN QUERY SELECT
+        200,                                                                       -- code：成功。
+        format('DEM补高完成，候选 %s 条，更新 %s 条，跳过 %s 条，执行时间 %s 秒',
+            v_candidate_count,                                                     -- 候选行数。
+            v_updated_count,                                                       -- 更新行数。
+            GREATEST(v_total_nonnull_count - v_updated_count, 0),                  -- 跳过行数，避免出现负数。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3) -- 执行耗时。
+        )::text,                                                                   -- msg：执行摘要。
+        v_table_reg::text,                                                         -- table_name：解析后的真实表名。
+        p_geom_column,                                                             -- geom_column：处理的几何列名。
+        v_candidate_count,                                                         -- candidate_count：候选行数。
+        v_updated_count,                                                           -- updated_count：更新行数。
+        GREATEST(v_total_nonnull_count - v_updated_count, 0),                      -- skipped_count：跳过行数。
+        ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3);    -- elapsed_seconds：总耗时。
+
+EXCEPTION WHEN OTHERS THEN
+    -- 9. 捕获异常并以结果集返回，避免批处理调用时只有报错没有上下文。
+    --    这里不重新抛异常，便于接口统一按 code/msg 处理。
+    RETURN QUERY SELECT
+        500,                                                                       -- code：执行异常。
+        format('DEM补高失败：%s，执行时间 %s 秒',
+            SQLERRM,                                                               -- PostgreSQL 返回的异常信息。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3) -- 失败前耗时。
+        )::text,                                                                   -- msg：失败摘要。
+        COALESCE(v_table_reg::text, p_table_name),                                 -- table_name：优先返回已解析表名，否则回显入参。
+        p_geom_column,                                                             -- geom_column：回显处理列名。
+        v_candidate_count,                                                         -- candidate_count：异常前已统计到的候选行数。
+        v_updated_count,                                                           -- updated_count：异常前已更新行数，通常为 0。
+        0::bigint,                                                                 -- skipped_count：异常时不再计算跳过行数。
+        ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3);    -- elapsed_seconds：失败前耗时。
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_dem_update_table_z0(text, text) IS '按表名和几何列名批量补DEM高程：二维面或Z全为0的面会更新，已有非0 Z保持不变';
+
+
+-- =============================================================================
+-- 重建函数前清理
+-- =============================================================================
+SELECT gis_drop_function('gis_dem_reset_table_z0');
+
+-- =============================================================================
+-- 函数名称：gis_dem_reset_table_z0
+-- 函数功能：按表名和几何列名批量清空高程，把面/多面的 Z 值统一重置为 0。
+-- 入参说明：
+--   1. p_table_name  表名，支持 'bo_electric_fence' 或 'public.bo_electric_fence'。
+--   2. p_geom_column 几何列名，例如 'geom'。
+-- 返回说明：
+--   code=200 执行成功；updated_count 为实际更新行数；skipped_count 为未更新的非空几何行数。
+-- 使用示例：
+--   SELECT * FROM public.gis_dem_reset_table_z0('public.bo_electric_fence', 'geom');
+-- 注意事项：
+--   1. 仅处理 Polygon/MultiPolygon。
+--   2. 二维面会被转换为 Z=0 的 PolygonZ/MultiPolygonZ。
+--   3. 三维面只要存在非 0 Z 值，就会被重置为 Z=0。
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.gis_dem_reset_table_z0(
+    -- p_table_name：目标表名；可以传不带 schema 的表名，也可以传 schema.table。
+    p_table_name text,
+    -- p_geom_column：目标几何列名；默认处理 geom 字段。
+    p_geom_column text DEFAULT 'geom'
+)
+RETURNS TABLE (
+    -- code：执行状态码，200=成功，400=参数错误，500=执行异常。
+    code integer,
+    -- msg：中文执行说明，包含更新数量和耗时。
+    msg text,
+    -- table_name：实际解析后的目标表名。
+    table_name text,
+    -- geom_column：实际处理的几何列名。
+    geom_column text,
+    -- candidate_count：满足“需要重置 Z 为 0”条件的候选行数。
+    candidate_count bigint,
+    -- updated_count：本次 UPDATE 实际更新行数。
+    updated_count bigint,
+    -- skipped_count：非空几何中未更新的行数。
+    skipped_count bigint,
+    -- elapsed_seconds：函数执行耗时，单位秒。
+    elapsed_seconds numeric
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    -- v_start_time：记录函数开始时间，用于最终返回耗时。
+    v_start_time timestamp := clock_timestamp();
+    -- v_table_reg：把文本表名解析成 regclass，后续动态 SQL 使用该对象名。
+    v_table_reg regclass;
+    -- v_column_exists：标记目标几何列是否存在。
+    v_column_exists boolean;
+    -- v_candidate_count：记录需要重置 Z 的候选行数。
+    v_candidate_count bigint := 0;
+    -- v_updated_count：记录 UPDATE 实际影响行数。
+    v_updated_count bigint := 0;
+    -- v_total_nonnull_count：记录目标几何列非空总数，用于计算跳过数量。
+    v_total_nonnull_count bigint := 0;
+BEGIN
+    -- 1. 基础参数校验：表名和列名都不能为空。
+    --    trim 后为空字符串时直接返回 400，不继续执行动态 SQL。
+    IF NULLIF(trim(p_table_name), '') IS NULL THEN
+        RETURN QUERY SELECT
+            400,                                                                   -- code：参数错误。
+            '参数错误：表名不能为空'::text,                                         -- msg：错误原因。
+            p_table_name,                                                          -- table_name：回显入参表名。
+            p_geom_column,                                                         -- geom_column：回显入参列名。
+            0::bigint,                                                             -- candidate_count：未执行统计，返回 0。
+            0::bigint,                                                             -- updated_count：未执行更新，返回 0。
+            0::bigint,                                                             -- skipped_count：未执行统计，返回 0。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3); -- elapsed_seconds：当前耗时。
+        RETURN;
+    END IF;
+
+    --    几何列名为空时也直接返回 400。
+    IF NULLIF(trim(p_geom_column), '') IS NULL THEN
+        RETURN QUERY SELECT
+            400,                                                                   -- code：参数错误。
+            '参数错误：几何列名不能为空'::text,                                     -- msg：错误原因。
+            p_table_name,                                                          -- table_name：回显入参表名。
+            p_geom_column,                                                         -- geom_column：回显入参列名。
+            0::bigint,                                                             -- candidate_count：未执行统计，返回 0。
+            0::bigint,                                                             -- updated_count：未执行更新，返回 0。
+            0::bigint,                                                             -- skipped_count：未执行统计，返回 0。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3); -- elapsed_seconds：当前耗时。
+        RETURN;
+    END IF;
+
+    -- 2. 将传入表名解析为 regclass，避免动态 SQL 直接拼接不存在的表。
+    --    p_table_name 支持 'bo_electric_fence' 和 'public.bo_electric_fence' 两种写法。
+    --    如果不带 schema，会按当前 search_path 解析。
+    v_table_reg := to_regclass(p_table_name);
+    IF v_table_reg IS NULL THEN
+        RETURN QUERY SELECT
+            400,                                                                   -- code：参数错误。
+            format('参数错误：表不存在：%s', p_table_name),                         -- msg：提示表不存在。
+            p_table_name,                                                          -- table_name：回显入参表名。
+            p_geom_column,                                                         -- geom_column：回显入参列名。
+            0::bigint,                                                             -- candidate_count：未执行统计，返回 0。
+            0::bigint,                                                             -- updated_count：未执行更新，返回 0。
+            0::bigint,                                                             -- skipped_count：未执行统计，返回 0。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3); -- elapsed_seconds：当前耗时。
+        RETURN;
+    END IF;
+
+    -- 3. 校验几何列是否真实存在，避免列名写错时进入 UPDATE。
+    --    pg_attribute.attrelid 使用 regclass 精确定位目标表。
+    --    NOT attisdropped 排除已经删除但仍残留在系统目录中的列。
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_attribute
+        WHERE attrelid = v_table_reg
+          AND attname = p_geom_column
+          AND NOT attisdropped
+    )
+    INTO v_column_exists;
+
+    IF NOT v_column_exists THEN
+        RETURN QUERY SELECT
+            400,                                                                   -- code：参数错误。
+            format('参数错误：几何列不存在：%s.%s', v_table_reg::text, p_geom_column), -- msg：提示列不存在。
+            v_table_reg::text,                                                     -- table_name：解析后的真实表名。
+            p_geom_column,                                                         -- geom_column：回显入参列名。
+            0::bigint,                                                             -- candidate_count：未执行统计，返回 0。
+            0::bigint,                                                             -- updated_count：未执行更新，返回 0。
+            0::bigint,                                                             -- skipped_count：未执行统计，返回 0。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3); -- elapsed_seconds：当前耗时。
+        RETURN;
+    END IF;
+
+    -- 4. 统计非空几何总数，用于返回 skipped_count。
+    --    %s 接收 regclass，输出已安全解析的表名；%I 接收列名，按标识符安全转义。
+    EXECUTE format(
+        'SELECT count(*) FROM %s WHERE %I IS NOT NULL',
+        v_table_reg,     -- %s：目标表。
+        p_geom_column    -- %I：目标几何列。
+    )
+    INTO v_total_nonnull_count;
+
+    -- 5. 统计候选数据：
+    --    - 只处理 Polygon/MultiPolygon；
+    --    - 二维面需要转换为 Z=0 的三维面；
+    --    - 三维面只要 Z 最小值或最大值不是 0，就需要重置；
+    --    - 已经是 Z 全为 0 的三维面不会进入候选集。
+    EXECUTE format(
+        $sql$
+        SELECT count(*)
+        FROM %s
+        WHERE %I IS NOT NULL                                             -- 几何为空无需处理，跳过。
+          AND ST_GeometryType(%I) IN ('ST_Polygon', 'ST_MultiPolygon')   -- 只处理面/多面。
+          AND (
+              ST_NDims(%I) < 3                                           -- 二维几何需要转换为 Z=0。
+              OR COALESCE(ST_ZMin(%I), 0) <> 0                           -- 三维几何最小 Z 不是 0，需要重置。
+              OR COALESCE(ST_ZMax(%I), 0) <> 0                           -- 三维几何最大 Z 不是 0，需要重置。
+          )
+        $sql$,
+        v_table_reg,     -- %s：目标表。
+        p_geom_column,   -- 第 1 个 %I：IS NOT NULL 的几何列。
+        p_geom_column,   -- 第 2 个 %I：ST_GeometryType 的几何列。
+        p_geom_column,   -- 第 3 个 %I：ST_NDims 的几何列。
+        p_geom_column,   -- 第 4 个 %I：ST_ZMin 的几何列。
+        p_geom_column    -- 第 5 个 %I：ST_ZMax 的几何列。
+    )
+    INTO v_candidate_count;
+
+    -- 6. 对候选数据执行 Z 重置，并写回原几何列。
+    --    ST_Force2D 先去掉原始 Z，ST_Force3DZ(..., 0) 再统一补回 Z=0。
+    --    WHERE 条件与上面的候选统计保持一致，保证 candidate_count 与 updated_count 口径一致。
+    EXECUTE format(
+        $sql$
+        UPDATE %s
+        SET %I = ST_Force3DZ(ST_Force2D(%I), 0)                           -- 去掉原高程，再统一改为 Z=0。
+        WHERE %I IS NOT NULL                                             -- 几何为空无需处理，跳过。
+          AND ST_GeometryType(%I) IN ('ST_Polygon', 'ST_MultiPolygon')   -- 只处理面/多面。
+          AND (
+              ST_NDims(%I) < 3                                           -- 二维几何需要转换为 Z=0。
+              OR COALESCE(ST_ZMin(%I), 0) <> 0                           -- 三维几何最小 Z 不是 0，需要重置。
+              OR COALESCE(ST_ZMax(%I), 0) <> 0                           -- 三维几何最大 Z 不是 0，需要重置。
+          )
+        $sql$,
+        v_table_reg,     -- %s：目标表。
+        p_geom_column,   -- 第 1 个 %I：SET 的目标几何列。
+        p_geom_column,   -- 第 2 个 %I：传入 ST_Force2D 的几何列。
+        p_geom_column,   -- 第 3 个 %I：IS NOT NULL 的几何列。
+        p_geom_column,   -- 第 4 个 %I：ST_GeometryType 的几何列。
+        p_geom_column,   -- 第 5 个 %I：ST_NDims 的几何列。
+        p_geom_column,   -- 第 6 个 %I：ST_ZMin 的几何列。
+        p_geom_column    -- 第 7 个 %I：ST_ZMax 的几何列。
+    );
+
+    -- 7. 获取 UPDATE 实际影响行数。
+    --    ROW_COUNT 是上一条 UPDATE 影响的记录数。
+    GET DIAGNOSTICS v_updated_count = ROW_COUNT;
+
+    -- 8. 返回执行结果，方便接口或 SQL 控制台直接查看更新数量和耗时。
+    RETURN QUERY SELECT
+        200,                                                                       -- code：成功。
+        format('DEM高程清零完成，候选 %s 条，更新 %s 条，跳过 %s 条，执行时间 %s 秒',
+            v_candidate_count,                                                     -- 候选行数。
+            v_updated_count,                                                       -- 更新行数。
+            GREATEST(v_total_nonnull_count - v_updated_count, 0),                  -- 跳过行数，避免出现负数。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3) -- 执行耗时。
+        )::text,                                                                   -- msg：执行摘要。
+        v_table_reg::text,                                                         -- table_name：解析后的真实表名。
+        p_geom_column,                                                             -- geom_column：处理的几何列名。
+        v_candidate_count,                                                         -- candidate_count：候选行数。
+        v_updated_count,                                                           -- updated_count：更新行数。
+        GREATEST(v_total_nonnull_count - v_updated_count, 0),                      -- skipped_count：跳过行数。
+        ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3);    -- elapsed_seconds：总耗时。
+
+EXCEPTION WHEN OTHERS THEN
+    -- 9. 捕获异常并以结果集返回，避免批处理调用时只有报错没有上下文。
+    --    这里不重新抛异常，便于接口统一按 code/msg 处理。
+    RETURN QUERY SELECT
+        500,                                                                       -- code：执行异常。
+        format('DEM高程清零失败：%s，执行时间 %s 秒',
+            SQLERRM,                                                               -- PostgreSQL 返回的异常信息。
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3) -- 失败前耗时。
+        )::text,                                                                   -- msg：失败摘要。
+        COALESCE(v_table_reg::text, p_table_name),                                 -- table_name：优先返回已解析表名，否则回显入参。
+        p_geom_column,                                                             -- geom_column：回显处理列名。
+        v_candidate_count,                                                         -- candidate_count：异常前已统计到的候选行数。
+        v_updated_count,                                                           -- updated_count：异常前已更新行数，通常为 0。
+        0::bigint,                                                                 -- skipped_count：异常时不再计算跳过行数。
+        ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3);    -- elapsed_seconds：失败前耗时。
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_dem_reset_table_z0(text, text) IS '按表名和几何列名批量清空DEM高程：面/多面的Z值统一重置为0';
+
+
+-- =============================================================================
+-- 调用示例：批量更新表中 Z 为 0 的面/多面 DEM 高程
+-- 说明：
+--   1. 以下示例会直接 UPDATE 目标表，请先在测试库或事务中确认候选数量。
+--   2. 二维面或 Z 全为 0 的 Polygon/MultiPolygon 会被更新为 DEM 高程。
+--   3. 已有非 0 Z 值的数据不会被覆盖。
+-- =============================================================================
+
+-- 12.1 先统计 bo_electric_fence.geom 中需要补 DEM 的候选数据
+-- SELECT count(*) AS need_update_count
+-- FROM public.bo_electric_fence
+-- WHERE geom IS NOT NULL
+--   AND ST_GeometryType(geom) IN ('ST_Polygon', 'ST_MultiPolygon')
+--   AND (
+--       ST_NDims(geom) < 3
+--       OR (
+--           COALESCE(ST_ZMin(geom), 0) = 0
+--           AND COALESCE(ST_ZMax(geom), 0) = 0
+--       )
+--   );
+
+-- 12.2 批量补 DEM 高程：表名支持 schema.table，列名按实际几何列传入
+-- SELECT *
+-- FROM public.gis_dem_update_table_z0('public.bo_electric_fence', 'geom');
+
+-- 12.3 在事务中试跑，确认返回结果后再 COMMIT
+-- BEGIN;
+-- SELECT *
+-- FROM public.gis_dem_update_table_z0('public.bo_electric_fence', 'geom');
+-- -- 检查更新后的 Z 值范围
+-- SELECT
+--     id,
+--     ST_NDims(geom) AS dims,
+--     ST_ZMin(geom) AS z_min,
+--     ST_ZMax(geom) AS z_max
+-- FROM public.bo_electric_fence
+-- WHERE geom IS NOT NULL
+-- ORDER BY create_time DESC
+-- LIMIT 20;
+-- COMMIT;
+-- -- 如检查结果不符合预期，可在 COMMIT 前执行：ROLLBACK;
+
+
+-- =============================================================================
+-- 调用示例：批量清空表中面/多面的 DEM 高程
+-- 说明：
+--   1. 以下示例会直接 UPDATE 目标表，请先在测试库或事务中确认候选数量。
+--   2. 二维 Polygon/MultiPolygon 会被转换为 Z=0 的三维几何。
+--   3. 已有非 0 Z 值的 Polygon/MultiPolygon 会被重置为 Z=0。
+-- =============================================================================
+
+-- 13.1 先统计 bo_electric_fence.geom 中需要清空高程的候选数据
+-- SELECT count(*) AS need_reset_count
+-- FROM public.bo_electric_fence
+-- WHERE geom IS NOT NULL
+--   AND ST_GeometryType(geom) IN ('ST_Polygon', 'ST_MultiPolygon')
+--   AND (
+--       ST_NDims(geom) < 3
+--       OR COALESCE(ST_ZMin(geom), 0) <> 0
+--       OR COALESCE(ST_ZMax(geom), 0) <> 0
+--   );
+
+-- 13.2 批量清空 DEM 高程：表名支持 schema.table，列名按实际几何列传入
+-- SELECT *
+-- FROM public.gis_dem_reset_table_z0('public.bo_electric_fence', 'geom');
+
+-- 13.3 在事务中试跑，确认返回结果后再 COMMIT
+-- BEGIN;
+-- SELECT *
+-- FROM public.gis_dem_reset_table_z0('public.bo_electric_fence', 'geom');
+-- -- 检查清空后的 Z 值范围
+-- SELECT
+--     id,
+--     ST_NDims(geom) AS dims,
+--     ST_ZMin(geom) AS z_min,
+--     ST_ZMax(geom) AS z_max
+-- FROM public.bo_electric_fence
+-- WHERE geom IS NOT NULL
+-- ORDER BY create_time DESC
+-- LIMIT 20;
+-- COMMIT;
+-- -- 如检查结果不符合预期，可在 COMMIT 前执行：ROLLBACK;
