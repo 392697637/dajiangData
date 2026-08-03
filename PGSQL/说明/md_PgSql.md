@@ -72,6 +72,8 @@
 
 点位/航线校验命中围栏时返回 `electric_id`、`fence_type`、`electric_name`、`electric_geom`、`electric_geojson`。
 
+点位/航线非缓冲检测仅校验启用围栏：`status='1'`、`del_flag=false`、`use_enabled=true`。
+
 缓冲区检测函数统一在 `msg` 中追加 `chek_type` 编码和中文含义；围栏字段统一返回为：`electric_id`、`fence_type`、`electric_name`、`electric_geom`、`electric_geojson`、`electric_buffer_geom`、`electric_buffer_geojson`、`electric_solid_geom`、`electric_solid_geojson`。
 
 `gis_electric_fence_buffer` 是缓冲生成函数，返回 `electric_id`、`fence_type`、`electric_geom`、`electric_geojson`、`electric_buffer_geom`、`electric_buffer_geojson`、`electric_solid_geom`、`electric_solid_geojson`。

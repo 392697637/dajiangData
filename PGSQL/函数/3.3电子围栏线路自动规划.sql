@@ -166,6 +166,7 @@ BEGIN
               AND f.fence_type IN ('1', '2')
               AND f.status = '1'
               AND f.del_flag = false
+              AND f.use_enabled = true
               AND (COALESCE(p_project_id, '') = '' OR f.project_id::text = p_project_id::text)
               AND (
                   COALESCE(f.height, 0) = 0
@@ -262,6 +263,7 @@ BEGIN
               AND f.fence_type IN ('1', '2')
               AND f.status = '1'
               AND f.del_flag = false
+              AND f.use_enabled = true
               AND (COALESCE(p_project_id, '') = '' OR f.project_id::text = p_project_id::text)
               AND (
                   COALESCE(f.height, 0) = 0

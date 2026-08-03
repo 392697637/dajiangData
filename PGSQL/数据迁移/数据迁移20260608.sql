@@ -97,6 +97,9 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 ALTER TABLE bo_electric_fence ADD COLUMN time_plan varchar(4000) DEFAULT 'default';
 COMMENT ON COLUMN bo_electric_fence.time_plan IS '时间计划';--  给字段加注释
 
+ALTER TABLE bo_electric_fence ADD COLUMN IF NOT EXISTS use_enabled boolean NOT NULL DEFAULT true;
+COMMENT ON COLUMN bo_electric_fence.use_enabled IS '是否启用';
+
 
 --  把 bo_time_plan 数据拼成 JSON 自动更新到 time_plan 字段
 UPDATE bo_electric_fence f

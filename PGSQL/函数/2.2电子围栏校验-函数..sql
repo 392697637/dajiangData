@@ -692,6 +692,7 @@ BEGIN
                         WHERE f.fence_type IN (''1'',''2'')
                           AND f.status = ''1''
                           AND f.del_flag = false
+                          AND f.use_enabled = true
                           AND f.project_id::text = btrim($2)
                           AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
                           AND (
@@ -747,6 +748,7 @@ BEGIN
                     WHERE f.fence_type IN (''1'',''2'')
                       AND f.status = ''1''
                       AND f.del_flag = false
+                      AND f.use_enabled = true
                       AND f.project_id::text = btrim($2)
                       AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
                       AND (
@@ -808,6 +810,7 @@ BEGIN
             WHERE f.fence_type IN ('1','2') -- 围栏类型：禁飞区/管控区
               AND f.status = '1'            -- 状态：启用
               AND f.del_flag = false        -- 未删
+              AND f.use_enabled = true       -- 使用状态：启用
               AND ST_Intersects(ST_SetSRID(f.geom, 4326), ip.geom)
               AND (
                   NOT p_is_3d
@@ -1103,6 +1106,7 @@ BEGIN
                         WHERE f.fence_type IN (''1'',''2'')
                           AND f.del_flag = false
                           AND f.status = ''1''
+                          AND f.use_enabled = true
                           AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom))
                           AND (
                               NOT $3
@@ -1178,6 +1182,7 @@ BEGIN
                     WHERE f.fence_type IN (''1'',''2'')
                       AND f.del_flag = false
                       AND f.status = ''1''
+                      AND f.use_enabled = true
                       AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom))
                       AND (
                           NOT $3
@@ -1250,6 +1255,7 @@ BEGIN
                 WHERE f.fence_type IN (''1'',''2'')
                   AND f.del_flag = false
                   AND f.status = ''1''
+                  AND f.use_enabled = true
                   AND ST_Intersects(ST_SetSRID(f.geom, 4326), ST_Force2D(il.geom))
                   AND (
                       NOT $3
@@ -1432,7 +1438,8 @@ BEGIN
     FROM bo_electric_fence f
     WHERE f.id = p_fence_id  -- 按围栏ID匹配
       AND f.del_flag = false  -- 只查询未删除的数据
-      AND f.status = '1';     -- 只查询启用状态的数据
+      AND f.status = '1'      -- 只查询启用状态的数据
+      AND f.use_enabled = true; -- 只查询使用启用的数据
 
     -- ==============================================
     -- 3. 校验：未查询到有效围栏数据
@@ -1598,6 +1605,7 @@ BEGIN
                     FROM bo_electric_fence f
                     WHERE f.del_flag = false
                       AND f.status = ''1''
+                      AND f.use_enabled = true
                       AND f.geom IS NOT NULL
                       AND ($1 IS NULL OR btrim($1) = '''' OR f.id::varchar = btrim($1))
                       AND ($2 IS NULL OR btrim($2) = '''' OR f.project_id::text = btrim($2))
@@ -1644,6 +1652,7 @@ BEGIN
                     FROM bo_electric_fence f
                     WHERE f.del_flag = false
                       AND f.status = ''1''
+                      AND f.use_enabled = true
                       AND f.geom IS NOT NULL
                       AND ($1 IS NULL OR btrim($1) = '''' OR f.id::varchar = btrim($1))
                       AND ($2 IS NULL OR btrim($2) = '''' OR f.project_id::text = btrim($2))
@@ -1689,6 +1698,7 @@ BEGIN
                     FROM bo_electric_fence f
                     WHERE f.del_flag = false
                       AND f.status = ''1''
+                      AND f.use_enabled = true
                       AND f.geom IS NOT NULL
                   AND ($1 IS NULL OR btrim($1) = '''' OR f.id::varchar = btrim($1))
             )
@@ -1917,6 +1927,7 @@ BEGIN
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
                   AND f.status = ''1''
+                  AND f.use_enabled = true
                   AND f.geom IS NOT NULL
                   AND ($3 IS NULL OR btrim($3) = '''' OR f.project_id::text = btrim($3))
             )
@@ -1966,6 +1977,7 @@ BEGIN
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
                   AND f.status = ''1''
+                  AND f.use_enabled = true
                   AND f.geom IS NOT NULL
                   AND ($3 IS NULL OR btrim($3) = '''' OR f.project_id::text = btrim($3))
             )
@@ -2221,6 +2233,7 @@ BEGIN
     WHERE
         f.del_flag = false  -- 仅有效围栏
         AND f.status = '1'  -- 仅启用围栏
+        AND f.use_enabled = true -- 仅使用启用围栏
         AND (
             (COALESCE(f.height, 0) = 0 AND ST_Intersects(ST_Force2D(v_line), buf_data.buf))
             OR
@@ -2373,6 +2386,7 @@ BEGIN
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
                   AND f.status = ''1''
+                  AND f.use_enabled = true
                   AND f.geom IS NOT NULL
                   AND ($2 IS NULL OR btrim($2) = '''' OR f.project_id::text = btrim($2))
             )
@@ -2443,6 +2457,7 @@ BEGIN
                 FROM bo_electric_fence f
                 WHERE f.del_flag = false
                   AND f.status = ''1''
+                  AND f.use_enabled = true
                   AND f.geom IS NOT NULL
                   AND ($2 IS NULL OR btrim($2) = '''' OR f.project_id::text = btrim($2))
             )

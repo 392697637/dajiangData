@@ -146,6 +146,7 @@ COMMENT ON INDEX idx_gis_grid_nodes_template_geom IS '三维网格点空间索�
 --     min_alt double precision DEFAULT 0,
 --     max_alt double precision,
 --     height double precision,
+--     use_enabled boolean NOT NULL DEFAULT true,
 --     effective_start timestamp,
 --     effective_end timestamp,
 --     time_plan varchar(4000),
@@ -163,6 +164,7 @@ COMMENT ON INDEX idx_gis_grid_nodes_template_geom IS '三维网格点空间索�
 -- COMMENT ON COLUMN bo_electric_fence.rule_priority IS '规则优先级，数值越小优先级越高；国家禁飞区建议为1';
 -- COMMENT ON COLUMN bo_electric_fence.min_alt IS '规则生效最低高度，单位：米';
 -- COMMENT ON COLUMN bo_electric_fence.max_alt IS '规则生效最高高度，单位：米';
+-- COMMENT ON COLUMN bo_electric_fence.use_enabled IS '是否启用';
 -- COMMENT ON COLUMN bo_electric_fence.geom IS '二维空域范围，WGS84坐标系';
 -- COMMENT ON COLUMN bo_electric_fence.geom_3d IS '三维空域几何，可选';
 --
@@ -512,4 +514,3 @@ COMMENT ON INDEX idx_gis_flight_paths_start_point IS '航线起点空间索引�
 -- 终点空间索引，用于终点附近航线检索。
 CREATE INDEX IF NOT EXISTS idx_gis_flight_paths_end_point ON gis_flight_paths USING GIST (end_point);
 COMMENT ON INDEX idx_gis_flight_paths_end_point IS '航线终点空间索引，用于终点附近查询';
-

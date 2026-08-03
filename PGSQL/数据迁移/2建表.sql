@@ -26,6 +26,7 @@ CREATE TABLE "public"."bo_electric_fence" (
   "draw_method" varchar(65535) COLLATE "pg_catalog"."default",
   "height" float8,
   "fence_type" varchar(20) COLLATE "pg_catalog"."default",
+  "use_enabled" bool NOT NULL DEFAULT true,
   "geom" geometry(GEOMETRY),
   "time_plan" varchar(4000) COLLATE "pg_catalog"."default"
 )
@@ -51,6 +52,7 @@ COMMENT ON COLUMN "public"."bo_electric_fence"."end_time" IS '结束时间';
 COMMENT ON COLUMN "public"."bo_electric_fence"."draw_method" IS '绘制方式';
 COMMENT ON COLUMN "public"."bo_electric_fence"."height" IS '围栏高度';
 COMMENT ON COLUMN "public"."bo_electric_fence"."fence_type" IS '电子围栏类型';
+COMMENT ON COLUMN "public"."bo_electric_fence"."use_enabled" IS '是否启用';
 COMMENT ON COLUMN "public"."bo_electric_fence"."geom" IS '空间数据';
 COMMENT ON COLUMN "public"."bo_electric_fence"."time_plan" IS '时间计划';
 COMMENT ON TABLE "public"."bo_electric_fence" IS '电子围栏信息';
