@@ -1183,6 +1183,7 @@ CREATE OR REPLACE FUNCTION gis_astar_3d_flight_plan(
     smooth_ratio double precision
 ) AS $$
 DECLARE
+    v_start_time timestamptz := clock_timestamp();
     v_segment_m DOUBLE PRECISION;
     v_start_pt geometry(PointZ,4326);
     v_end_pt geometry(PointZ,4326);
