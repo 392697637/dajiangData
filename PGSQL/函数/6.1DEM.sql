@@ -14,11 +14,11 @@
 --   gis_dem_elevation_text            解析 WKT/EWKT/GeoJSON 并返回 DEM 高程结果
 --
 -- 统一约定：
---   1. DEM 栅格表固定读取 public.gis_dem_henan。
+--   1. DEM 取值按 public.jc_sheng.gis_dem_table 自动选择省级 DEM 表；未配置或表不存在时返回 0。
 --   2. 输入 geometry 没有 SRID 时按 EPSG:4326 处理。
 --   3. 输入 geometry 已有 Z 值时，按 XY 查询 DEM，并用 DEM 高程生成新的 Z 值。
 --   4. 点不在 DEM 覆盖范围内时，补高程入口使用 0 作为兜底 Z 值。
---   5. gis_dem_elevation 是基础取值函数，只负责单 Point 返回一个高程值；覆盖范围外返回 NULL。
+--   5. gis_dem_elevation 是基础取值函数，只负责单 Point 返回一个高程值；覆盖范围外返回 0。
 --   6. gis_dem_elevation_geometry 是 geometry 统一入口；点/线/面语义明确时可调用对应语义化入口。
 --   7. 点/线/面 geometry 入口使用 gis_dem_elevation_point/line/polygon。
 --   8. 点/线/面 text 入口使用 gis_dem_elevation_text_point/line/polygon，支持 WKT、EWKT、GeoJSON。
@@ -33,32 +33,6 @@
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS postgis_raster;
 
--- =============================================================================
--- 表注释
--- 说明：如果 DEM 表已经存在，则补充表和核心字段的数据库注释。
--- =============================================================================
-DO $$
-BEGIN
-    IF to_regclass('public.gis_dem_henan') IS NULL THEN
-        RETURN;
-    END IF;
-
-COMMENT ON TABLE public.gis_dem_henan IS '河南DEM栅格表';
-COMMENT ON COLUMN public.gis_dem_henan.rid IS '栅格瓦片主键';
-COMMENT ON COLUMN public.gis_dem_henan.rast IS 'DEM栅格瓦片';
-
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'gis_dem_henan'
-          AND column_name = 'filename'
-    ) THEN
-COMMENT ON COLUMN public.gis_dem_henan.filename IS '源栅格文件名';
-    END IF;
-END;
-$$;
-
 
 -- =============================================================================
 -- 重建函数前清理
@@ -68,149 +42,222 @@ SELECT gis_drop_function('gis_dem_validate');
 
 -- =============================================================================
 -- 函数名称：gis_dem_validate
--- 函数功能：校验 DEM 栅格表是否可用
--- 使用场景：DEM 入库后、业务调用前，快速检查表是否存在、SRID 是否正确、范围是否落在河南区域。
--- 入参说明：p_old_srid、p_new_srid 为兼容旧调用保留，当前校验目标固定为 EPSG:4326。
--- 返回说明：返回状态码、说明、DEM SRID、瓦片数量、范围和电子围栏覆盖情况。
--- 状态规则：code=200 表示可用；code=400 表示表缺失、无有效瓦片、SRID 错误或范围异常。
--- 注意事项：正式 DEM 表固定为 public.gis_dem_henan；电子围栏统计仅在 bo_electric_fence.geom 存在时返回。
+-- 函数功能：校验 jc_sheng.gis_dem_table 配置的省级 DEM 栅格表是否可用
+-- 使用场景：DEM 入库后、业务调用前，检查省表配置、字段、SRID 和是否有瓦片，并补充 DEM 表注释。
+-- 入参说明：无参数；固定校验 DEM SRID 为 EPSG:4326，默认轻量检查。
+-- 返回说明：每个配置了 gis_dem_table 的省返回一行校验结果；配置缺失或表异常返回 code=400。
+-- 状态规则：code=200 表示该省 DEM 表可用；code=400 表示配置为空、表缺失、字段缺失、无瓦片或 SRID 异常。
 -- =============================================================================
 
-CREATE OR REPLACE FUNCTION public.gis_dem_validate(
-    p_old_srid integer DEFAULT 4326,
-    p_new_srid integer DEFAULT 4326
-)
+CREATE OR REPLACE FUNCTION public.gis_dem_validate()
 RETURNS TABLE (
+    -- code：状态码，200=该省 DEM 配置可用，400=配置或 DEM 表存在问题。
     code integer,
+    -- msg：校验说明，返回通过原因或具体错误原因。
     msg text,
+    -- shengname：省份名称，来自 public.jc_sheng.shengname。
+    shengname text,
+    -- shengid：省份ID，来自 public.jc_sheng.shengid。
+    shengid text,
+    -- gis_dem_table：省份配置的 DEM 表名，来自 public.jc_sheng.gis_dem_table。
+    gis_dem_table text,
+    -- dem_exists：DEM 表是否存在。
     dem_exists boolean,
+    -- has_rid：DEM 表是否存在 rid 瓦片ID字段。
+    has_rid boolean,
+    -- has_rast：DEM 表是否存在 rast 栅格字段。
+    has_rast boolean,
+    -- dem_srid：DEM raster 的 SRID；正常应为 4326。
     dem_srid integer,
-    tile_count bigint,
-    extent_4326 text,
-    in_henan_range boolean,
-    fence_total bigint,
-    fence_intersects bigint
+    -- tile_count：轻量检查下 1=至少存在一条有效 raster，0=没有有效 raster。
+    tile_count bigint
 )
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 AS $$
 DECLARE
-    v_dem_srid integer;
-    v_tile_count bigint;
-    v_extent geometry;
-    v_extent_4326 geometry;
-    v_has_fence_geom boolean;
+    v_cfg record;
+    v_dem_reg regclass;
+    v_checked_count integer := 0;
 BEGIN
-    -- 第一步：确认 DEM 主表是否存在；不存在时直接返回失败。
-    IF to_regclass('public.gis_dem_henan') IS NULL THEN
-        RETURN QUERY SELECT
-            400,
-            'DEM表不存在'::text,
-            false,
-            NULL::integer,
-            0::bigint,
-            NULL::text,
-            false,
-            NULL::bigint,
-            NULL::bigint;
+    -- 第一步：确认省份配置表是否存在。
+    IF to_regclass('public.jc_sheng') IS NULL THEN
+        code := 400;
+        msg := '省份配置表 public.jc_sheng 不存在';
+        shengname := NULL;
+        shengid := NULL;
+        gis_dem_table := NULL;
+        dem_exists := false;
+        has_rid := false;
+        has_rast := false;
+        dem_srid := NULL;
+        tile_count := 0;
+        RETURN NEXT;
         RETURN;
     END IF;
 
-    -- 第二步：读取 DEM 主表中占比最高的 SRID、瓦片数量和整体范围。
-    SELECT
-        ST_SRID(rast),
-        count(*),
-        ST_SetSRID(ST_Envelope(ST_Collect(ST_ConvexHull(rast))), ST_SRID(rast))
-    INTO v_dem_srid, v_tile_count, v_extent
-    FROM public.gis_dem_henan
-    WHERE rast IS NOT NULL
-    GROUP BY ST_SRID(rast)
-    ORDER BY count(*) DESC
-    LIMIT 1;
-
-    -- 第三步：DEM 表存在但没有有效 raster 时，返回不可用状态。
-    IF v_tile_count IS NULL OR v_tile_count = 0 THEN
-        RETURN QUERY SELECT
-            400,
-            'DEM表没有有效栅格瓦片'::text,
-            true,
-            v_dem_srid,
-            0::bigint,
-            NULL::text,
-            false,
-            NULL::bigint,
-            NULL::bigint;
-        RETURN;
-    END IF;
-
-    -- 第四步：把 DEM 范围转换到 4326，并判断是否落在河南经纬度预期范围内。
-    v_extent_4326 := ST_Transform(v_extent, 4326);
-    in_henan_range :=
-        ST_XMin(v_extent_4326) >= 108
-        AND ST_XMax(v_extent_4326) <= 118
-        AND ST_YMin(v_extent_4326) >= 30
-        AND ST_YMax(v_extent_4326) <= 38;
-
-    fence_total := NULL;
-    fence_intersects := NULL;
-
-    -- 第五步：如果电子围栏表存在 geom 字段，则统计围栏总数和与 DEM 相交数量。
-    SELECT EXISTS (
+    -- 第二步：检查 jc_sheng 必需字段是否存在。
+    IF NOT EXISTS (
         SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'bo_electric_fence'
-          AND column_name = 'geom'
-    )
-    INTO v_has_fence_geom;
-
-    IF v_has_fence_geom THEN
-        -- 统计有效电子围栏总数。
-        SELECT count(*)
-        INTO fence_total
-        FROM public.bo_electric_fence
-        WHERE geom IS NOT NULL;
-
-        -- 统一把电子围栏转换到 4326，再与 DEM 4326 范围做相交判断。
-        SELECT count(*)
-        INTO fence_intersects
-        FROM public.bo_electric_fence
-        WHERE geom IS NOT NULL
-          AND ST_Intersects(
-              ST_Transform(
-                  CASE
-                      WHEN ST_SRID(geom) = 0 THEN ST_SetSRID(geom, 4326)
-                      ELSE geom
-                  END,
-                  4326
-              ),
-              v_extent_4326
-          );
+        FROM pg_attribute
+        WHERE attrelid = 'public.jc_sheng'::regclass
+          AND attname IN ('geom', 'gis_dem_table')
+          AND NOT attisdropped
+        GROUP BY attrelid
+        HAVING count(*) = 2
+    ) THEN
+        code := 400;
+        msg := '省份配置表 public.jc_sheng 缺少 geom 或 gis_dem_table 字段';
+        shengname := NULL;
+        shengid := NULL;
+        gis_dem_table := NULL;
+        dem_exists := false;
+        has_rid := false;
+        has_rast := false;
+        dem_srid := NULL;
+        tile_count := 0;
+        RETURN NEXT;
+        RETURN;
     END IF;
 
-    -- 第六步：根据 SRID 和范围校验结果统一组装返回值。
-    RETURN QUERY SELECT
-        CASE
-            WHEN v_dem_srid <> 4326 THEN 400
-            WHEN NOT in_henan_range THEN 400
-            ELSE 200
-        END,
-        CASE
-            WHEN v_dem_srid <> 4326 THEN format('DEM SRID不是4326，当前为%s', v_dem_srid)
-            WHEN NOT in_henan_range THEN 'DEM范围不在河南预期范围内'
-            ELSE 'DEM校验通过'
-        END,
-        true,
-        v_dem_srid,
-        v_tile_count,
-        ST_AsText(v_extent_4326),
-        in_henan_range,
-        fence_total,
-        fence_intersects;
+    -- 第三步：逐省检查 DEM 表配置。
+    FOR v_cfg IN
+        SELECT
+            s.shengname::text AS shengname,
+            s.shengid::text AS shengid,
+            NULLIF(trim(s.gis_dem_table), '') AS gis_dem_table
+        FROM public.jc_sheng s
+        WHERE s.gis_dem_table IS NOT NULL
+        ORDER BY s.gid
+    LOOP
+        v_checked_count := v_checked_count + 1;
+
+        shengname := v_cfg.shengname;
+        shengid := v_cfg.shengid;
+        gis_dem_table := v_cfg.gis_dem_table;
+        dem_srid := NULL;
+        tile_count := 0;
+        has_rid := false;
+        has_rast := false;
+
+        IF gis_dem_table IS NULL THEN
+            code := 400;
+            msg := 'gis_dem_table 为空';
+            dem_exists := false;
+            RETURN NEXT;
+            CONTINUE;
+        END IF;
+
+        v_dem_reg := COALESCE(
+            to_regclass(gis_dem_table),
+            to_regclass(format('public.%I', gis_dem_table))
+        );
+
+        IF v_dem_reg IS NULL THEN
+            code := 400;
+            msg := format('DEM表不存在：%s', gis_dem_table);
+            dem_exists := false;
+            RETURN NEXT;
+            CONTINUE;
+        END IF;
+
+        dem_exists := true;
+
+        EXECUTE format(
+            'COMMENT ON TABLE %s IS %L',
+            v_dem_reg,
+            format('%sDEM栅格表', COALESCE(NULLIF(trim(shengname), ''), '省级'))
+        );
+
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM pg_attribute
+                WHERE attrelid = v_dem_reg
+                  AND attname = 'rid'
+                  AND NOT attisdropped
+            ),
+            EXISTS (
+                SELECT 1
+                FROM pg_attribute
+                WHERE attrelid = v_dem_reg
+                  AND attname = 'rast'
+                  AND NOT attisdropped
+            )
+        INTO has_rid, has_rast;
+
+        IF has_rid THEN
+            EXECUTE format('COMMENT ON COLUMN %s.rid IS %L', v_dem_reg, '栅格瓦片主键');
+        END IF;
+
+        IF has_rast THEN
+            EXECUTE format('COMMENT ON COLUMN %s.rast IS %L', v_dem_reg, 'DEM栅格瓦片');
+        END IF;
+
+        IF EXISTS (
+            SELECT 1
+            FROM pg_attribute
+            WHERE attrelid = v_dem_reg
+              AND attname = 'filename'
+              AND NOT attisdropped
+        ) THEN
+            EXECUTE format('COMMENT ON COLUMN %s.filename IS %L', v_dem_reg, '源栅格文件名');
+        END IF;
+
+        IF NOT has_rid OR NOT has_rast THEN
+            code := 400;
+            msg := 'DEM表缺少 rid 或 rast 字段';
+            RETURN NEXT;
+            CONTINUE;
+        END IF;
+
+        EXECUTE format(
+            $sql$
+            SELECT ST_SRID(rast), 1::bigint
+            FROM %s
+            WHERE rast IS NOT NULL
+            LIMIT 1
+            $sql$,
+            v_dem_reg
+        )
+        INTO dem_srid, tile_count;
+
+        IF tile_count IS NULL OR tile_count = 0 THEN
+            code := 400;
+            msg := 'DEM表没有有效栅格瓦片';
+            tile_count := 0;
+            RETURN NEXT;
+            CONTINUE;
+        END IF;
+
+        IF dem_srid <> 4326 THEN
+            code := 400;
+            msg := format('DEM SRID不是4326，当前为%s', dem_srid);
+        ELSE
+            code := 200;
+            msg := 'DEM校验通过';
+        END IF;
+
+        RETURN NEXT;
+    END LOOP;
+
+    IF v_checked_count = 0 THEN
+        code := 400;
+        msg := 'public.jc_sheng 未配置任何 gis_dem_table';
+        shengname := NULL;
+        shengid := NULL;
+        gis_dem_table := NULL;
+        dem_exists := false;
+        has_rid := false;
+        has_rast := false;
+        dem_srid := NULL;
+        tile_count := 0;
+        RETURN NEXT;
+    END IF;
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_dem_validate(integer, integer) IS '校验DEM表、SRID、范围和电子围栏覆盖情况';
+COMMENT ON FUNCTION public.gis_dem_validate() IS '校验jc_sheng配置的省级DEM表、字段、SRID和瓦片，并补充DEM表注释';
 
 
 -- =============================================================================
@@ -222,48 +269,101 @@ SELECT gis_drop_function('gis_dem_elevation');
 -- 函数名称：gis_dem_elevation
 -- 函数功能：根据单个 Point 查询 DEM 第一波段高程值
 -- 入参说明：p_geom 为 Point geometry，SRID 为空时按 4326 处理。
--- 返回说明：返回 double precision 高程值；点不在 DEM 覆盖范围内返回 NULL。
--- 注意事项：这是底层取值函数，只取一个像元值，不负责补 0；业务统一补高程优先调用 gis_dem_elevation_geometry。
+-- 返回说明：返回 double precision 高程值；未配置 DEM 表、表不存在、点不在 DEM 覆盖范围内时返回 0。
+-- 注意事项：这是底层取值函数，只取一个像元值；业务统一补高程优先调用 gis_dem_elevation_geometry。
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.gis_dem_elevation(
     p_geom geometry
 )
 RETURNS double precision
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 AS $$
-    -- dem_srid：读取 DEM raster 的真实 SRID，用于把输入点转换到同一坐标系。
-    WITH dem_srid AS (
-        SELECT ST_SRID(rast) AS srid
-        FROM public.gis_dem_henan
-        WHERE rast IS NOT NULL
-        LIMIT 1
-    ),
-    -- input_point：标准化输入点；SRID 为空时按 4326，已有 Z 时去掉 Z。
-    input_point AS (
-        SELECT
-            CASE
-                WHEN p_geom IS NULL THEN NULL::geometry
-                WHEN ST_SRID(p_geom) = 0 THEN ST_SetSRID(ST_Force2D(p_geom), 4326)
-                ELSE ST_Force2D(p_geom)
-            END AS geom
-    ),
-    -- point_dem：仅接受 Point，并转换到 DEM 坐标系。
-    point_dem AS (
-        SELECT ST_Transform(i.geom, d.srid) AS geom
-        FROM input_point i
-        CROSS JOIN dem_srid d
-        WHERE i.geom IS NOT NULL
-          AND ST_GeometryType(i.geom) = 'ST_Point'
-    )
-    -- 在覆盖该点的第一个栅格瓦片中读取第一波段像元值。
-    SELECT ST_Value(r.rast, 1, p.geom)
-    FROM public.gis_dem_henan r
-    CROSS JOIN point_dem p
-    WHERE ST_Intersects(r.rast, p.geom)
-    ORDER BY r.rid
+DECLARE
+    v_point_4326 geometry;
+    v_dem_table text;
+    v_dem_reg regclass;
+    v_has_rid boolean;
+    v_has_rast boolean;
+    v_elevation double precision;
+BEGIN
+    IF p_geom IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    IF ST_GeometryType(p_geom) <> 'ST_Point' THEN
+        RETURN 0;
+    END IF;
+
+    v_point_4326 :=
+        CASE
+            WHEN ST_SRID(p_geom) = 0 THEN ST_SetSRID(ST_Force2D(p_geom), 4326)
+            ELSE ST_Transform(ST_Force2D(p_geom), 4326)
+        END;
+
+    IF to_regclass('public.jc_sheng') IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    SELECT NULLIF(trim(s.gis_dem_table), '')
+    INTO v_dem_table
+    FROM public.jc_sheng s
+    WHERE s.geom IS NOT NULL
+      AND s.gis_dem_table IS NOT NULL
+      AND ST_Covers(s.geom, v_point_4326)
+    ORDER BY s.gid
     LIMIT 1;
+
+    IF v_dem_table IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    v_dem_reg := COALESCE(
+        to_regclass(v_dem_table),
+        to_regclass(format('public.%I', v_dem_table))
+    );
+    IF v_dem_reg IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    SELECT
+        EXISTS (
+            SELECT 1
+            FROM pg_attribute
+            WHERE attrelid = v_dem_reg
+              AND attname = 'rid'
+              AND NOT attisdropped
+        ),
+        EXISTS (
+            SELECT 1
+            FROM pg_attribute
+            WHERE attrelid = v_dem_reg
+              AND attname = 'rast'
+              AND NOT attisdropped
+        )
+    INTO v_has_rid, v_has_rast;
+
+    IF NOT v_has_rid OR NOT v_has_rast THEN
+        RETURN 0;
+    END IF;
+
+    EXECUTE format(
+        $sql$
+        SELECT ST_Value(r.rast, 1, $1)
+        FROM %s r
+        WHERE r.rast IS NOT NULL
+          AND ST_Intersects(r.rast, $1)
+        ORDER BY r.rid
+        LIMIT 1
+        $sql$,
+        v_dem_reg
+    )
+    USING v_point_4326
+    INTO v_elevation;
+
+    RETURN COALESCE(v_elevation, 0);
+END;
 $$;
 
 COMMENT ON FUNCTION public.gis_dem_elevation(geometry) IS '按单个Point查询DEM高程值';
@@ -280,7 +380,7 @@ SELECT gis_drop_function('gis_dem_elevation_geometry');
 -- 入参说明：p_geom 支持点、多点、线、多线、面、多面和集合，支持二维和三维输入。
 -- 返回说明：返回带 DEM Z 值的新 geometry；已有 Z 会被 DEM 高程替换。
 -- 类型规则：单几何保持原单类型；Multi* 拆分补高程后再合成对应 Multi*；GeometryCollection 会忽略不支持的子类型。
--- 注意事项：业务侧已有 geometry 时优先调用该函数；接口层只有文本时使用 gis_dem_elevation_text。
+-- 注意事项：业务侧已有 geometry 时优先调用该函数；每个顶点会通过 jc_sheng.gis_dem_table 自动选择 DEM 表，接口层只有文本时使用 gis_dem_elevation_text。
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.gis_dem_elevation_geometry(
@@ -304,74 +404,86 @@ AS $$
     parts AS (
         SELECT
             (d).path AS path,
-            (d).geom AS geom
+            (d).geom AS geom,
+            ST_GeometryType((d).geom) AS geom_type
         FROM input_geom i
         CROSS JOIN LATERAL ST_Dump(i.geom) AS d
         WHERE i.geom IS NOT NULL
     ),
+    -- vertices：一次性拆出所有支持类型的顶点。
+    vertices AS (
+        SELECT
+            p.path,
+            p.geom_type,
+            (dp).path AS point_path,
+            (dp).geom AS point_geom
+        FROM parts p
+        CROSS JOIN LATERAL ST_DumpPoints(p.geom) AS dp
+        WHERE p.geom_type IN ('ST_Point', 'ST_LineString', 'ST_Polygon')
+    ),
+    -- z_vertices：所有顶点通过底层函数自动选择省级 DEM 表取 Z；覆盖范围外统一使用 Z=0。
+    z_vertices AS (
+        SELECT
+            v.path,
+            v.geom_type,
+            v.point_path,
+            ST_MakePoint(
+                ST_X(v.point_geom),
+                ST_Y(v.point_geom),
+                COALESCE(public.gis_dem_elevation(v.point_geom), 0)
+            ) AS point_geom
+        FROM vertices v
+    ),
+    -- z_lines：按顶点顺序重建 LineStringZ。
+    z_lines AS (
+        SELECT
+            path,
+            ST_MakeLine(point_geom ORDER BY point_path[1]) AS geom
+        FROM z_vertices
+        WHERE geom_type = 'ST_LineString'
+        GROUP BY path
+    ),
+    -- z_rings：按环号和顶点顺序重建 PolygonZ 的外环/内环。
+    z_rings AS (
+        SELECT
+            path,
+            point_path[1] AS ring_no,
+            ST_MakeLine(point_geom ORDER BY point_path[2]) AS ring_geom
+        FROM z_vertices
+        WHERE geom_type = 'ST_Polygon'
+        GROUP BY path, point_path[1]
+    ),
+    -- z_polygons：用补高后的外环和内环重建 PolygonZ。
+    z_polygons AS (
+        SELECT
+            zr.path,
+            ST_MakePolygon(
+                (SELECT ring_geom FROM z_rings outer_ring WHERE outer_ring.path = zr.path AND outer_ring.ring_no = 1),
+                COALESCE(
+                    ARRAY(
+                        SELECT ring_geom
+                        FROM z_rings inner_ring
+                        WHERE inner_ring.path = zr.path
+                          AND inner_ring.ring_no > 1
+                        ORDER BY ring_no
+                    ),
+                    ARRAY[]::geometry[]
+                )
+            ) AS geom
+        FROM z_rings zr
+        GROUP BY zr.path
+    ),
     -- z_parts：按子几何类型生成带 DEM Z 值的新子几何。
     z_parts AS (
         SELECT
-            path,
-            CASE ST_GeometryType(geom)
-                WHEN 'ST_Point' THEN
-                    -- Point：直接按点取高程，重建 PointZ。
-                    ST_MakePoint(
-                        ST_X(geom),
-                        ST_Y(geom),
-                        COALESCE(public.gis_dem_elevation(geom), 0)
-                    )
-                WHEN 'ST_LineString' THEN
-                    -- LineString：拆顶点逐点取高程，再按原顶点顺序重建 LineStringZ。
-                    (
-                        SELECT ST_MakeLine(
-                            ST_MakePoint(
-                                ST_X((dp).geom),
-                                ST_Y((dp).geom),
-                                COALESCE(public.gis_dem_elevation((dp).geom), 0)
-                            )
-                            ORDER BY (dp).path[1]
-                        )
-                        FROM ST_DumpPoints(geom) AS dp
-                    )
-                WHEN 'ST_Polygon' THEN
-                    -- Polygon：拆外环/内环顶点补高程，再重建 PolygonZ。
-                    (
-                        WITH rings AS (
-                            -- rings：拆出外环和所有内环，ring_no=0 为外环。
-                            SELECT
-                                (dr).path[1] AS ring_no,
-                                (dr).geom AS ring_geom
-                            FROM ST_DumpRings(geom) AS dr
-                        ),
-                        z_rings AS (
-                            -- z_rings：对每个环逐顶点补 DEM Z，并保持环内点顺序。
-                            SELECT
-                                ring_no,
-                                ST_MakeLine(
-                                    ST_MakePoint(
-                                        ST_X((dp).geom),
-                                        ST_Y((dp).geom),
-                                        COALESCE(public.gis_dem_elevation((dp).geom), 0)
-                                    )
-                                    ORDER BY (dp).path[1]
-                                ) AS ring_geom
-                            FROM rings r
-                            CROSS JOIN LATERAL ST_DumpPoints(r.ring_geom) AS dp
-                            GROUP BY ring_no
-                        )
-                        -- 使用补高程后的外环和内环重新构造 PolygonZ。
-                        SELECT ST_MakePolygon(
-                            (SELECT ring_geom FROM z_rings WHERE ring_no = 0),
-                            COALESCE(
-                                ARRAY(SELECT ring_geom FROM z_rings WHERE ring_no > 0 ORDER BY ring_no),
-                                ARRAY[]::geometry[]
-                            )
-                        )
-                    )
+            p.path,
+            CASE p.geom_type
+                WHEN 'ST_Point' THEN (SELECT point_geom FROM z_vertices zv WHERE zv.path = p.path LIMIT 1)
+                WHEN 'ST_LineString' THEN (SELECT geom FROM z_lines zl WHERE zl.path = p.path)
+                WHEN 'ST_Polygon' THEN (SELECT geom FROM z_polygons zp WHERE zp.path = p.path)
                 ELSE NULL::geometry
             END AS geom
-        FROM parts
+        FROM parts p
     )
     SELECT
         CASE
@@ -697,6 +809,7 @@ AS $$
 DECLARE
     v_text text;
     v_geom geometry;
+    v_result_geom geometry;
     v_type text;
 BEGIN
     -- 第一步：清理输入文本；空字符串返回空结果。
@@ -710,6 +823,17 @@ BEGIN
     v_geom := public.gis_dem_parse_geometry_text(v_text);
     v_type := ST_GeometryType(v_geom);
 
+    IF v_type NOT IN (
+        'ST_Point', 'ST_MultiPoint',
+        'ST_LineString', 'ST_MultiLineString',
+        'ST_Polygon', 'ST_MultiPolygon',
+        'ST_GeometryCollection'
+    ) THEN
+        RAISE EXCEPTION 'Unsupported DEM geometry type: %', v_type;
+    END IF;
+
+    v_result_geom := public.gis_dem_elevation_geometry(v_geom);
+
     -- 第三步：点/多点返回补高程后的结果几何；单点额外返回 elevation 字段。
     IF v_type IN ('ST_Point', 'ST_MultiPoint') THEN
         RETURN QUERY
@@ -717,9 +841,9 @@ BEGIN
             v_type,
             1,
             CASE WHEN v_type = 'ST_Point' THEN ST_Force2D(v_geom)::geometry(Point) ELSE NULL::geometry(Point) END,
-            CASE WHEN v_type = 'ST_Point' THEN public.gis_dem_elevation(v_geom) ELSE NULL::double precision END,
-            public.gis_dem_elevation_geometry(v_geom),
-            ST_AsText(public.gis_dem_elevation_geometry(v_geom));
+            CASE WHEN v_type = 'ST_Point' AND v_result_geom IS NOT NULL THEN ST_Z(v_result_geom) ELSE NULL::double precision END,
+            v_result_geom,
+            ST_AsText(v_result_geom);
         RETURN;
     END IF;
 
@@ -731,8 +855,8 @@ BEGIN
             1,
             NULL::geometry(Point),
             NULL::double precision,
-            public.gis_dem_elevation_geometry(v_geom),
-            ST_AsText(public.gis_dem_elevation_geometry(v_geom));
+            v_result_geom,
+            ST_AsText(v_result_geom);
         RETURN;
     END IF;
 
@@ -744,13 +868,12 @@ BEGIN
             1,
             NULL::geometry(Point),
             NULL::double precision,
-            public.gis_dem_elevation_geometry(v_geom),
-            ST_AsText(public.gis_dem_elevation_geometry(v_geom));
+            v_result_geom,
+            ST_AsText(v_result_geom);
         RETURN;
     END IF;
 
-    -- 第六步：其他几何类型当前不作为 DEM 基础入口支持。
-    RAISE EXCEPTION 'Unsupported DEM geometry type: %', v_type;
+    RETURN;
 END;
 $$;
 
@@ -888,16 +1011,17 @@ SELECT gis_drop_function('gis_dem_update_table_z0');
 
 -- =============================================================================
 -- 函数名称：gis_dem_update_table_z0
--- 函数功能：按表名和几何列名批量补 DEM 高程；二维面或 Z 全为 0 的面会更新，已有非 0 Z 的数据保持不变。
+-- 函数功能：按表名和几何列名批量补 DEM 高程；函数内部按点、线、面分组分批执行。
 -- 入参说明：
 --   1. p_table_name  表名，支持 'bo_electric_fence' 或 'public.bo_electric_fence'。
 --   2. p_geom_column 几何列名，例如 'geom'。
+--   3. p_batch_size  每批处理数量，默认 100。
 -- 返回说明：
 --   code=200 执行成功；updated_count 为实际更新行数；skipped_count 为未更新的非空几何行数。
 -- 使用示例：
 --   SELECT * FROM public.gis_dem_update_table_z0('public.bo_electric_fence', 'geom');
 -- 注意事项：
---   1. 仅处理 Polygon/MultiPolygon。
+--   1. 处理 Point/MultiPoint、LineString/MultiLineString、Polygon/MultiPolygon。
 --   2. 二维 geometry 也会视为需要补高程。
 --   3. 三维 geometry 只有 ST_ZMin=0 且 ST_ZMax=0 时才会补 DEM，已有真实高程不会覆盖。
 -- =============================================================================
@@ -906,7 +1030,9 @@ CREATE OR REPLACE FUNCTION public.gis_dem_update_table_z0(
     -- p_table_name：目标表名；可以传不带 schema 的表名，也可以传 schema.table。
     p_table_name text,
     -- p_geom_column：目标几何列名；默认处理 geom 字段。
-    p_geom_column text DEFAULT 'geom'
+    p_geom_column text DEFAULT 'geom',
+    -- p_batch_size：函数内部每批处理数量；点/线/面会分组分批执行。
+    p_batch_size integer DEFAULT 100
 )
 RETURNS TABLE (
     -- code：执行状态码，200=成功，400=参数错误，500=执行异常。
@@ -941,6 +1067,10 @@ DECLARE
     v_updated_count bigint := 0;
     -- v_total_nonnull_count：记录目标几何列非空总数，用于计算跳过数量。
     v_total_nonnull_count bigint := 0;
+    -- v_batch_count：记录单批更新行数。
+    v_batch_count bigint := 0;
+    -- v_geom_types：按点、线、面分组处理。
+    v_geom_types text[];
 BEGIN
     -- 1. 基础参数校验：表名和列名都不能为空。
     --    trim 后为空字符串时直接返回 400，不继续执行动态 SQL。
@@ -954,6 +1084,19 @@ BEGIN
             0::bigint,                                                             -- updated_count：未执行更新，返回 0。
             0::bigint,                                                             -- skipped_count：未执行统计，返回 0。
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3); -- elapsed_seconds：当前耗时。
+        RETURN;
+    END IF;
+
+    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+        RETURN QUERY SELECT
+            400,
+            '参数错误：批量大小必须大于0'::text,
+            p_table_name,
+            p_geom_column,
+            0::bigint,
+            0::bigint,
+            0::bigint,
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3);
         RETURN;
     END IF;
 
@@ -1023,7 +1166,7 @@ BEGIN
     INTO v_total_nonnull_count;
 
     -- 5. 统计候选数据：
-    --    - 只处理 Polygon/MultiPolygon；
+    --    - 只处理 Point/MultiPoint、LineString/MultiLineString、Polygon/MultiPolygon；
     --    - 二维几何 ST_NDims < 3，需要补高程；
     --    - 三维几何只有 Z 最小值和最大值都为 0 时才补高程；
     --    - 已有非 0 Z 值的数据不会进入候选集。
@@ -1033,7 +1176,11 @@ BEGIN
         SELECT count(*)
         FROM %s
         WHERE %I IS NOT NULL                                             -- 几何为空无法补高程，跳过。
-          AND ST_GeometryType(%I) IN ('ST_Polygon', 'ST_MultiPolygon')   -- 只处理面/多面。
+          AND ST_GeometryType(%I) IN (                                   -- 只处理点/线/面及对应 Multi 类型。
+              'ST_Point', 'ST_MultiPoint',
+              'ST_LineString', 'ST_MultiLineString',
+              'ST_Polygon', 'ST_MultiPolygon'
+          )
           AND (
               ST_NDims(%I) < 3                                           -- 二维几何需要补 DEM Z。
               OR (
@@ -1051,36 +1198,55 @@ BEGIN
     )
     INTO v_candidate_count;
 
-    -- 6. 对候选数据执行 DEM 补高，并写回原几何列。
-    --    public.gis_dem_elevation_polygon 会返回 PolygonZ/MultiPolygonZ。
-    --    WHERE 条件与上面的候选统计保持一致，保证 candidate_count 与 updated_count 口径一致。
-    EXECUTE format(
-        $sql$
-        UPDATE %s
-        SET %I = public.gis_dem_elevation_polygon(%I)                    -- 用 DEM 高程重建 PolygonZ/MultiPolygonZ 并写回原列。
-        WHERE %I IS NOT NULL                                             -- 几何为空无法补高程，跳过。
-          AND ST_GeometryType(%I) IN ('ST_Polygon', 'ST_MultiPolygon')   -- 只处理面/多面。
-          AND (
-              ST_NDims(%I) < 3                                           -- 二维几何需要补 DEM Z。
-              OR (
-                  COALESCE(ST_ZMin(%I), 0) = 0                           -- 三维几何最小 Z 为 0。
-                  AND COALESCE(ST_ZMax(%I), 0) = 0                       -- 三维几何最大 Z 为 0，说明整条几何 Z 全为 0。
-              )
-          )
-        $sql$,
-        v_table_reg,     -- %s：目标表。
-        p_geom_column,   -- 第 1 个 %I：SET 的目标几何列。
-        p_geom_column,   -- 第 2 个 %I：传入 gis_dem_elevation_polygon 的几何列。
-        p_geom_column,   -- 第 3 个 %I：IS NOT NULL 的几何列。
-        p_geom_column,   -- 第 4 个 %I：ST_GeometryType 的几何列。
-        p_geom_column,   -- 第 5 个 %I：ST_NDims 的几何列。
-        p_geom_column,   -- 第 6 个 %I：ST_ZMin 的几何列。
-        p_geom_column    -- 第 7 个 %I：ST_ZMax 的几何列。
-    );
+    -- 6. 对候选数据按点、线、面分组分批执行 DEM 补高，并写回原几何列。
+    --    public.gis_dem_elevation_geometry 会按几何类型返回 PointZ/MultiPointZ、LineStringZ/MultiLineStringZ、PolygonZ/MultiPolygonZ。
+    FOREACH v_geom_types SLICE 1 IN ARRAY ARRAY[
+        ARRAY['ST_Point', 'ST_MultiPoint'],
+        ARRAY['ST_LineString', 'ST_MultiLineString'],
+        ARRAY['ST_Polygon', 'ST_MultiPolygon']
+    ] LOOP
+        LOOP
+            EXECUTE format(
+                $sql$
+                WITH todo AS (
+                    SELECT ctid
+                    FROM %s
+                    WHERE %I IS NOT NULL
+                      AND ST_GeometryType(%I) = ANY (%L::text[])
+                      AND (
+                          ST_NDims(%I) < 3
+                          OR (
+                              COALESCE(ST_ZMin(%I), 0) = 0
+                              AND COALESCE(ST_ZMax(%I), 0) = 0
+                          )
+                      )
+                    ORDER BY ST_NPoints(%I), ctid
+                    LIMIT %s
+                )
+                UPDATE %s t
+                SET %I = public.gis_dem_elevation_geometry(t.%I)
+                FROM todo
+                WHERE t.ctid = todo.ctid
+                $sql$,
+                v_table_reg,
+                p_geom_column,
+                p_geom_column,
+                v_geom_types,
+                p_geom_column,
+                p_geom_column,
+                p_geom_column,
+                p_geom_column,
+                p_batch_size,
+                v_table_reg,
+                p_geom_column,
+                p_geom_column
+            );
 
-    -- 7. 获取 UPDATE 实际影响行数。
-    --    ROW_COUNT 是上一条 UPDATE 影响的记录数。
-    GET DIAGNOSTICS v_updated_count = ROW_COUNT;
+            GET DIAGNOSTICS v_batch_count = ROW_COUNT;
+            v_updated_count := v_updated_count + v_batch_count;
+            EXIT WHEN v_batch_count = 0;
+        END LOOP;
+    END LOOP;
 
     -- 8. 返回执行结果，方便接口或 SQL 控制台直接查看更新数量和耗时。
     RETURN QUERY SELECT
@@ -1116,7 +1282,7 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_dem_update_table_z0(text, text) IS '按表名和几何列名批量补DEM高程：二维面或Z全为0的面会更新，已有非0 Z保持不变';
+COMMENT ON FUNCTION public.gis_dem_update_table_z0(text, text, integer) IS '按表名和几何列名分类型分批补DEM高程：二维点线面或Z全为0的点线面会更新，已有非0 Z保持不变';
 
 
 -- =============================================================================
@@ -1126,25 +1292,28 @@ SELECT gis_drop_function('gis_dem_reset_table_z0');
 
 -- =============================================================================
 -- 函数名称：gis_dem_reset_table_z0
--- 函数功能：按表名和几何列名批量清空高程，把面/多面的 Z 值统一重置为 0。
+-- 函数功能：按表名和几何列名批量清空高程；函数内部按点、线、面分组分批执行。
 -- 入参说明：
 --   1. p_table_name  表名，支持 'bo_electric_fence' 或 'public.bo_electric_fence'。
 --   2. p_geom_column 几何列名，例如 'geom'。
+--   3. p_batch_size  每批处理数量，默认 100。
 -- 返回说明：
 --   code=200 执行成功；updated_count 为实际更新行数；skipped_count 为未更新的非空几何行数。
 -- 使用示例：
 --   SELECT * FROM public.gis_dem_reset_table_z0('public.bo_electric_fence', 'geom');
 -- 注意事项：
---   1. 仅处理 Polygon/MultiPolygon。
---   2. 二维面会被转换为 Z=0 的 PolygonZ/MultiPolygonZ。
---   3. 三维面只要存在非 0 Z 值，就会被重置为 Z=0。
+--   1. 处理 Point/MultiPoint、LineString/MultiLineString、Polygon/MultiPolygon。
+--   2. 二维点/线/面会被转换为 Z=0 的三维几何。
+--   3. 三维点/线/面只要存在非 0 Z 值，就会被重置为 Z=0。
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.gis_dem_reset_table_z0(
     -- p_table_name：目标表名；可以传不带 schema 的表名，也可以传 schema.table。
     p_table_name text,
     -- p_geom_column：目标几何列名；默认处理 geom 字段。
-    p_geom_column text DEFAULT 'geom'
+    p_geom_column text DEFAULT 'geom',
+    -- p_batch_size：函数内部每批处理数量；点/线/面会分组分批执行。
+    p_batch_size integer DEFAULT 100
 )
 RETURNS TABLE (
     -- code：执行状态码，200=成功，400=参数错误，500=执行异常。
@@ -1179,6 +1348,10 @@ DECLARE
     v_updated_count bigint := 0;
     -- v_total_nonnull_count：记录目标几何列非空总数，用于计算跳过数量。
     v_total_nonnull_count bigint := 0;
+    -- v_batch_count：记录单批更新行数。
+    v_batch_count bigint := 0;
+    -- v_geom_types：按点、线、面分组处理。
+    v_geom_types text[];
 BEGIN
     -- 1. 基础参数校验：表名和列名都不能为空。
     --    trim 后为空字符串时直接返回 400，不继续执行动态 SQL。
@@ -1192,6 +1365,19 @@ BEGIN
             0::bigint,                                                             -- updated_count：未执行更新，返回 0。
             0::bigint,                                                             -- skipped_count：未执行统计，返回 0。
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3); -- elapsed_seconds：当前耗时。
+        RETURN;
+    END IF;
+
+    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+        RETURN QUERY SELECT
+            400,
+            '参数错误：批量大小必须大于0'::text,
+            p_table_name,
+            p_geom_column,
+            0::bigint,
+            0::bigint,
+            0::bigint,
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3);
         RETURN;
     END IF;
 
@@ -1261,16 +1447,20 @@ BEGIN
     INTO v_total_nonnull_count;
 
     -- 5. 统计候选数据：
-    --    - 只处理 Polygon/MultiPolygon；
-    --    - 二维面需要转换为 Z=0 的三维面；
-    --    - 三维面只要 Z 最小值或最大值不是 0，就需要重置；
-    --    - 已经是 Z 全为 0 的三维面不会进入候选集。
+    --    - 只处理 Point/MultiPoint、LineString/MultiLineString、Polygon/MultiPolygon；
+    --    - 二维点/线/面需要转换为 Z=0 的三维几何；
+    --    - 三维点/线/面只要 Z 最小值或最大值不是 0，就需要重置；
+    --    - 已经是 Z 全为 0 的三维点/线/面不会进入候选集。
     EXECUTE format(
         $sql$
         SELECT count(*)
         FROM %s
         WHERE %I IS NOT NULL                                             -- 几何为空无需处理，跳过。
-          AND ST_GeometryType(%I) IN ('ST_Polygon', 'ST_MultiPolygon')   -- 只处理面/多面。
+          AND ST_GeometryType(%I) IN (                                   -- 只处理点/线/面及对应 Multi 类型。
+              'ST_Point', 'ST_MultiPoint',
+              'ST_LineString', 'ST_MultiLineString',
+              'ST_Polygon', 'ST_MultiPolygon'
+          )
           AND (
               ST_NDims(%I) < 3                                           -- 二维几何需要转换为 Z=0。
               OR COALESCE(ST_ZMin(%I), 0) <> 0                           -- 三维几何最小 Z 不是 0，需要重置。
@@ -1286,34 +1476,53 @@ BEGIN
     )
     INTO v_candidate_count;
 
-    -- 6. 对候选数据执行 Z 重置，并写回原几何列。
+    -- 6. 对候选数据按点、线、面分组分批执行 Z 重置，并写回原几何列。
     --    ST_Force2D 先去掉原始 Z，ST_Force3DZ(..., 0) 再统一补回 Z=0。
-    --    WHERE 条件与上面的候选统计保持一致，保证 candidate_count 与 updated_count 口径一致。
-    EXECUTE format(
-        $sql$
-        UPDATE %s
-        SET %I = ST_Force3DZ(ST_Force2D(%I), 0)                           -- 去掉原高程，再统一改为 Z=0。
-        WHERE %I IS NOT NULL                                             -- 几何为空无需处理，跳过。
-          AND ST_GeometryType(%I) IN ('ST_Polygon', 'ST_MultiPolygon')   -- 只处理面/多面。
-          AND (
-              ST_NDims(%I) < 3                                           -- 二维几何需要转换为 Z=0。
-              OR COALESCE(ST_ZMin(%I), 0) <> 0                           -- 三维几何最小 Z 不是 0，需要重置。
-              OR COALESCE(ST_ZMax(%I), 0) <> 0                           -- 三维几何最大 Z 不是 0，需要重置。
-          )
-        $sql$,
-        v_table_reg,     -- %s：目标表。
-        p_geom_column,   -- 第 1 个 %I：SET 的目标几何列。
-        p_geom_column,   -- 第 2 个 %I：传入 ST_Force2D 的几何列。
-        p_geom_column,   -- 第 3 个 %I：IS NOT NULL 的几何列。
-        p_geom_column,   -- 第 4 个 %I：ST_GeometryType 的几何列。
-        p_geom_column,   -- 第 5 个 %I：ST_NDims 的几何列。
-        p_geom_column,   -- 第 6 个 %I：ST_ZMin 的几何列。
-        p_geom_column    -- 第 7 个 %I：ST_ZMax 的几何列。
-    );
+    FOREACH v_geom_types SLICE 1 IN ARRAY ARRAY[
+        ARRAY['ST_Point', 'ST_MultiPoint'],
+        ARRAY['ST_LineString', 'ST_MultiLineString'],
+        ARRAY['ST_Polygon', 'ST_MultiPolygon']
+    ] LOOP
+        LOOP
+            EXECUTE format(
+                $sql$
+                WITH todo AS (
+                    SELECT ctid
+                    FROM %s
+                    WHERE %I IS NOT NULL
+                      AND ST_GeometryType(%I) = ANY (%L::text[])
+                      AND (
+                          ST_NDims(%I) < 3
+                          OR COALESCE(ST_ZMin(%I), 0) <> 0
+                          OR COALESCE(ST_ZMax(%I), 0) <> 0
+                      )
+                    ORDER BY ST_NPoints(%I), ctid
+                    LIMIT %s
+                )
+                UPDATE %s t
+                SET %I = ST_Force3DZ(ST_Force2D(t.%I), 0)
+                FROM todo
+                WHERE t.ctid = todo.ctid
+                $sql$,
+                v_table_reg,
+                p_geom_column,
+                p_geom_column,
+                v_geom_types,
+                p_geom_column,
+                p_geom_column,
+                p_geom_column,
+                p_geom_column,
+                p_batch_size,
+                v_table_reg,
+                p_geom_column,
+                p_geom_column
+            );
 
-    -- 7. 获取 UPDATE 实际影响行数。
-    --    ROW_COUNT 是上一条 UPDATE 影响的记录数。
-    GET DIAGNOSTICS v_updated_count = ROW_COUNT;
+            GET DIAGNOSTICS v_batch_count = ROW_COUNT;
+            v_updated_count := v_updated_count + v_batch_count;
+            EXIT WHEN v_batch_count = 0;
+        END LOOP;
+    END LOOP;
 
     -- 8. 返回执行结果，方便接口或 SQL 控制台直接查看更新数量和耗时。
     RETURN QUERY SELECT
@@ -1349,14 +1558,14 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_dem_reset_table_z0(text, text) IS '按表名和几何列名批量清空DEM高程：面/多面的Z值统一重置为0';
+COMMENT ON FUNCTION public.gis_dem_reset_table_z0(text, text, integer) IS '按表名和几何列名分类型分批清空DEM高程：点线面的Z值统一重置为0';
 
 
 -- =============================================================================
--- 调用示例：批量更新表中 Z 为 0 的面/多面 DEM 高程
+-- 调用示例：批量更新表中 Z 为 0 的点/线/面 DEM 高程
 -- 说明：
 --   1. 以下示例会直接 UPDATE 目标表，请先在测试库或事务中确认候选数量。
---   2. 二维面或 Z 全为 0 的 Polygon/MultiPolygon 会被更新为 DEM 高程。
+--   2. 二维点/线/面或 Z 全为 0 的三维点/线/面会被更新为 DEM 高程。
 --   3. 已有非 0 Z 值的数据不会被覆盖。
 -- =============================================================================
 
@@ -1364,7 +1573,11 @@ COMMENT ON FUNCTION public.gis_dem_reset_table_z0(text, text) IS '按表名和�
 -- SELECT count(*) AS need_update_count
 -- FROM public.bo_electric_fence
 -- WHERE geom IS NOT NULL
---   AND ST_GeometryType(geom) IN ('ST_Polygon', 'ST_MultiPolygon')
+--   AND ST_GeometryType(geom) IN (
+--       'ST_Point', 'ST_MultiPoint',
+--       'ST_LineString', 'ST_MultiLineString',
+--       'ST_Polygon', 'ST_MultiPolygon'
+--   )
 --   AND (
 --       ST_NDims(geom) < 3
 --       OR (
@@ -1396,18 +1609,22 @@ COMMENT ON FUNCTION public.gis_dem_reset_table_z0(text, text) IS '按表名和�
 
 
 -- =============================================================================
--- 调用示例：批量清空表中面/多面的 DEM 高程
+-- 调用示例：批量清空表中点/线/面的 DEM 高程
 -- 说明：
 --   1. 以下示例会直接 UPDATE 目标表，请先在测试库或事务中确认候选数量。
---   2. 二维 Polygon/MultiPolygon 会被转换为 Z=0 的三维几何。
---   3. 已有非 0 Z 值的 Polygon/MultiPolygon 会被重置为 Z=0。
+--   2. 二维点/线/面会被转换为 Z=0 的三维几何。
+--   3. 已有非 0 Z 值的点/线/面会被重置为 Z=0。
 -- =============================================================================
 
 -- 13.1 先统计 bo_electric_fence.geom 中需要清空高程的候选数据
 -- SELECT count(*) AS need_reset_count
 -- FROM public.bo_electric_fence
 -- WHERE geom IS NOT NULL
---   AND ST_GeometryType(geom) IN ('ST_Polygon', 'ST_MultiPolygon')
+--   AND ST_GeometryType(geom) IN (
+--       'ST_Point', 'ST_MultiPoint',
+--       'ST_LineString', 'ST_MultiLineString',
+--       'ST_Polygon', 'ST_MultiPolygon'
+--   )
 --   AND (
 --       ST_NDims(geom) < 3
 --       OR COALESCE(ST_ZMin(geom), 0) <> 0

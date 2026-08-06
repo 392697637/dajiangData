@@ -125,6 +125,7 @@ FROM public.gis_dem_elevation_text(
 -- 参数：
 --   p_table_name   text   表名，支持 schema.table
 --   p_geom_column  text   几何字段名
+--   p_batch_size   int    每批处理数量，默认 100
 -- ============================================================================
 SELECT * FROM public.gis_dem_update_table_z0('public.bo_electric_fence', 'geom');
 
@@ -134,5 +135,6 @@ SELECT * FROM public.gis_dem_update_table_z0('public.bo_electric_fence', 'geom')
 -- 参数：
 --   p_table_name   text   表名，支持 schema.table
 --   p_geom_column  text   几何字段名
+--   p_batch_size   int    每批处理数量，默认 100
 -- ============================================================================
 SELECT * FROM public.gis_dem_reset_table_z0('public.bo_electric_fence', 'geom');
