@@ -512,7 +512,7 @@ SELECT public.gis_drop_function('gis_dem_parse_geometry_text');
 
 -- =============================================================================
 -- 函数名称：gis_dem_parse_geometry_text
--- 函数功能：解析 WKT、EWKT 或 GeoJSON 文本为空间 geometry
+-- 函数功能：解析文本为空间geometry
 -- 入参说明：
 --   1. WKT：未声明 SRID 时默认按 EPSG:4326。
 --   2. EWKT：形如 SRID=4326;POINT(...)，保留文本内 SRID。
@@ -1426,18 +1426,25 @@ COMMENT ON FUNCTION public.gis_dem_reset_table_z0(text, text) IS '按表名和�
 -- 8. gis_dem_elevation_text_point
 -- 点/多点文本入口。
 -- SELECT ST_AsText(public.gis_dem_elevation_text_point('POINT(113.65 34.76)'));
+-- SELECT ST_AsText(public.gis_dem_elevation_text_point('{"type":"Point","coordinates":[113.479098,34.814843,0.0]}'));
 
 -- 9. gis_dem_elevation_text_line
 -- 线/多线文本入口。
 -- SELECT ST_AsText(public.gis_dem_elevation_text_line('LINESTRING(113.60 34.70,113.70 34.80)'));
+-- SELECT ST_AsText(public.gis_dem_elevation_text_line('{"type":"LineString","coordinates":[[113.60,34.70],[113.70,34.80]]}'));
 
 -- 10. gis_dem_elevation_text_polygon
 -- 面/多面文本入口。
 -- SELECT ST_AsText(public.gis_dem_elevation_text_polygon('POLYGON((113.60 34.70,113.70 34.70,113.70 34.80,113.60 34.80,113.60 34.70))'));
+-- SELECT ST_AsText(public.gis_dem_elevation_text_polygon('{"type":"Polygon","coordinates":[[[113.60,34.70],[113.70,34.70],[113.70,34.80],[113.60,34.80],[113.60,34.70]]]}'));
 
 -- 11. gis_dem_elevation_text
 -- 统一文本入口。
 -- SELECT * FROM public.gis_dem_elevation_text('POINT(113.65 34.76)');
+-- SELECT * FROM public.gis_dem_elevation_text('{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[113.479098,34.814843,0.0]}}');
+-- SELECT *
+-- FROM (VALUES ('{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[113.527032,34.841345,0.0],[113.530384,34.841501,0.0],[113.525956,34.839522,0.0],[113.523363,34.839522,0.0],[113.522225,34.842648,0.0],[113.523806,34.842075,0.0],[113.527032,34.841345,0.0]]]}}'::text)) v(lngLatAlt)
+-- CROSS JOIN LATERAL public.gis_dem_elevation_text(v.lngLatAlt) r;
 
 -- 12. gis_dem_update_table_z0
 -- 按表名和几何列名批量补 DEM 高程。
