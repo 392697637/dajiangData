@@ -1,24 +1,31 @@
--- =============================================================================
+﻿-- =============================================================================
 -- 6.1 DEM 高程工具函数
 --
 -- 函数清单：
+--   公共函数
 --   gis_dem_validate                  校验 DEM 栅格表是否可用
---   gis_dem_elevation_geometry        DEM 高程提取和补高程统一入口（唯一核心入口，p_dem_table 可选）
---   gis_dem_elevation_point           点/多点补 DEM 高程入口，支持 geometry（自动获取 DEM 表）
---   gis_dem_elevation_line            线/多线补 DEM 高程入口，支持 geometry（自动获取 DEM 表）
---   gis_dem_elevation_polygon         面/多面补 DEM 高程入口，支持 geometry（自动获取 DEM 表）
---   gis_dem_elevation_text_point      点/多点文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
---   gis_dem_elevation_text_line       线/多线文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
---   gis_dem_elevation_text_polygon    面/多面文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
---   gis_dem_elevation_text            解析 WKT/EWKT/GeoJSON 并返回 DEM 高程结果
+--   gis_dem_elevation_base            DEM 高程提取和补高程统一入口（唯一核心入口，p_dem_table 可选）
+--   gis_dem_parse_geometry_text       解析 WKT/EWKT/GeoJSON 文本为空间 geometry（内部 helper）
+--
+--   输出函数
+--   gis_dem_elevation_point            点/多点补 DEM 高程入口，支持 geometry（自动获取 DEM 表）
+--   gis_dem_elevation_line             线/多线补 DEM 高程入口，支持 geometry（自动获取 DEM 表）
+--   gis_dem_elevation_polygon          面/多面补 DEM 高程入口，支持 geometry（自动获取 DEM 表）
+--   gis_dem_elevation_geometry         按 geometry 自动分发到点/线/面专用入口
+--   gis_dem_elevation_text_point       点/多点文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
+--   gis_dem_elevation_text_line        线/多线文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
+--   gis_dem_elevation_text_polygon     面/多面文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
+--   gis_dem_elevation_text             解析 WKT/EWKT/GeoJSON 并返回 DEM 高程结果
+--   gis_dem_update_table_z0            按表名和几何列名批量补 DEM 高程
+--   gis_dem_reset_table_z0             按表名和几何列名批量清空 DEM 高程
 --
 -- 统一约定：
---   1. gis_dem_elevation_geometry 的 p_dem_table 可选：传了用传的，为空时按几何从 public.jc_sheng 自动获取；其余 wrapper 只传 geom，统一走核心入口。
+--   1. gis_dem_elevation_base 的 p_dem_table 可选：传了用传的，为空时按几何从 public.jc_sheng 自动获取；其余 wrapper 只传 geom，统一走核心入口。
 --   2. 输入 geometry 没有 SRID 时按 EPSG:4326 处理。
 --   3. 输入 geometry 已有 Z 值时，按 XY 查询 DEM，并用 DEM 高程生成新的 Z 值。
 --   4. 表不存在、未命中像元或 jc_sheng 未配置时，Z 值统一为 0。
---   5. gis_dem_elevation_geometry 是唯一核心入口，内部批量取瓦片、逐点内存取值；其余函数统一走该入口。
---   6. 点/线/面 geometry 入口使用 gis_dem_elevation_point/line/polygon。
+--   5. gis_dem_elevation_base 是唯一核心入口，内部批量取瓦片、逐点内存取值；其余函数统一走该入口。
+--   6. geometry 通用入口使用 gis_dem_elevation_geometry；点/线/面专用入口使用 gis_dem_elevation_point/line/polygon。
 --   7. 点/线/面 text 入口使用 gis_dem_elevation_text_point/line/polygon，支持 WKT、EWKT、GeoJSON。
 -- =============================================================================
 
@@ -36,7 +43,7 @@ CREATE EXTENSION IF NOT EXISTS postgis_raster;
 -- 重建函数前清理
 -- 说明：gis_drop_function 会删除同名函数的所有重载，避免签名变更导致旧函数残留。
 -- =============================================================================
-SELECT gis_drop_function('gis_dem_validate');
+SELECT public.gis_drop_function('gis_dem_validate');
 
 -- =============================================================================
 -- 函数名称：gis_dem_validate
@@ -261,15 +268,10 @@ COMMENT ON FUNCTION public.gis_dem_validate() IS '校验jc_sheng配置的省级D
 -- =============================================================================
 -- 重建函数前清理
 -- =============================================================================
-SELECT gis_drop_function('gis_dem_elevation');
+SELECT public.gis_drop_function('gis_dem_elevation_base');
 
 -- =============================================================================
--- 重建函数前清理
--- =============================================================================
-SELECT gis_drop_function('gis_dem_elevation_geometry');
-
--- =============================================================================
--- 函数名称：gis_dem_elevation_geometry
+-- 函数名称：gis_dem_elevation_base
 -- 函数功能：DEM 高程提取/补高程统一入口（唯一核心入口）
 -- 入参说明：
 --   1. p_geom      支持点、多点、线、多线、面、多面和集合，支持二维和三维输入。
@@ -283,7 +285,7 @@ SELECT gis_drop_function('gis_dem_elevation_geometry');
 --   4. 表不存在、jc_sheng 未配置或点未命中像元时，Z 值统一为 0。
 -- =============================================================================
 
-CREATE OR REPLACE FUNCTION public.gis_dem_elevation_geometry(
+CREATE OR REPLACE FUNCTION public.gis_dem_elevation_base(
     p_geom      geometry,
     p_dem_table text DEFAULT NULL
 )
@@ -500,13 +502,13 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_dem_elevation_geometry(geometry, text) IS 'DEM高程提取和补高程统一入口（唯一核心入口，p_dem_table 为空时按几何从jc_sheng自动获取）';
+COMMENT ON FUNCTION public.gis_dem_elevation_base(geometry, text) IS 'DEM高程提取和补高程统一入口（唯一核心入口，p_dem_table 为空时按几何从jc_sheng自动获取）';
 
 
 -- =============================================================================
 -- 重建函数前清理
 -- =============================================================================
-SELECT gis_drop_function('gis_dem_parse_geometry_text');
+SELECT public.gis_drop_function('gis_dem_parse_geometry_text');
 
 -- =============================================================================
 -- 函数名称：gis_dem_parse_geometry_text
@@ -562,13 +564,13 @@ $$;
 COMMENT ON FUNCTION public.gis_dem_parse_geometry_text(text) IS '解析WKT、EWKT或GeoJSON文本为空间geometry';
 
 
-
-
-
+-- =============================================================================
+-- 输出函数
+-- =============================================================================
 -- =============================================================================
 -- 重建函数前清理
 -- =============================================================================
-SELECT gis_drop_function('gis_dem_elevation_point');
+SELECT public.gis_drop_function('gis_dem_elevation_point');
 
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_point
@@ -576,7 +578,7 @@ SELECT gis_drop_function('gis_dem_elevation_point');
 -- 入参说明：p_point 支持 Point 和 MultiPoint。
 -- 返回说明：Point 返回 PointZ；MultiPoint 返回 MultiPointZ。
 -- 适用场景：业务语义明确为点位、航点或点集时使用；可避免误把线面传入点接口。
--- 注意事项：该函数是语义化包装，内部调用 gis_dem_elevation_geometry（p_dem_table 留空，由核心函数按几何从 jc_sheng 自动获取）；非点类型会直接抛错。
+-- 注意事项：该函数是语义化包装，内部调用 gis_dem_elevation_base（p_dem_table 留空，由核心函数按几何从 jc_sheng 自动获取）；非点类型会直接抛错。
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.gis_dem_elevation_point(
@@ -595,16 +597,125 @@ BEGIN
         RAISE EXCEPTION 'Only Point or MultiPoint geometry is supported: %', ST_GeometryType(p_point);
     END IF;
 
-    RETURN public.gis_dem_elevation_geometry(p_point);
+    RETURN public.gis_dem_elevation_base(p_point);
 END;
 $$;
 
 COMMENT ON FUNCTION public.gis_dem_elevation_point(geometry) IS '点/多点补DEM高程入口（自动获取DEM表）';
 
 -- =============================================================================
+-- 函数名称：gis_dem_elevation_line
+-- 函数功能：线/多线补高程入口，返回带 DEM Z 值的新线或多线
+-- 入参说明：p_line 支持 LineString 和 MultiLineString。
+-- 返回说明：LineString 返回 LineStringZ；MultiLineString 返回 MultiLineStringZ。
+-- 适用场景：业务语义明确为航线、轨迹或线路时使用；可避免误把面或点传入线接口。
+-- 注意事项：该函数是语义化包装，内部调用 gis_dem_elevation_base（p_dem_table 留空，由核心函数按几何从 jc_sheng 自动获取）；非线类型会直接抛错。
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.gis_dem_elevation_line(
+    p_line geometry
+)
+RETURNS geometry
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+    IF p_line IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    IF ST_GeometryType(p_line) NOT IN ('ST_LineString', 'ST_MultiLineString') THEN
+        RAISE EXCEPTION 'Only LineString or MultiLineString geometry is supported: %', ST_GeometryType(p_line);
+    END IF;
+
+    RETURN public.gis_dem_elevation_base(p_line);
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_dem_elevation_line(geometry) IS '线/多线补DEM高程入口（自动获取DEM表）';
+
+-- =============================================================================
 -- 重建函数前清理
 -- =============================================================================
-SELECT gis_drop_function('gis_dem_elevation_text_point');
+SELECT public.gis_drop_function('gis_dem_elevation_polygon');
+
+-- =============================================================================
+-- 函数名称：gis_dem_elevation_polygon
+-- 函数功能：面/多面补高程入口，返回带 DEM Z 值的新面或多面
+-- 入参说明：p_polygon 支持 Polygon 和 MultiPolygon。
+-- 返回说明：Polygon 返回 PolygonZ；MultiPolygon 返回 MultiPolygonZ。
+-- 适用场景：业务语义明确为面范围、作业区域或禁飞区范围时使用；可避免误把点线传入面接口。
+-- 注意事项：该函数是语义化包装，内部调用 gis_dem_elevation_base（p_dem_table 留空，由核心函数按几何从 jc_sheng 自动获取）；非面类型会直接抛错。
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.gis_dem_elevation_polygon(
+    p_polygon geometry
+)
+RETURNS geometry
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+    IF p_polygon IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    IF ST_GeometryType(p_polygon) NOT IN ('ST_Polygon', 'ST_MultiPolygon') THEN
+        RAISE EXCEPTION 'Only Polygon or MultiPolygon geometry is supported: %', ST_GeometryType(p_polygon);
+    END IF;
+
+    RETURN public.gis_dem_elevation_base(p_polygon);
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_dem_elevation_polygon(geometry) IS '面/多面补DEM高程入口（自动获取DEM表）';
+-- =============================================================================
+-- 重建函数前清理
+-- =============================================================================
+SELECT public.gis_drop_function('gis_dem_elevation_geometry');
+
+-- =============================================================================
+-- 函数名称：gis_dem_elevation_geometry
+-- 函数功能：根据 geometry 类型分发到点/线/面专用入口
+-- 入参说明：支持 Point/MultiPoint、LineString/MultiLineString、Polygon/MultiPolygon；其他几何回退基础入口。
+-- 返回说明：返回对应专用入口的补 DEM 高程结果。
+-- 适用场景：业务侧只有 geometry，不想自己判断几何类型时使用。
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.gis_dem_elevation_geometry(
+    p_geom geometry
+)
+RETURNS geometry
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_type text;
+BEGIN
+    IF p_geom IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    v_type := ST_GeometryType(p_geom);
+
+    IF v_type IN ('ST_Point', 'ST_MultiPoint') THEN
+        RETURN public.gis_dem_elevation_point(p_geom);
+    ELSIF v_type IN ('ST_LineString', 'ST_MultiLineString') THEN
+        RETURN public.gis_dem_elevation_line(p_geom);
+    ELSIF v_type IN ('ST_Polygon', 'ST_MultiPolygon') THEN
+        RETURN public.gis_dem_elevation_polygon(p_geom);
+    END IF;
+
+    RETURN public.gis_dem_elevation_base(p_geom);
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_dem_elevation_geometry(geometry) IS '根据geometry类型自动分发到点线面补DEM高程入口';
+
+-- =============================================================================
+-- 重建函数前清理
+-- =============================================================================
+SELECT public.gis_drop_function('gis_dem_elevation_text_point');
 
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_text_point
@@ -629,43 +740,7 @@ COMMENT ON FUNCTION public.gis_dem_elevation_text_point(text) IS '解析点/多�
 -- =============================================================================
 -- 重建函数前清理
 -- =============================================================================
-SELECT gis_drop_function('gis_dem_elevation_line');
-
--- =============================================================================
--- 函数名称：gis_dem_elevation_line
--- 函数功能：线/多线补高程入口，返回带 DEM Z 值的新线或多线
--- 入参说明：p_line 支持 LineString 和 MultiLineString。
--- 返回说明：LineString 返回 LineStringZ；MultiLineString 返回 MultiLineStringZ。
--- 适用场景：业务语义明确为航线、轨迹或线路时使用；可避免误把面或点传入线接口。
--- 注意事项：该函数是语义化包装，内部调用 gis_dem_elevation_geometry（p_dem_table 留空，由核心函数按几何从 jc_sheng 自动获取）；非线类型会直接抛错。
--- =============================================================================
-
-CREATE OR REPLACE FUNCTION public.gis_dem_elevation_line(
-    p_line geometry
-)
-RETURNS geometry
-LANGUAGE plpgsql
-STABLE
-AS $$
-BEGIN
-    IF p_line IS NULL THEN
-        RETURN NULL;
-    END IF;
-
-    IF ST_GeometryType(p_line) NOT IN ('ST_LineString', 'ST_MultiLineString') THEN
-        RAISE EXCEPTION 'Only LineString or MultiLineString geometry is supported: %', ST_GeometryType(p_line);
-    END IF;
-
-    RETURN public.gis_dem_elevation_geometry(p_line);
-END;
-$$;
-
-COMMENT ON FUNCTION public.gis_dem_elevation_line(geometry) IS '线/多线补DEM高程入口（自动获取DEM表）';
-
--- =============================================================================
--- 重建函数前清理
--- =============================================================================
-SELECT gis_drop_function('gis_dem_elevation_text_line');
+SELECT public.gis_drop_function('gis_dem_elevation_text_line');
 
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_text_line
@@ -690,43 +765,7 @@ COMMENT ON FUNCTION public.gis_dem_elevation_text_line(text) IS '解析线/多�
 -- =============================================================================
 -- 重建函数前清理
 -- =============================================================================
-SELECT gis_drop_function('gis_dem_elevation_polygon');
-
--- =============================================================================
--- 函数名称：gis_dem_elevation_polygon
--- 函数功能：面/多面补高程入口，返回带 DEM Z 值的新面或多面
--- 入参说明：p_polygon 支持 Polygon 和 MultiPolygon。
--- 返回说明：Polygon 返回 PolygonZ；MultiPolygon 返回 MultiPolygonZ。
--- 适用场景：业务语义明确为面范围、作业区域或禁飞区范围时使用；可避免误把点线传入面接口。
--- 注意事项：该函数是语义化包装，内部调用 gis_dem_elevation_geometry（p_dem_table 留空，由核心函数按几何从 jc_sheng 自动获取）；非面类型会直接抛错。
--- =============================================================================
-
-CREATE OR REPLACE FUNCTION public.gis_dem_elevation_polygon(
-    p_polygon geometry
-)
-RETURNS geometry
-LANGUAGE plpgsql
-STABLE
-AS $$
-BEGIN
-    IF p_polygon IS NULL THEN
-        RETURN NULL;
-    END IF;
-
-    IF ST_GeometryType(p_polygon) NOT IN ('ST_Polygon', 'ST_MultiPolygon') THEN
-        RAISE EXCEPTION 'Only Polygon or MultiPolygon geometry is supported: %', ST_GeometryType(p_polygon);
-    END IF;
-
-    RETURN public.gis_dem_elevation_geometry(p_polygon);
-END;
-$$;
-
-COMMENT ON FUNCTION public.gis_dem_elevation_polygon(geometry) IS '面/多面补DEM高程入口（自动获取DEM表）';
-
--- =============================================================================
--- 重建函数前清理
--- =============================================================================
-SELECT gis_drop_function('gis_dem_elevation_text_polygon');
+SELECT public.gis_drop_function('gis_dem_elevation_text_polygon');
 
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_text_polygon
@@ -751,7 +790,7 @@ COMMENT ON FUNCTION public.gis_dem_elevation_text_polygon(text) IS '解析面/�
 -- =============================================================================
 -- 重建函数前清理
 -- =============================================================================
-SELECT gis_drop_function('gis_dem_elevation_text');
+SELECT public.gis_drop_function('gis_dem_elevation_text');
 
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_text
@@ -810,8 +849,8 @@ BEGIN
         RAISE EXCEPTION 'Unsupported DEM geometry type: %', v_type;
     END IF;
 
-    -- 第三步：直接走 gis_dem_elevation_geometry，p_dem_table 留空由核心函数按几何从 jc_sheng 自动获取。
-    v_result_geom := public.gis_dem_elevation_geometry(v_geom);
+    -- 第三步：直接走 gis_dem_elevation_base，p_dem_table 留空由核心函数按几何从 jc_sheng 自动获取。
+    v_result_geom := public.gis_dem_elevation_base(v_geom);
 
     -- 第四步：点/多点返回补高程后的结果几何；单点额外返回 elevation 字段。
     IF v_type IN ('ST_Point', 'ST_MultiPoint') THEN
@@ -859,138 +898,9 @@ $$;
 COMMENT ON FUNCTION public.gis_dem_elevation_text(text) IS '解析WKT、EWKT或GeoJSON并返回DEM高程结果（自动获取DEM表）';
 
 -- =============================================================================
--- 调用示例
--- 说明：
---   1. 以下示例默认输入坐标为 EPSG:4326，经纬度顺序为 lon lat。
---   2. 已经持有 geometry 时使用 gis_dem_elevation_geometry 或点/线/面 geometry 语义入口。
---   3. 接口层收到 WKT、EWKT 或 GeoJSON 文本时，可使用点/线/面 text 专用入口。
---   4. 需要统一表结构返回时使用 gis_dem_elevation_text。
--- =============================================================================
-
--- 1. 校验 DEM 入库状态
--- SELECT * FROM public.gis_dem_validate();
-
--- 2. 使用基础统一入口给 Point 补 DEM 高程，返回 PointZ
---    p_dem_table 可省略：传了用传的；不传或传 NULL 时按几何从 jc_sheng 自动获取。
--- SELECT ST_AsText(
---     public.gis_dem_elevation_geometry(
---         ST_SetSRID(ST_MakePoint(113.65, 34.76), 4326),
---         'your_dem_table'
---     )
--- ) AS point_z;
--- -- 也可不传表名：
--- SELECT ST_AsText(public.gis_dem_elevation_geometry(ST_SetSRID(ST_MakePoint(113.65, 34.76), 4326))) AS point_z;
-
--- 3. 使用基础统一入口给 MultiPoint 补 DEM 高程，返回 MultiPointZ
--- SELECT ST_AsText(
---     public.gis_dem_elevation_geometry(
---         ST_GeomFromText('MULTIPOINT((113.65 34.76),(113.66 34.77))', 4326),
---         'your_dem_table'
---     )
--- ) AS multipoint_z;
-
--- 4. 使用基础统一入口给 LineString 补 DEM 高程，返回 LineStringZ
--- SELECT ST_AsText(
---     public.gis_dem_elevation_geometry(
---         ST_GeomFromText('LINESTRING(113.60 34.70,113.65 34.76,113.70 34.80)', 4326),
---         'your_dem_table'
---     )
--- ) AS line_z;
-
--- 5. 使用基础统一入口给 Polygon 补 DEM 高程，返回 PolygonZ
--- SELECT ST_AsText(
---     public.gis_dem_elevation_geometry(
---         ST_GeomFromText(
---             'POLYGON((113.60 34.70,113.70 34.70,113.70 34.80,113.60 34.80,113.60 34.70))',
---             4326
---         ),
---         'your_dem_table'
---     )
--- ) AS polygon_z;
-
--- 6. 点/多点补高程 geometry 专用入口（DEM 表名从 jc_sheng 自动获取）
--- SELECT ST_AsText(
---     public.gis_dem_elevation_point(
---         ST_SetSRID(ST_MakePoint(113.65, 34.76), 4326)
---     )
--- ) AS point_z;
---
--- SELECT ST_AsText(
---     public.gis_dem_elevation_point(
---         ST_GeomFromText('MULTIPOINT((113.65 34.76),(113.66 34.77))', 4326)
---     )
--- ) AS multipoint_z;
-
--- 7. 线/多线补高程 geometry 专用入口（DEM 表名从 jc_sheng 自动获取）
--- SELECT ST_AsText(
---     public.gis_dem_elevation_line(
---         ST_GeomFromText('LINESTRING(113.60 34.70,113.70 34.80)', 4326)
---     )
--- ) AS line_z;
---
--- SELECT ST_AsText(
---     public.gis_dem_elevation_line(
---         ST_GeomFromText('MULTILINESTRING((113.60 34.70,113.70 34.80),(113.62 34.72,113.68 34.78))', 4326)
---     )
--- ) AS multiline_z;
-
--- 8. 面/多面补高程 geometry 专用入口（DEM 表名从 jc_sheng 自动获取）
--- SELECT ST_AsText(
---     public.gis_dem_elevation_polygon(
---         ST_GeomFromText(
---             'POLYGON((113.60 34.70,113.70 34.70,113.70 34.80,113.60 34.80,113.60 34.70))',
---             4326
---         )
---     )
--- ) AS polygon_z;
---
--- SELECT ST_AsText(
---     public.gis_dem_elevation_polygon(
---         ST_GeomFromText(
---             'MULTIPOLYGON(((113.60 34.70,113.66 34.70,113.66 34.76,113.60 34.76,113.60 34.70)),((113.68 34.72,113.72 34.72,113.72 34.78,113.68 34.78,113.68 34.72)))',
---             4326
---         )
---     )
--- ) AS multipolygon_z;
-
--- 9. 点/线/面 text 专用入口：WKT、EWKT、GeoJSON Geometry、GeoJSON Feature 都支持，返回补高程后的 Z 几何。
---    DEM 表名从 jc_sheng 自动获取，无需传表名。
--- SELECT ST_AsText(public.gis_dem_elevation_text_point('POINT(113.65 34.76)')) AS point_text_z;
---
--- SELECT ST_AsText(public.gis_dem_elevation_text_line('SRID=4326;LINESTRING(113.60 34.70,113.70 34.80)')) AS line_text_z;
---
--- SELECT ST_AsText(
---     public.gis_dem_elevation_text_polygon(
---         '{"type":"Feature","properties":{"name":"demo"},"geometry":{"type":"Polygon","coordinates":[[[113.60,34.70],[113.70,34.70],[113.70,34.80],[113.60,34.80],[113.60,34.70]]]}}'
---     )
--- ) AS polygon_text_z;
-
--- 10. 文本统一入口：WKT、EWKT、GeoJSON Geometry、GeoJSON Feature 都支持。
---    返回字段包含 geom_type、seq、point_geom、elevation、result_geom、result_wkt。
---    点会额外返回 elevation；线、面、集合主要看 result_geom/result_wkt。
---    DEM 表名从 jc_sheng 自动获取，无需传表名。
---
--- 10.1 WKT：未声明 SRID 时默认按 EPSG:4326 解析。
--- SELECT *
--- FROM public.gis_dem_elevation_text('POINT(113.65 34.76)');
---
--- 10.2 EWKT：使用文本内声明的 SRID。
--- SELECT result_wkt
--- FROM public.gis_dem_elevation_text('SRID=4326;LINESTRING(113.60 34.70,113.70 34.80)');
---
--- 10.3 GeoJSON Geometry：适合前端直接传 geometry 对象字符串。
--- SELECT result_wkt
--- FROM public.gis_dem_elevation_text('{"type":"LineString","coordinates":[[113.60,34.70],[113.70,34.80]]}');
---
--- 10.4 GeoJSON Feature：函数自动读取 geometry 节点，properties 不参与计算。
--- SELECT result_wkt
--- FROM public.gis_dem_elevation_text('{"type":"Feature","properties":{"name":"demo"},"geometry":{"type":"Polygon","coordinates":[[[113.60,34.70],[113.70,34.70],[113.70,34.80],[113.60,34.80],[113.60,34.70]]]}}');
-
-
--- =============================================================================
 -- 重建函数前清理
 -- =============================================================================
-SELECT gis_drop_function('gis_dem_update_table_z0');
+SELECT public.gis_drop_function('gis_dem_update_table_z0');
 
 -- =============================================================================
 -- 函数名称：gis_dem_update_table_z0
@@ -1006,7 +916,7 @@ SELECT gis_drop_function('gis_dem_update_table_z0');
 --   1. 处理 Point/MultiPoint（批量）、LineString/MultiLineString（单条）、Polygon/MultiPolygon（单条）。
 --   2. 二维 geometry 也会视为需要补高程。
 --   3. 三维 geometry 只有 ST_ZMin=0 且 ST_ZMax=0 时才会补 DEM，已有真实高程不会覆盖。
---   4. 每行调用 gis_dem_elevation_geometry，p_dem_table 留空由核心函数按几何从 jc_sheng 自动获取。
+--   4. 每行调用 gis_dem_elevation_base，p_dem_table 留空由核心函数按几何从 jc_sheng 自动获取。
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.gis_dem_update_table_z0(
@@ -1108,7 +1018,7 @@ BEGIN
               AND ST_GeometryType(%I) = ANY (ARRAY[''ST_Point'', ''ST_MultiPoint'']::text[])
               AND (ST_NDims(%I) < 3 OR (COALESCE(ST_ZMin(%I), 0) = 0 AND COALESCE(ST_ZMax(%I), 0) = 0))
         )
-        UPDATE %s t SET %I = public.gis_dem_elevation_geometry(t.%I)
+        UPDATE %s t SET %I = public.gis_dem_elevation_base(t.%I)
         FROM todo WHERE t.ctid = todo.ctid',
         v_table_reg, p_geom_column, p_geom_column, p_geom_column, p_geom_column, p_geom_column,
         v_table_reg, p_geom_column, p_geom_column
@@ -1133,7 +1043,7 @@ BEGIN
         IF v_line_ctids IS NOT NULL THEN
             FOREACH v_ctid IN ARRAY v_line_ctids LOOP
                 EXECUTE format(
-                    'UPDATE %s t SET %I = public.gis_dem_elevation_geometry(t.%I)
+                    'UPDATE %s t SET %I = public.gis_dem_elevation_base(t.%I)
                      WHERE t.ctid::text = %L',
                     v_table_reg, p_geom_column, p_geom_column, v_ctid
                 );
@@ -1159,7 +1069,7 @@ BEGIN
         IF v_polygon_ctids IS NOT NULL THEN
             FOREACH v_ctid IN ARRAY v_polygon_ctids LOOP
                 EXECUTE format(
-                    'UPDATE %s t SET %I = public.gis_dem_elevation_geometry(t.%I)
+                    'UPDATE %s t SET %I = public.gis_dem_elevation_base(t.%I)
                      WHERE t.ctid::text = %L',
                     v_table_reg, p_geom_column, p_geom_column, v_ctid
                 );
@@ -1193,7 +1103,7 @@ COMMENT ON FUNCTION public.gis_dem_update_table_z0(text, text) IS '按表名、�
 -- =============================================================================
 -- 重建函数前清理
 -- =============================================================================
-SELECT gis_drop_function('gis_dem_reset_table_z0');
+SELECT public.gis_drop_function('gis_dem_reset_table_z0');
 
 -- =============================================================================
 -- 函数名称：gis_dem_reset_table_z0
@@ -1477,93 +1387,57 @@ COMMENT ON FUNCTION public.gis_dem_reset_table_z0(text, text) IS '按表名和�
 
 
 -- =============================================================================
--- 调用示例：批量更新表中 Z 为 0 的点/线/面 DEM 高程
--- 说明：
---   1. 以下示例会直接 UPDATE 目标表，请先在测试库或事务中确认候选数量。
---   2. 二维点/线/面或 Z 全为 0 的三维点/线/面会被更新为 DEM 高程。
---   3. 已有非 0 Z 值的数据不会被覆盖。
---   4. DEM 表名按行从 jc_sheng 自动获取，无需传表名。
+-- 调用示例
 -- =============================================================================
 
--- 12.1 先统计 bo_electric_fence.geom 中需要补 DEM 的候选数据
--- SELECT count(*) AS need_update_count
--- FROM public.bo_electric_fence
--- WHERE geom IS NOT NULL
---   AND ST_GeometryType(geom) IN (
---       'ST_Point', 'ST_MultiPoint',
---       'ST_LineString', 'ST_MultiLineString',
---       'ST_Polygon', 'ST_MultiPolygon'
---   )
---   AND (
---       ST_NDims(geom) < 3
---       OR (
---           COALESCE(ST_ZMin(geom), 0) = 0
---           AND COALESCE(ST_ZMax(geom), 0) = 0
---       )
---   );
+-- 1. gis_dem_validate
+-- 校验 public.jc_sheng 配置的 DEM 表是否可用。
+-- SELECT * FROM public.gis_dem_validate();
 
--- 12.2 批量补 DEM 高程：表名支持 schema.table，列名按实际几何列传入
--- SELECT *
--- FROM public.gis_dem_update_table_z0('public.bo_electric_fence', 'geom');
+-- 2. gis_dem_elevation_base
+-- DEM 核心入口，p_dem_table 留空时按几何从 jc_sheng 自动获取。
+-- SELECT ST_AsText(public.gis_dem_elevation_base(ST_SetSRID(ST_MakePoint(113.65, 34.76), 4326)));
 
--- 12.3 在事务中试跑，确认返回结果后再 COMMIT
--- BEGIN;
--- SELECT *
--- FROM public.gis_dem_update_table_z0('public.bo_electric_fence', 'geom');
--- -- 检查更新后的 Z 值范围
--- SELECT
---     id,
---     ST_NDims(geom) AS dims,
---     ST_ZMin(geom) AS z_min,
---     ST_ZMax(geom) AS z_max
--- FROM public.bo_electric_fence
--- WHERE geom IS NOT NULL
--- ORDER BY create_time DESC
--- LIMIT 20;
--- COMMIT;
--- -- 如检查结果不符合预期，可在 COMMIT 前执行：ROLLBACK;
+-- 3. gis_dem_parse_geometry_text
+-- 解析 WKT、EWKT 或 GeoJSON 文本为空间 geometry。
+-- SELECT ST_AsText(public.gis_dem_parse_geometry_text('POINT(113.65 34.76)'));
 
+-- 4. gis_dem_elevation_point
+-- 点/多点 geometry 入口。
+-- SELECT ST_AsText(public.gis_dem_elevation_point(ST_SetSRID(ST_MakePoint(113.65, 34.76), 4326)));
 
--- =============================================================================
--- 调用示例：批量清空表中点/线/面的 DEM 高程
--- 说明：
---   1. 以下示例会直接 UPDATE 目标表，请先在测试库或事务中确认候选数量。
---   2. 二维点/线/面会被转换为 Z=0 的三维几何。
---   3. 已有非 0 Z 值的点/线/面会被重置为 Z=0。
--- =============================================================================
+-- 5. gis_dem_elevation_line
+-- 线/多线 geometry 入口。
+-- SELECT ST_AsText(public.gis_dem_elevation_line(ST_GeomFromText('LINESTRING(113.60 34.70,113.70 34.80)', 4326)));
 
--- 13.1 先统计 bo_electric_fence.geom 中需要清空高程的候选数据
--- SELECT count(*) AS need_reset_count
--- FROM public.bo_electric_fence
--- WHERE geom IS NOT NULL
---   AND ST_GeometryType(geom) IN (
---       'ST_Point', 'ST_MultiPoint',
---       'ST_LineString', 'ST_MultiLineString',
---       'ST_Polygon', 'ST_MultiPolygon'
---   )
---   AND (
---       ST_NDims(geom) < 3
---       OR COALESCE(ST_ZMin(geom), 0) <> 0
---       OR COALESCE(ST_ZMax(geom), 0) <> 0
---   );
+-- 6. gis_dem_elevation_polygon
+-- 面/多面 geometry 入口。
+-- SELECT ST_AsText(public.gis_dem_elevation_polygon(ST_GeomFromText('POLYGON((113.60 34.70,113.70 34.70,113.70 34.80,113.60 34.80,113.60 34.70))', 4326)));
 
--- 13.2 批量清空 DEM 高程：表名支持 schema.table，列名按实际几何列传入
--- SELECT *
--- FROM public.gis_dem_reset_table_z0('public.bo_electric_fence', 'geom');
+-- 7. gis_dem_elevation_geometry
+-- 根据 geometry 自动分发到点/线/面专用入口。
+-- SELECT ST_AsText(public.gis_dem_elevation_geometry(ST_GeomFromText('LINESTRING(113.60 34.70,113.70 34.80)', 4326)));
 
--- 13.3 在事务中试跑，确认返回结果后再 COMMIT
--- BEGIN;
--- SELECT *
--- FROM public.gis_dem_reset_table_z0('public.bo_electric_fence', 'geom');
--- -- 检查清空后的 Z 值范围
--- SELECT
---     id,
---     ST_NDims(geom) AS dims,
---     ST_ZMin(geom) AS z_min,
---     ST_ZMax(geom) AS z_max
--- FROM public.bo_electric_fence
--- WHERE geom IS NOT NULL
--- ORDER BY create_time DESC
--- LIMIT 20;
--- COMMIT;
--- -- 如检查结果不符合预期，可在 COMMIT 前执行：ROLLBACK;
+-- 8. gis_dem_elevation_text_point
+-- 点/多点文本入口。
+-- SELECT ST_AsText(public.gis_dem_elevation_text_point('POINT(113.65 34.76)'));
+
+-- 9. gis_dem_elevation_text_line
+-- 线/多线文本入口。
+-- SELECT ST_AsText(public.gis_dem_elevation_text_line('LINESTRING(113.60 34.70,113.70 34.80)'));
+
+-- 10. gis_dem_elevation_text_polygon
+-- 面/多面文本入口。
+-- SELECT ST_AsText(public.gis_dem_elevation_text_polygon('POLYGON((113.60 34.70,113.70 34.70,113.70 34.80,113.60 34.80,113.60 34.70))'));
+
+-- 11. gis_dem_elevation_text
+-- 统一文本入口。
+-- SELECT * FROM public.gis_dem_elevation_text('POINT(113.65 34.76)');
+
+-- 12. gis_dem_update_table_z0
+-- 按表名和几何列名批量补 DEM 高程。
+-- SELECT * FROM public.gis_dem_update_table_z0('public.bo_electric_fence', 'geom');
+
+-- 13. gis_dem_reset_table_z0
+-- 按表名和几何列名批量清空 DEM 高程。
+-- SELECT * FROM public.gis_dem_reset_table_z0('public.bo_electric_fence', 'geom');
