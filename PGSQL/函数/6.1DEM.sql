@@ -603,6 +603,12 @@ $$;
 
 COMMENT ON FUNCTION public.gis_dem_elevation_point(geometry) IS '点/多点补DEM高程入口（自动获取DEM表）';
 
+
+-- =============================================================================
+-- 重建函数前清理
+-- =============================================================================
+SELECT public.gis_drop_function('gis_dem_elevation_line');
+
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_line
 -- 函数功能：线/多线补高程入口，返回带 DEM Z 值的新线或多线
@@ -611,7 +617,6 @@ COMMENT ON FUNCTION public.gis_dem_elevation_point(geometry) IS '点/多点补DE
 -- 适用场景：业务语义明确为航线、轨迹或线路时使用；可避免误把面或点传入线接口。
 -- 注意事项：该函数是语义化包装，内部调用 gis_dem_elevation_base（p_dem_table 留空，由核心函数按几何从 jc_sheng 自动获取）；非线类型会直接抛错。
 -- =============================================================================
-
 CREATE OR REPLACE FUNCTION public.gis_dem_elevation_line(
     p_line geometry
 )
