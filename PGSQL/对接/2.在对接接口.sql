@@ -22,54 +22,56 @@ SELECT public.gis_dem_elevation_base(
 -- ============================================================================
 -- gis_dem_elevation_point / gis_dem_elevation_line / gis_dem_elevation_polygon
 -- 功能：点、线、面 geometry 专用 DEM 补高入口。
+-- 返回：code, msg, geom_type, data, geom, geom_geojson。
 -- ============================================================================
-SELECT ST_AsText(public.gis_dem_elevation_point(
+SELECT * FROM public.gis_dem_elevation_point(
     ST_SetSRID(ST_GeomFromText('POINT(113.65 34.76)'), 4326)
-)) AS point_z;
+);
 
-SELECT ST_AsText(public.gis_dem_elevation_line(
+SELECT * FROM public.gis_dem_elevation_line(
     ST_SetSRID(ST_GeomFromText('LINESTRING(113.60 34.70,113.70 34.80)'), 4326)
-)) AS line_z;
+);
 
-SELECT ST_AsText(public.gis_dem_elevation_polygon(
+SELECT * FROM public.gis_dem_elevation_polygon(
     ST_SetSRID(ST_GeomFromText('POLYGON((113.60 34.70,113.70 34.70,113.70 34.80,113.60 34.80,113.60 34.70))'), 4326)
-)) AS polygon_z;
+);
 
 -- ============================================================================
 -- gis_dem_elevation_geometry
 -- 功能：按 geometry 自动分发到点/线/面专用入口。
+-- 返回：code, msg, geom_type, data, geom, geom_geojson。
 -- ============================================================================
-SELECT ST_AsText(
-    public.gis_dem_elevation_geometry(
-        ST_GeomFromText('LINESTRING(113.60 34.70,113.70 34.80)', 4326)
-    )
-) AS result_wkt;
+SELECT *
+FROM public.gis_dem_elevation_geometry(
+    ST_GeomFromText('LINESTRING(113.60 34.70,113.70 34.80)', 4326)
+);
 
 -- ============================================================================
 -- gis_dem_elevation_text_point / gis_dem_elevation_text_line / gis_dem_elevation_text_polygon
 -- 功能：点、线、面文本专用 DEM 补高入口，支持 WKT、EWKT、GeoJSON。
+-- 返回：code, msg, geom_type, data, geom, geom_geojson。
 -- ============================================================================
-SELECT ST_AsText(public.gis_dem_elevation_text_point('POINT(113.65 34.76)')) AS point_text_z;
-SELECT ST_AsText(public.gis_dem_elevation_text_point('{"type":"Point","coordinates":[113.479098,34.814843,0.0]}')) AS point_geojson_z;
+SELECT * FROM public.gis_dem_elevation_text_point('POINT(113.65 34.76)');
+SELECT * FROM public.gis_dem_elevation_text_point('{"type":"Point","coordinates":[113.479098,34.814843,0.0]}');
 
-SELECT ST_AsText(public.gis_dem_elevation_text_line(
+SELECT * FROM public.gis_dem_elevation_text_line(
     'SRID=4326;LINESTRING(113.60 34.70,113.70 34.80)'
-)) AS line_text_z;
-SELECT ST_AsText(public.gis_dem_elevation_text_line(
+);
+SELECT * FROM public.gis_dem_elevation_text_line(
     '{"type":"LineString","coordinates":[[113.60,34.70],[113.70,34.80]]}'
-)) AS line_geojson_z;
+);
 
-SELECT ST_AsText(public.gis_dem_elevation_text_polygon(
+SELECT * FROM public.gis_dem_elevation_text_polygon(
     '{"type":"Polygon","coordinates":[[[113.60,34.70],[113.70,34.70],[113.70,34.80],[113.60,34.80],[113.60,34.70]]]}'
-)) AS polygon_text_z;
-SELECT ST_AsText(public.gis_dem_elevation_text_polygon(
+);
+SELECT * FROM public.gis_dem_elevation_text_polygon(
     '{"type":"Polygon","coordinates":[[[113.527032,34.841345,0.0],[113.530384,34.841501,0.0],[113.525956,34.839522,0.0],[113.523363,34.839522,0.0],[113.522225,34.842648,0.0],[113.523806,34.842075,0.0],[113.527032,34.841345,0.0]]]}'
-)) AS polygon_geojson_z;
+);
 
 -- ============================================================================
 -- gis_dem_elevation_text
 -- 功能：解析 WKT、EWKT 或 GeoJSON，并返回 DEM 高程结果表。
--- 返回：geom_type, seq, point_geom, elevation, result_geom, result_wkt。
+-- 返回：code, msg, geom_type, data, geom, geom_geojson。
 -- ============================================================================
 SELECT *
 FROM public.gis_dem_elevation_text('POINT(113.65 34.76)');
