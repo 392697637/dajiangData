@@ -1,0 +1,48 @@
+```cmd
+raster2pgsql -s 4326 -I -C -M -t 256x256 "E:\DEM\HENAN_4326.tif" public.gis_dem_henan_4326 > E:\DEM\gis_dem_henan_4326.sql
+```
+导入数据库：
+```cmd
+set PGPASSWORD=Ktd@postSQL@2026!@#
+psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f E:\DEM\gis_dem_henan_4326.sql
+``
+-------------------------TIF---SQL-------------------------
+raster2pgsql -s 4326 -I -C -M -t 256x256 "D:\MAPDATA\DEM\4326\SHANDONG-4326.tif" public.gis_dem_shandong > D:\MAPDATA\DEM\4326\gis_dem_shandong.sql
+raster2pgsql -s 4326 -I -C -M -t 256x256 "D:\MAPDATA\DEM\4326\GUANGDONG-4326.tif" public.gis_dem_guangdong > D:\MAPDATA\DEM\4326\gis_dem_guangdong.sql
+raster2pgsql -s 4326 -I -C -M -t 256x256 "D:\MAPDATA\DEM\4326\NEIMENGGU-4326.tif" public.gis_dem_neimenggu > D:\MAPDATA\DEM\4326\gis_dem_neimenggu.sql
+raster2pgsql -s 4326 -I -C -M -t 256x256 "D:\MAPDATA\DEM\4326\NINGXIA-4326.tif" public.gis_dem_ningxia > D:\MAPDATA\DEM\4326\gis_dem_ningxia.sql
+raster2pgsql -s 4326 -I -C -M -t 256x256 "D:\MAPDATA\DEM\4326\SICHUAN-4326.tif" public.gis_dem_sichuan > D:\MAPDATA\DEM\4326\gis_dem_sichuan.sql
+raster2pgsql -s 4326 -I -C -M -t 256x256 "D:\MAPDATA\DEM\4326\ZHEJIANG-4326.tif" public.gis_dem_zhejiang > D:\MAPDATA\DEM\4326\gis_dem_zhejiang.sql
+raster2pgsql -s 4326 -I -C -M -t 256x256 "D:\MAPDATA\DEM\4326\HENAN-4326.tif" public.gis_dem_henan > D:\MAPDATA\DEM\4326\gis_dem_henan.sql
+
+-------------------------DEV-------------------------
+set PGPASSWORD=KtdpostSQL@2026!@#
+psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_shandong.sql
+psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_guangdong.sql
+psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_neimenggu.sql
+psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_ningxia.sql
+psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_sichuan.sql
+psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_zhejiang.sql
+psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_henan.sql
+
+-------------------------TEST-------------------------
+set PGPASSWORD=KtdpostSQL@2026!@#
+psql -h 192.168.110.15 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_shandong.sql
+psql -h 192.168.110.15 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_guangdong.sql
+psql -h 192.168.110.15 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_neimenggu.sql
+psql -h 192.168.110.15 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_ningxia.sql
+psql -h 192.168.110.15 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_sichuan.sql
+psql -h 192.168.110.15 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_zhejiang.sql
+psql -h 192.168.110.15 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_henan.sql
+
+-------------------------正式-------------------------
+set PGPASSWORD=Ktd@postSQL@2026!@#
+psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_shandong.sql
+psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_guangdong.sql
+psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_neimenggu.sql
+psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_ningxia.sql
+psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_sichuan.sql
+psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_zhejiang.sql
+psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_henan.sql
+
+ 
