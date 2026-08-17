@@ -15,7 +15,14 @@
 --   1. 本文件包含 DROP TABLE、pg_terminate_backend、ALTER TABLE SET LOGGED 等高影响操作。
 --   2. 清理和终止连接类 SQL 默认放在尾部调用示例中，执行前请确认目标对象和业务影响。
 --   3. ALTER TABLE ... SET LOGGED 会重写整张表，大表会比较慢，并会占用表锁，建议低峰期执行。
--- =============================================================================
+-- =============================================================================--
+-- 本次补充说明：
+--   6. wrj_sfky_neimenggu 试飞区表维护。
+--      - 将导入表常见主键字段 gid 统一改名为 id，兼容后续函数中对 id 的读取。
+--      - 将 geom 字段定义为 geometry(MultiPolygon, 4326)，避免 mixed SRID 报错。
+--      - 将已有 Polygon/MultiPolygon 数据统一转为 MultiPolygon，并为 SRID=0 的数据补 4326。
+--      - 末尾提供 geometry_columns 查询，用于确认字段类型和坐标系。
+--
 
 
 -- =============================================================================
@@ -342,3 +349,50 @@ WHERE ST_GeometryType(geom) = 'ST_MultiSurface';
 
 -- 示例6：刷新指定项目网格表统计信息。
 -- ANALYZE public.gis_grid_nodes_2c95908e958f3b75019593551f520126;
+
+-- =============================================================================
+-- 7.  试飞区表字段与坐标系修复
+-- 说明：本节用于修复试飞区表字段名和空间坐标系。
+-- 执行顺序：先查询，再改字段，再改表定义坐标系，最后改列数据坐标系。
+-- 表定义坐标系：geometry_columns 中的 srid，表示 geom 字段声明的坐标系约束。
+-- 列数据坐标系：ST_SRID(geom)，表示每条 geom 数据自身携带的 SRID。
+-- 二者关系：表定义约束后续写入，列数据修复已有记录；两边统一为 4326 才能避免 mixed SRID。
+-- =============================================================================
+ 
+ -- 查询表坐标系信息
+-- 查询说明：先查看 geometry_columns，确认当前 geom 字段定义的几何类型和 SRID。
+-- 这里查的是表定义坐标系，不是逐条数据的 ST_SRID(geom)。
+  SELECT
+  f_table_schema,
+  f_table_name,
+  f_geometry_column,
+  type,
+  srid
+FROM geometry_columns
+WHERE f_table_schema = 'public'
+  AND f_table_name = 'wrj_sfky_neimenggu';
+
+
+--表GID改为id
+-- 字段说明：业务函数读取 id 字段；如果导入表字段是 gid，这里改名为 id。
+-- 注意：如果 gid 已经不存在或 id 已经存在，这句会报错，执行前需要先确认字段状态。
+ALTER TABLE public.wrj_sfky_neimenggu
+RENAME COLUMN gid TO id;
+
+--表定义坐标系
+-- 表定义坐标系说明：把 geom 字段声明为 MultiPolygon 类型，并限定 SRID=4326。
+-- USING 中的 ST_Multi 用于把 Polygon/MultiPolygon 统一为 MultiPolygon。
+-- ST_SetSRID 只设置坐标系编号，不做坐标转换；这里默认原始坐标就是 WGS84 经纬度。
+ALTER TABLE public.wrj_sfky_neimenggu
+ALTER COLUMN geom TYPE geometry(MultiPolygon, 4326)
+USING ST_Multi(ST_SetSRID(geom, 4326));
+
+--列定义坐标系
+-- 列数据坐标系说明：兜底修复已有 geom 数据自身携带的 SRID。
+-- 只处理 ST_SRID(geom)=0 的记录，把数据标识补为 4326。
+UPDATE public.wrj_sfky_neimenggu
+SET geom = ST_SetSRID(geom, 4326)
+WHERE geom IS NOT NULL
+  AND ST_SRID(geom) = 0;
+
+
