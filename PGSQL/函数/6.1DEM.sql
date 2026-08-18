@@ -27,6 +27,7 @@
 --   5. gis_dem_elevation_base 是唯一核心入口，内部批量取瓦片、逐点内存取值；其余函数统一走该入口。
 --   6. geometry 通用入口使用 gis_dem_elevation_geometry；点/线/面专用入口使用 gis_dem_elevation_point/line/polygon。
 --   7. 点/线/面 text 入口使用 gis_dem_elevation_text_point/line/polygon，支持 WKT、EWKT、GeoJSON。
+--   8. GeoJSON 文本解析依赖 baseFunction/gis_geojson_to_geom.sql 中的 public.gis_geojson_to_geom。
 -- =============================================================================
 
 
@@ -516,7 +517,7 @@ SELECT public.gis_drop_function('gis_dem_parse_geometry_text');
 -- 入参说明：
 --   1. WKT：未声明 SRID 时默认按 EPSG:4326。
 --   2. EWKT：形如 SRID=4326;POINT(...)，保留文本内 SRID。
---   3. GeoJSON：支持 Geometry 和 Feature；Feature 自动读取 geometry 节点。
+--   3. GeoJSON：统一调用 public.gis_geojson_to_geom，支持 Geometry、Feature、FeatureCollection，并自动闭合面环。
 -- 返回说明：返回解析后的 geometry；空字符串返回 NULL。
 -- 注意事项：这是 6.1 内部 helper，业务侧优先调用点/线/面 text 专用入口或 gis_dem_elevation_text。
 -- =============================================================================
@@ -530,7 +531,6 @@ STABLE
 AS $$
 DECLARE
     v_text text;
-    v_json jsonb;
     v_geom geometry;
 BEGIN
     v_text := btrim(p_geom_text);
@@ -540,13 +540,7 @@ BEGIN
     END IF;
 
     IF left(v_text, 1) = '{' THEN
-        v_json := v_text::jsonb;
-
-        IF v_json ->> 'type' = 'Feature' THEN
-            v_geom := ST_GeomFromGeoJSON((v_json -> 'geometry')::text);
-        ELSE
-            v_geom := ST_GeomFromGeoJSON(v_text);
-        END IF;
+        v_geom := public.gis_geojson_to_geom(v_text);
 
         IF ST_SRID(v_geom) = 0 THEN
             v_geom := ST_SetSRID(v_geom, 4326);
@@ -562,6 +556,63 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_dem_parse_geometry_text(text) IS '解析WKT、EWKT或GeoJSON文本为空间geometry';
+
+-- =============================================================================
+-- 重建函数前清理
+-- =============================================================================
+SELECT public.gis_drop_function('gis_build_feature_geojson');
+
+-- =============================================================================
+-- 函数名称：gis_build_feature_geojson
+-- 函数功能：将补 DEM 高程后的 geometry 输出为 GeoJSON Feature
+-- 入参说明：
+--   1. p_geom 为补 DEM 高程后的 geometry。
+--   2. p_source_text 可传原始 WKT/EWKT/GeoJSON 文本；如果原始文本是 Feature 且带 properties，则原样透传 properties。
+-- 返回说明：返回 GeoJSON Feature 文本；源数据没有 properties 时不输出空 properties。
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.gis_build_feature_geojson(
+    p_geom geometry,
+    p_source_text text DEFAULT NULL
+)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_feature jsonb;
+    v_source_json jsonb;
+    v_source_text text;
+BEGIN
+    IF p_geom IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    v_feature := jsonb_build_object(
+        'type', 'Feature',
+        'geometry', ST_AsGeoJSON(p_geom)::jsonb
+    );
+
+    v_source_text := btrim(p_source_text);
+
+    IF v_source_text IS NOT NULL AND v_source_text <> '' AND left(v_source_text, 1) = '{' THEN
+        v_source_json := v_source_text::jsonb;
+
+        IF v_source_json ->> 'type' = 'Feature' AND v_source_json ? 'properties' THEN
+            v_feature := v_feature || jsonb_build_object('properties', v_source_json -> 'properties');
+        END IF;
+    END IF;
+
+    RETURN v_feature::text;
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object(
+        'type', 'Feature',
+        'geometry', ST_AsGeoJSON(p_geom)::jsonb
+    )::text;
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_build_feature_geojson(geometry, text) IS '将geometry输出为GeoJSON Feature，原始Feature带properties时透传properties';
 
 
 -- =============================================================================
@@ -616,7 +667,7 @@ BEGIN
     v_result := public.gis_dem_elevation_base(p_point);
 
     RETURN QUERY SELECT 200, 'DEM高程补充完成'::text,
-        v_type, ST_AsEWKT(p_point), v_result, ST_AsGeoJSON(v_result);
+        v_type, ST_AsEWKT(p_point), v_result, public.gis_build_feature_geojson(v_result);
 EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT 500,
         format('DEM高程补充失败：%s', SQLERRM),
@@ -678,7 +729,7 @@ BEGIN
     v_result := public.gis_dem_elevation_base(p_line);
 
     RETURN QUERY SELECT 200, 'DEM高程补充完成'::text,
-        v_type, ST_AsEWKT(p_line), v_result, ST_AsGeoJSON(v_result);
+        v_type, ST_AsEWKT(p_line), v_result, public.gis_build_feature_geojson(v_result);
 EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT 500,
         format('DEM高程补充失败：%s', SQLERRM),
@@ -740,7 +791,7 @@ BEGIN
     v_result := public.gis_dem_elevation_base(p_polygon);
 
     RETURN QUERY SELECT 200, 'DEM高程补充完成'::text,
-        v_type, ST_AsEWKT(p_polygon), v_result, ST_AsGeoJSON(v_result);
+        v_type, ST_AsEWKT(p_polygon), v_result, public.gis_build_feature_geojson(v_result);
 EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT 500,
         format('DEM高程补充失败：%s', SQLERRM),
@@ -804,7 +855,7 @@ BEGIN
     v_result := public.gis_dem_elevation_base(p_geom);
 
     RETURN QUERY SELECT 200, 'DEM高程补充完成'::text,
-        v_type, ST_AsEWKT(p_geom), v_result, ST_AsGeoJSON(v_result);
+        v_type, ST_AsEWKT(p_geom), v_result, public.gis_build_feature_geojson(v_result);
 EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT 500,
         format('DEM高程补充失败：%s', SQLERRM),
@@ -825,7 +876,7 @@ SELECT public.gis_drop_function('gis_dem_elevation_text_point');
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_text_point
 -- 函数功能：点/多点文本补高程入口
--- 入参说明：p_point_text 支持 Point/MultiPoint 的 WKT、EWKT、GeoJSON Geometry 或 GeoJSON Feature。
+-- 入参说明：p_point_text 支持 Point/MultiPoint 的 WKT、EWKT、GeoJSON Geometry、GeoJSON Feature 或 FeatureCollection。
 -- 返回说明：统一返回 code、msg、geom_type、data、geom、geom_geojson。
 -- 注意事项：文本解析后仍会做点/多点类型校验；非点类型会直接抛错。
 -- =============================================================================
@@ -870,7 +921,7 @@ BEGIN
     v_result := public.gis_dem_elevation_base(v_geom);
 
     RETURN QUERY SELECT 200, 'DEM高程补充完成'::text,
-        v_type, p_point_text, v_result, ST_AsGeoJSON(v_result);
+        v_type, p_point_text, v_result, public.gis_build_feature_geojson(v_result, p_point_text);
 EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT 500,
         format('DEM高程补充失败：%s', SQLERRM),
@@ -888,7 +939,7 @@ SELECT public.gis_drop_function('gis_dem_elevation_text_line');
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_text_line
 -- 函数功能：线/多线文本补高程入口
--- 入参说明：p_line_text 支持 LineString/MultiLineString 的 WKT、EWKT、GeoJSON Geometry 或 GeoJSON Feature。
+-- 入参说明：p_line_text 支持 LineString/MultiLineString 的 WKT、EWKT、GeoJSON Geometry、GeoJSON Feature 或 FeatureCollection。
 -- 返回说明：统一返回 code、msg、geom_type、data、geom、geom_geojson。
 -- 注意事项：文本解析后仍会做线/多线类型校验；非线类型会直接抛错。
 -- =============================================================================
@@ -933,7 +984,7 @@ BEGIN
     v_result := public.gis_dem_elevation_base(v_geom);
 
     RETURN QUERY SELECT 200, 'DEM高程补充完成'::text,
-        v_type, p_line_text, v_result, ST_AsGeoJSON(v_result);
+        v_type, p_line_text, v_result, public.gis_build_feature_geojson(v_result, p_line_text);
 EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT 500,
         format('DEM高程补充失败：%s', SQLERRM),
@@ -951,7 +1002,7 @@ SELECT public.gis_drop_function('gis_dem_elevation_text_polygon');
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_text_polygon
 -- 函数功能：面/多面文本补高程入口
--- 入参说明：p_polygon_text 支持 Polygon/MultiPolygon 的 WKT、EWKT、GeoJSON Geometry 或 GeoJSON Feature。
+-- 入参说明：p_polygon_text 支持 Polygon/MultiPolygon 的 WKT、EWKT、GeoJSON Geometry、GeoJSON Feature 或 FeatureCollection。
 -- 返回说明：统一返回 code、msg、geom_type、data、geom、geom_geojson。
 -- 注意事项：文本解析后仍会做面/多面类型校验；非面类型会直接抛错。
 -- =============================================================================
@@ -996,7 +1047,7 @@ BEGIN
     v_result := public.gis_dem_elevation_base(v_geom);
 
     RETURN QUERY SELECT 200, 'DEM高程补充完成'::text,
-        v_type, p_polygon_text, v_result, ST_AsGeoJSON(v_result);
+        v_type, p_polygon_text, v_result, public.gis_build_feature_geojson(v_result, p_polygon_text);
 EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT 500,
         format('DEM高程补充失败：%s', SQLERRM),
@@ -1017,7 +1068,7 @@ SELECT public.gis_drop_function('gis_dem_elevation_text');
 -- 入参说明：
 --   1. WKT：POINT、MULTIPOINT、LINESTRING、MULTILINESTRING、POLYGON、MULTIPOLYGON、GEOMETRYCOLLECTION。
 --   2. EWKT：形如 SRID=4326;POINT(...)，按文本内 SRID 解析。
---   3. GeoJSON：支持 Geometry 和 Feature；Feature 会自动读取 geometry 节点，properties 不参与计算。
+--   3. GeoJSON：通过 public.gis_geojson_to_geom 解析，支持 Geometry、Feature、FeatureCollection；properties 不参与计算。
 -- 返回说明：统一返回 code、msg、geom_type、data、geom、geom_geojson。
 -- 注意事项：WKT 默认按 EPSG:4326 解析；GeoJSON 未带 SRID 时按 EPSG:4326。
 -- =============================================================================
@@ -1071,7 +1122,7 @@ BEGIN
 
     -- 第四步：统一返回接口结果。
     RETURN QUERY SELECT 200, 'DEM高程补充完成'::text,
-        v_type, p_geom_text, v_result_geom, ST_AsGeoJSON(v_result_geom);
+        v_type, p_geom_text, v_result_geom, public.gis_build_feature_geojson(v_result_geom, p_geom_text);
 EXCEPTION WHEN OTHERS THEN
     RETURN QUERY SELECT 500,
         format('DEM高程补充失败：%s', SQLERRM),
