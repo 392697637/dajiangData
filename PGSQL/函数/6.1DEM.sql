@@ -6,6 +6,8 @@
 --   gis_dem_validate                  校验 DEM 栅格表是否可用
 --   gis_dem_elevation_base            DEM 高程提取和补高程统一入口（唯一核心入口，p_dem_table 可选）
 --   gis_dem_parse_geometry_text       解析 WKT/EWKT/GeoJSON 文本为空间 geometry（内部 helper）
+--   gis_build_feature_geojson         补 DEM 高程后的 geometry 输出为 GeoJSON Feature
+--   gis_geojson_to_geom.sql           解析 GeoJSON 为 PostGIS geometry，支持 Geometry、Feature、FeatureCollection,修补数据。
 --
 --   输出函数
 --   gis_dem_elevation_point            点/多点补 DEM 高程入口，支持 geometry（自动获取 DEM 表）

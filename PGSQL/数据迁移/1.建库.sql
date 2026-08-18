@@ -66,5 +66,21 @@ SELECT PostGIS_Version();
 -- 启用 PostGIS 扩展（首次执行）
 CREATE EXTENSION IF NOT EXISTS postgis;
 
+-- =============================================================================
+-- 后续公共对象脚本
+-- =============================================================================
+-- 说明：gis_error_log、gis_drop_function、gis_refresh_all_tables 已从本建库脚本拆分。
+-- 建库和扩展安装完成后，按以下顺序执行公共脚本：
+--   1. PGSQL/函数/baseTable/gis_error_log.sql
+--      创建 public.gis_error_log，供各业务函数写入错误日志。
+--   2. PGSQL/函数/baseFunction/gis_drop_function.sql
+--      创建 public.gis_drop_function(text)，供后续函数脚本删除同名重载函数。
+--   3. PGSQL/函数/baseFunction/gis_refresh_all_tables.sql
+--      创建并执行 public.gis_refresh_all_tables()，刷新用户表统计信息。
+--
+-- 注意：gis_refresh_all_tables.sql 内部调用 gis_drop_function，
+--      因此必须先执行 baseFunction/gis_drop_function.sql。
+-- =============================================================================
+
 
  
