@@ -5,7 +5,7 @@
 -- 依赖：public.gis_drop_function(text)，执行本文件前请先执行 baseFunction/gis_drop_function.sql。
 -- 入参：p_geojson，GeoJSON 文本；空文本、无有效 geometry 或坏面环返回 NULL。
 -- 返回：geometry。
--- 规则：Feature 自动读取 geometry；多个 Polygon FeatureCollection 合并为 MultiPolygon；混合类型返回 GeometryCollection；面环未闭合时自动补首点。
+-- 规则：Feature 自动读取 geometry；多个 Point/LineString/Polygon FeatureCollection 合并为对应 Multi 类型；混合类型返回 GeometryCollection；面环未闭合时自动补首点；坐标统一按 EPSG:4326 返回。
 -- 示例：SELECT public.gis_geojson_to_geom('{"type":"Point","coordinates":[113.65,34.76]}');
 -- =============================================================================
 
@@ -23,7 +23,7 @@ SELECT gis_drop_function('gis_geojson_to_geom');
 -- 处理规则：
 --   1. Feature 自动读取 geometry 节点。
 --   2. FeatureCollection 只有 1 个有效 geometry 时返回该 geometry。
---   3. FeatureCollection 有多个 Polygon 时合并为 MultiPolygon。
+--   3. FeatureCollection 有多个 Point/LineString/Polygon 时合并为对应 Multi 类型。
 --   4. FeatureCollection 有多个混合 geometry 时返回 GeometryCollection。
 --   5. Polygon/MultiPolygon 未闭合 ring 自动追加首点；少于 3 个点的坏 ring 返回 NULL。
 -- 逻辑步骤：
@@ -32,7 +32,7 @@ SELECT gis_drop_function('gis_geojson_to_geom');
 --   3. 提取真正的 geometry JSON；多个 Polygon Feature 合并为 MultiPolygon。
 --   4. 对 Polygon/MultiPolygon 检查坐标层级和 ring 点数。
 --   5. 对未闭合 ring 追加首点，生成闭合后的 GeoJSON。
---   6. 调用 ST_GeomFromGeoJSON 转换为 PostGIS geometry。
+--   6. 调用 ST_GeomFromGeoJSON 转换为 PostGIS geometry，并统一设置 SRID=4326。
 -- =============================================================================
 -- 使用示例：
 --   SELECT ST_AsEWKT(public.gis_geojson_to_geom('{"type":"Point","coordinates":[113.65,34.76]}'));
@@ -49,6 +49,8 @@ DECLARE
     v_json jsonb;
     v_geom_json jsonb;
     v_geom_type text;
+    v_geom geometry;
+    v_closed_coordinates jsonb;
     v_features jsonb;
     v_feature_count integer;
     v_bad_ring_count integer;
@@ -68,38 +70,48 @@ BEGIN
             ELSE '[]'::jsonb
         END;
 
-        -- 步骤 3.1：统计 FeatureCollection 中有效 geometry 数量。
-        SELECT count(*)
-        INTO v_feature_count
-        FROM jsonb_array_elements(v_features) AS f(feature)
-        WHERE jsonb_typeof(f.feature -> 'geometry') = 'object';
+        -- 步骤 3.1：单次遍历 FeatureCollection，同时完成有效 geometry 统计和合并结果生成。
+        WITH valid_features AS (
+            SELECT
+                f.feature -> 'geometry' AS geom_json,
+                feature_ord
+            FROM jsonb_array_elements(v_features) WITH ORDINALITY AS f(feature, feature_ord)
+            WHERE jsonb_typeof(f.feature -> 'geometry') = 'object'
+        ),
+        feature_stats AS (
+            SELECT
+                count(*) AS feature_count,
+                CASE
+                    WHEN count(*) = 0 THEN NULL::jsonb
+                    WHEN count(*) = 1 THEN (array_agg(geom_json ORDER BY feature_ord))[1]
+                    WHEN bool_and(geom_json ->> 'type' = 'Point')
+                        THEN jsonb_build_object(
+                            'type', 'MultiPoint',
+                            'coordinates', jsonb_agg(geom_json -> 'coordinates' ORDER BY feature_ord)
+                        )
+                    WHEN bool_and(geom_json ->> 'type' = 'LineString')
+                        THEN jsonb_build_object(
+                            'type', 'MultiLineString',
+                            'coordinates', jsonb_agg(geom_json -> 'coordinates' ORDER BY feature_ord)
+                        )
+                    WHEN bool_and(geom_json ->> 'type' = 'Polygon')
+                        THEN jsonb_build_object(
+                            'type', 'MultiPolygon',
+                            'coordinates', jsonb_agg(geom_json -> 'coordinates' ORDER BY feature_ord)
+                        )
+                    ELSE jsonb_build_object(
+                        'type', 'GeometryCollection',
+                        'geometries', jsonb_agg(geom_json ORDER BY feature_ord)
+                    )
+                END AS merged_geom_json
+            FROM valid_features
+        )
+        SELECT feature_count, merged_geom_json
+        INTO v_feature_count, v_geom_json
+        FROM feature_stats;
 
         IF v_feature_count = 0 THEN
             RETURN NULL;
-        END IF;
-
-        -- 步骤 3.2：单个有效 geometry 直接取出，多个 geometry 按类型合并或收集。
-        IF v_feature_count = 1 THEN
-            SELECT f.feature -> 'geometry'
-            INTO v_geom_json
-            FROM jsonb_array_elements(v_features) AS f(feature)
-            WHERE jsonb_typeof(f.feature -> 'geometry') = 'object'
-            LIMIT 1;
-        ELSE
-            SELECT CASE
-                WHEN bool_and(f.feature -> 'geometry' ->> 'type' = 'Polygon')
-                    THEN jsonb_build_object(
-                        'type', 'MultiPolygon',
-                        'coordinates', jsonb_agg(f.feature -> 'geometry' -> 'coordinates' ORDER BY feature_ord)
-                    )
-                ELSE jsonb_build_object(
-                    'type', 'GeometryCollection',
-                    'geometries', jsonb_agg(f.feature -> 'geometry' ORDER BY feature_ord)
-                )
-            END
-            INTO v_geom_json
-            FROM jsonb_array_elements(v_features) WITH ORDINALITY AS f(feature, feature_ord)
-            WHERE jsonb_typeof(f.feature -> 'geometry') = 'object';
         END IF;
     ELSIF v_json ->> 'type' = 'Feature' THEN
         v_geom_json := v_json -> 'geometry';
@@ -125,37 +137,37 @@ BEGIN
             RETURN NULL;
         END IF;
 
-        SELECT count(*)
-        INTO v_bad_ring_count
-        FROM jsonb_array_elements(v_geom_json -> 'coordinates') AS r(ring)
-        WHERE CASE
-            WHEN jsonb_typeof(ring) = 'array' THEN jsonb_array_length(ring) < 3
-            ELSE true
-        END;
-
-        IF v_bad_ring_count > 0 THEN
-            RETURN NULL;
-        END IF;
-
-        SELECT jsonb_set(
-            v_geom_json,
-            '{coordinates}',
+        SELECT
+            count(*) FILTER (
+                WHERE CASE
+                    WHEN jsonb_typeof(ring) = 'array' THEN jsonb_array_length(ring) < 3
+                    ELSE true
+                END
+            ),
             COALESCE(
                 jsonb_agg(
                     CASE
-                        WHEN jsonb_array_length(ring) > 0
-                             AND ring -> 0 <> ring -> (jsonb_array_length(ring) - 1)
-                            THEN ring || jsonb_build_array(ring -> 0)
+                        WHEN jsonb_typeof(ring) = 'array' THEN
+                            CASE
+                                WHEN jsonb_array_length(ring) > 0
+                                     AND ring -> 0 <> ring -> (jsonb_array_length(ring) - 1)
+                                    THEN ring || jsonb_build_array(ring -> 0)
+                                ELSE ring
+                            END
                         ELSE ring
                     END
                     ORDER BY ring_ord
                 ),
                 '[]'::jsonb
-            ),
-            false
-        )
-        INTO v_geom_json
+            )
+        INTO v_bad_ring_count, v_closed_coordinates
         FROM jsonb_array_elements(v_geom_json -> 'coordinates') WITH ORDINALITY AS r(ring, ring_ord);
+
+        IF v_bad_ring_count > 0 THEN
+            RETURN NULL;
+        END IF;
+
+        v_geom_json := jsonb_set(v_geom_json, '{coordinates}', v_closed_coordinates, false);
 
     -- 步骤 7：MultiPolygon 逐 polygon、逐 ring 校验并自动补闭合点。
     ELSIF v_geom_type = 'MultiPolygon' THEN
@@ -167,60 +179,71 @@ BEGIN
             RETURN NULL;
         END IF;
 
-        SELECT count(*)
-        INTO v_bad_ring_count
-        FROM jsonb_array_elements(v_geom_json -> 'coordinates') AS p(poly)
-        WHERE jsonb_typeof(poly) IS DISTINCT FROM 'array'
-           OR jsonb_array_length(poly) = 0;
-
-        IF v_bad_ring_count > 0 THEN
-            RETURN NULL;
-        END IF;
-
-        SELECT count(*)
-        INTO v_bad_ring_count
-        FROM jsonb_array_elements(v_geom_json -> 'coordinates') AS p(poly)
-        CROSS JOIN LATERAL jsonb_array_elements(p.poly) AS r(ring)
-        WHERE CASE
-            WHEN jsonb_typeof(ring) = 'array' THEN jsonb_array_length(ring) < 3
-            ELSE true
-        END;
-
-        IF v_bad_ring_count > 0 THEN
-            RETURN NULL;
-        END IF;
-
-        SELECT jsonb_set(
-            v_geom_json,
-            '{coordinates}',
-            COALESCE(jsonb_agg(poly_closed ORDER BY poly_ord), '[]'::jsonb),
-            false
-        )
-        INTO v_geom_json
-        FROM (
-            SELECT
-                poly_ord,
-                jsonb_agg(
-                    CASE
-                        WHEN jsonb_array_length(ring) > 0
-                             AND ring -> 0 <> ring -> (jsonb_array_length(ring) - 1)
-                            THEN ring || jsonb_build_array(ring -> 0)
-                        ELSE ring
-                    END
-                    ORDER BY ring_ord
-                ) AS poly_closed
+        WITH polygons AS (
+            SELECT poly, poly_ord
             FROM jsonb_array_elements(v_geom_json -> 'coordinates') WITH ORDINALITY AS p(poly, poly_ord)
-            CROSS JOIN LATERAL jsonb_array_elements(p.poly) WITH ORDINALITY AS r(ring, ring_ord)
-            GROUP BY poly_ord
-        ) s;
+        ),
+        closed_polygons AS (
+            SELECT
+                p.poly_ord,
+                CASE
+                    WHEN jsonb_typeof(p.poly) IS DISTINCT FROM 'array' THEN 1
+                    WHEN jsonb_array_length(p.poly) = 0 THEN 1
+                    ELSE COALESCE(sum(
+                        CASE
+                            WHEN jsonb_typeof(r.ring) = 'array' THEN
+                                CASE WHEN jsonb_array_length(r.ring) < 3 THEN 1 ELSE 0 END
+                            ELSE 1
+                        END
+                    ), 0)::integer
+                END AS bad_ring_count,
+                CASE
+                    WHEN jsonb_typeof(p.poly) IS DISTINCT FROM 'array' THEN NULL::jsonb
+                    WHEN jsonb_array_length(p.poly) = 0 THEN NULL::jsonb
+                    ELSE COALESCE(
+                        jsonb_agg(
+                            CASE
+                                WHEN jsonb_typeof(r.ring) = 'array' THEN
+                                    CASE
+                                        WHEN jsonb_array_length(r.ring) > 0
+                                             AND r.ring -> 0 <> r.ring -> (jsonb_array_length(r.ring) - 1)
+                                            THEN r.ring || jsonb_build_array(r.ring -> 0)
+                                        ELSE r.ring
+                                    END
+                                ELSE r.ring
+                            END
+                            ORDER BY r.ring_ord
+                        ),
+                        '[]'::jsonb
+                    )
+                END AS poly_closed
+            FROM polygons p
+            LEFT JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(p.poly) = 'array' THEN p.poly ELSE '[]'::jsonb END
+            ) WITH ORDINALITY AS r(ring, ring_ord)
+                ON jsonb_typeof(p.poly) = 'array'
+            GROUP BY p.poly_ord, p.poly
+        )
+        SELECT
+            COALESCE(sum(bad_ring_count), 0)::integer,
+            COALESCE(jsonb_agg(poly_closed ORDER BY poly_ord), '[]'::jsonb)
+        INTO v_bad_ring_count, v_closed_coordinates
+        FROM closed_polygons;
+
+        IF v_bad_ring_count > 0 THEN
+            RETURN NULL;
+        END IF;
+
+        v_geom_json := jsonb_set(v_geom_json, '{coordinates}', v_closed_coordinates, false);
     END IF;
 
-    -- 步骤 8：将最终 GeoJSON 交给 PostGIS 转为 geometry。
-    RETURN ST_GeomFromGeoJSON(v_geom_json::text);
+    -- 步骤 8：将最终 GeoJSON 交给 PostGIS 转为 geometry，并统一按 EPSG:4326 返回。
+    v_geom := ST_GeomFromGeoJSON(v_geom_json::text);
+    RETURN ST_SetSRID(v_geom, 4326);
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_geojson_to_geom(text) IS '解析 GeoJSON 为空间 geometry，支持 Feature/FeatureCollection，修补Polygon数据。';
+COMMENT ON FUNCTION public.gis_geojson_to_geom(text) IS '解析 GeoJSON 为空间 geometry，支持 Feature/FeatureCollection，修补Polygon数据，并统一返回SRID=4326';
 -- =============================================================================
 -- 调用示例
 -- =============================================================================
@@ -250,5 +273,20 @@ COMMENT ON FUNCTION public.gis_geojson_to_geom(text) IS '解析 GeoJSON 为空�
 --     '{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[113.60,34.70],[113.61,34.70],[113.61,34.71],[113.60,34.70]]]}},{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[113.70,34.80],[113.71,34.80],[113.71,34.81],[113.70,34.80]]]}}]}'
 -- ));
 
--- 6. 空文本返回 NULL
+-- 6. FeatureCollection，多个 Point 会合并为 MultiPoint
+-- SELECT ST_AsEWKT(public.gis_geojson_to_geom(
+--     '{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[113.60,34.70]}},{"type":"Feature","geometry":{"type":"Point","coordinates":[113.70,34.80]}}]}'
+-- ));
+
+-- 7. FeatureCollection，多条 LineString 会合并为 MultiLineString
+-- SELECT ST_AsEWKT(public.gis_geojson_to_geom(
+--     '{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[113.60,34.70],[113.61,34.71]]}},{"type":"Feature","geometry":{"type":"LineString","coordinates":[[113.70,34.80],[113.71,34.81]]}}]}'
+-- ));
+
+-- 8. 返回 SRID 始终为 4326
+-- SELECT ST_SRID(public.gis_geojson_to_geom(
+--     '{"type":"Point","coordinates":[113.65,34.76]}'
+-- ));
+
+-- 9. 空文本返回 NULL
 -- SELECT public.gis_geojson_to_geom('');
