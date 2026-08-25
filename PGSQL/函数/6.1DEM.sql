@@ -5,21 +5,66 @@
 --   公共函数
 --   gis_dem_validate                  校验 DEM 栅格表是否可用
 --   gis_dem_elevation_base            DEM 高程提取和补高程统一入口（唯一核心入口，p_dem_table 可选）
---   gis_dem_parse_geometry_text       解析 WKT/EWKT/GeoJSON 文本为空间 geometry（内部 helper）
+--   gis_dem_parse_geometry_text       解析 WKT/EWKT/GeoJSON/航线点数组文本为空间 geometry（内部 helper）
 --   gis_build_feature_geojson         补 DEM 高程后的 geometry 输出为 GeoJSON Feature
 --   gis_geojson_to_geom.sql           解析 GeoJSON 为 PostGIS geometry，支持 Geometry、Feature、FeatureCollection,修补数据。
 --
 --   输出函数
---   gis_dem_elevation_point            点/多点补 DEM 高程入口，支持 geometry（自动获取 DEM 表）
---   gis_dem_elevation_line             线/多线补 DEM 高程入口，支持 geometry（自动获取 DEM 表）
---   gis_dem_elevation_polygon          面/多面补 DEM 高程入口，支持 geometry（自动获取 DEM 表）
---   gis_dem_elevation_geometry         按 geometry 自动分发到点/线/面专用入口
---   gis_dem_elevation_text_point       点/多点文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
---   gis_dem_elevation_text_line        线/多线文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
---   gis_dem_elevation_text_polygon     面/多面文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
---   gis_dem_elevation_text             解析 WKT/EWKT/GeoJSON 并返回 DEM 高程结果
---   gis_dem_update_table_z0            按表名和几何列名批量补 DEM 高程
---   gis_dem_reset_table_z0             按表名和几何列名批量清空 DEM 高程
+--   1. geometry 专用入口
+--      gis_dem_elevation_point          点/多点补 DEM 高程入口，支持 Point/MultiPoint geometry（自动获取 DEM 表）
+--      gis_dem_elevation_line           线/多线补 DEM 高程入口，支持 LineString/MultiLineString geometry（自动获取 DEM 表）
+--      gis_dem_elevation_polygon        面/多面补 DEM 高程入口，支持 Polygon/MultiPolygon geometry（自动获取 DEM 表）
+--
+--   2. geometry 统一入口
+--      gis_dem_elevation_geometry       按 geometry 类型自动分发到点/线/面专用入口
+--
+--   3. text 专用入口
+--      gis_dem_elevation_text_point     点/多点文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
+--      gis_dem_elevation_text_line      线/多线文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON/航线点数组
+--      gis_dem_elevation_text_polygon   面/多面文本补 DEM 高程入口，支持 WKT/EWKT/GeoJSON
+--
+--   4. text 统一入口
+--      gis_dem_elevation_text           解析 WKT/EWKT/GeoJSON/航线点数组，按类型自动分发并返回 DEM 高程结果
+--
+--   5. 表批量处理入口
+--      gis_dem_update_table_z0          按表名和几何列名批量补 DEM 高程
+--      gis_dem_reset_table_z0           按表名和几何列名批量清空 DEM 高程
+--
+-- 函数执行/调用顺序：
+--   1. 先执行基础依赖：
+--      baseFunction/gis_drop_function.sql
+--      baseFunction/gis_geojson_to_geom.sql
+--   2. 再执行本文件 6.1DEM.sql，按文件顺序创建上方函数清单中的函数。
+--
+--   3. 业务调用优先使用专用入口，内部依赖关系如下：
+--      点 geometry：gis_dem_elevation_point
+--        -> gis_dem_elevation_base
+--      线 geometry：gis_dem_elevation_line
+--        -> gis_dem_elevation_base
+--      面 geometry：gis_dem_elevation_polygon
+--        -> gis_dem_elevation_base
+--      不确定 geometry：gis_dem_elevation_geometry
+--        -> gis_dem_elevation_point / gis_dem_elevation_line / gis_dem_elevation_polygon
+--        -> gis_dem_elevation_base
+--      点 text：gis_dem_elevation_text_point
+--        -> gis_dem_parse_geometry_text
+--        -> gis_dem_elevation_base
+--        -> gis_build_feature_geojson
+--      线 text：gis_dem_elevation_text_line
+--        -> gis_dem_parse_geometry_text
+--        -> gis_dem_elevation_base
+--        -> gis_build_feature_geojson
+--      面 text：gis_dem_elevation_text_polygon
+--        -> gis_dem_parse_geometry_text
+--        -> gis_dem_elevation_base
+--        -> gis_build_feature_geojson
+--      不确定 text：gis_dem_elevation_text
+--        -> gis_dem_parse_geometry_text
+--        -> gis_dem_elevation_point / gis_dem_elevation_line / gis_dem_elevation_polygon
+--        -> gis_build_feature_geojson
+--      批量补高程：gis_dem_update_table_z0
+--        -> gis_dem_elevation_base
+--      批量清空高程：gis_dem_reset_table_z0
 --
 -- 统一约定：
 --   1. gis_dem_elevation_base 的 p_dem_table 可选：传了用传的，为空时按几何从 public.jc_sheng 自动获取；其余 wrapper 只传 geom，统一走核心入口。
@@ -28,7 +73,7 @@
 --   4. 表不存在、未命中像元或 jc_sheng 未配置时，Z 值统一为 0。
 --   5. gis_dem_elevation_base 是唯一核心入口，内部批量取瓦片、逐点内存取值；其余函数统一走该入口。
 --   6. geometry 通用入口使用 gis_dem_elevation_geometry；点/线/面专用入口使用 gis_dem_elevation_point/line/polygon。
---   7. 点/线/面 text 入口使用 gis_dem_elevation_text_point/line/polygon，支持 WKT、EWKT、GeoJSON。
+--   7. 点/线/面 text 入口使用 gis_dem_elevation_text_point/line/polygon，支持 WKT、EWKT、GeoJSON；线入口额外支持 [{"lon","lat","alt"}] 航线点数组。
 --   8. GeoJSON 文本解析依赖 baseFunction/gis_geojson_to_geom.sql 中的 public.gis_geojson_to_geom。
 -- =============================================================================
 
@@ -520,6 +565,7 @@ SELECT public.gis_drop_function('gis_dem_parse_geometry_text');
 --   1. WKT：未声明 SRID 时默认按 EPSG:4326。
 --   2. EWKT：形如 SRID=4326;POINT(...)，保留文本内 SRID。
 --   3. GeoJSON：统一调用 public.gis_geojson_to_geom，支持 Geometry、Feature、FeatureCollection，并自动闭合面环。
+--   4. 航线点数组：支持 [{"lon":113.0,"lat":34.0,"alt":100}, ...]，自动转为 LineString。
 -- 返回说明：返回解析后的 geometry；空字符串返回 NULL。
 -- 注意事项：这是 6.1 内部 helper，业务侧优先调用点/线/面 text 专用入口或 gis_dem_elevation_text。
 -- =============================================================================
@@ -533,6 +579,9 @@ STABLE
 AS $$
 DECLARE
     v_text text;
+    v_json jsonb;
+    v_coordinates jsonb;
+    v_point_count integer;
     v_geom geometry;
 BEGIN
     v_text := btrim(p_geom_text);
@@ -541,7 +590,36 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    IF left(v_text, 1) = '{' THEN
+    IF left(v_text, 1) = '[' THEN
+        v_json := v_text::jsonb;
+
+        IF jsonb_typeof(v_json) IS DISTINCT FROM 'array' THEN
+            RETURN NULL;
+        END IF;
+
+        SELECT
+            count(*),
+            jsonb_agg(
+                CASE
+                    WHEN point ? 'alt' THEN jsonb_build_array((point ->> 'lon')::numeric, (point ->> 'lat')::numeric, (point ->> 'alt')::numeric)
+                    ELSE jsonb_build_array((point ->> 'lon')::numeric, (point ->> 'lat')::numeric)
+                END
+                ORDER BY point_ord
+            )
+        INTO v_point_count, v_coordinates
+        FROM jsonb_array_elements(v_json) WITH ORDINALITY AS p(point, point_ord)
+        WHERE jsonb_typeof(point) = 'object'
+          AND point ? 'lon'
+          AND point ? 'lat';
+
+        IF v_point_count < 2 OR v_point_count <> jsonb_array_length(v_json) THEN
+            RETURN NULL;
+        END IF;
+
+        v_geom := public.gis_geojson_to_geom(
+            jsonb_build_object('type', 'LineString', 'coordinates', v_coordinates)::text
+        );
+    ELSIF left(v_text, 1) = '{' THEN
         v_geom := public.gis_geojson_to_geom(v_text);
 
         IF ST_SRID(v_geom) = 0 THEN
@@ -557,7 +635,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_dem_parse_geometry_text(text) IS '解析WKT、EWKT或GeoJSON文本为空间geometry';
+COMMENT ON FUNCTION public.gis_dem_parse_geometry_text(text) IS '解析WKT、EWKT、GeoJSON或航线点数组文本为空间geometry';
 
 -- =============================================================================
 -- 重建函数前清理
@@ -941,7 +1019,7 @@ SELECT public.gis_drop_function('gis_dem_elevation_text_line');
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_text_line
 -- 函数功能：线/多线文本补高程入口
--- 入参说明：p_line_text 支持 LineString/MultiLineString 的 WKT、EWKT、GeoJSON Geometry、GeoJSON Feature 或 FeatureCollection。
+-- 入参说明：p_line_text 支持 LineString/MultiLineString 的 WKT、EWKT、GeoJSON Geometry、GeoJSON Feature、FeatureCollection 或 [{"lon","lat","alt"}] 航线点数组。
 -- 返回说明：统一返回 code、msg、geom_type、data、geom、geom_geojson。
 -- 注意事项：文本解析后仍会做线/多线类型校验；非线类型会直接抛错。
 -- =============================================================================
@@ -994,7 +1072,7 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_dem_elevation_text_line(text) IS '解析线/多线文本并补DEM高程，统一返回code/msg/geom_type/data/geom/geom_geojson';
+COMMENT ON FUNCTION public.gis_dem_elevation_text_line(text) IS '解析线/多线文本或航线点数组并补DEM高程，统一返回code/msg/geom_type/data/geom/geom_geojson';
 
 -- =============================================================================
 -- 重建函数前清理
@@ -1066,11 +1144,12 @@ SELECT public.gis_drop_function('gis_dem_elevation_text');
 
 -- =============================================================================
 -- 函数名称：gis_dem_elevation_text
--- 函数功能：根据 WKT、EWKT 或 GeoJSON 文本统一查询/补充 DEM 高程
+-- 函数功能：根据 WKT、EWKT、GeoJSON 或航线点数组文本统一查询/补充 DEM 高程
 -- 入参说明：
 --   1. WKT：POINT、MULTIPOINT、LINESTRING、MULTILINESTRING、POLYGON、MULTIPOLYGON、GEOMETRYCOLLECTION。
 --   2. EWKT：形如 SRID=4326;POINT(...)，按文本内 SRID 解析。
 --   3. GeoJSON：通过 public.gis_geojson_to_geom 解析，支持 Geometry、Feature、FeatureCollection；properties 不参与计算。
+--   4. 航线点数组：支持 [{"lon":113.0,"lat":34.0,"alt":100}, ...]，自动转为 LineString。
 -- 返回说明：统一返回 code、msg、geom_type、data、geom、geom_geojson。
 -- 注意事项：WKT 默认按 EPSG:4326 解析；GeoJSON 未带 SRID 时按 EPSG:4326。
 -- =============================================================================
@@ -1664,6 +1743,7 @@ COMMENT ON FUNCTION public.gis_dem_reset_table_z0(text, text) IS '按表名和�
 -- 线/多线文本入口。
 -- SELECT * FROM public.gis_dem_elevation_text_line('LINESTRING(113.60 34.70,113.70 34.80)');
 -- SELECT * FROM public.gis_dem_elevation_text_line('{"type":"LineString","coordinates":[[113.60,34.70],[113.70,34.80]]}');
+-- SELECT * FROM public.gis_dem_elevation_text_line('[{"alt":142,"lat":34.813967,"lon":113.474649},{"alt":142,"lat":34.81393475026949,"lon":113.47599221330081},{"alt":142,"lat":34.815302,"lon":113.476843}]');
 
 -- 10. gis_dem_elevation_text_polygon
 -- 面/多面文本入口。

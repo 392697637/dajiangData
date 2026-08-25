@@ -45,4 +45,10 @@ psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\432
 psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_zhejiang.sql
 psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_henan.sql
 
- 
+
+-------------------------等高线入库-------------------------
+-------------------------DEV-------------------------
+gdal_contour -a elevation -i 10 D:\MAPDATA\DEM\4326\HENAN-4326.tif D:\MAPDATA\DEM\4326\gis_dem_henan_contour.shp
+
+set PGPASSWORD=KtdpostSQL@2026!@#
+shp2pgsql -s 4326 -I -W UTF-8 D:\MAPDATA\DEM\4326\gis_dem_henan_contour.shp public.gis_dem_henan_contour | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis

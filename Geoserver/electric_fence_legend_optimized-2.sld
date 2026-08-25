@@ -17,7 +17,6 @@
               <ogc:Literal>1</ogc:Literal>
             </ogc:PropertyIsEqualTo>
           </ogc:Filter>
-          <MinScaleDenominator>1</MinScaleDenominator>
           <MaxScaleDenominator>1500000</MaxScaleDenominator>
           <PolygonSymbolizer>
             <Fill>
@@ -39,7 +38,6 @@
               <ogc:Literal>2</ogc:Literal>
             </ogc:PropertyIsEqualTo>
           </ogc:Filter>
-          <MinScaleDenominator>1</MinScaleDenominator>
           <MaxScaleDenominator>1500000</MaxScaleDenominator>
           <PolygonSymbolizer>
             <Fill>
@@ -61,7 +59,6 @@
               <ogc:Literal>3</ogc:Literal>
             </ogc:PropertyIsEqualTo>
           </ogc:Filter>
-          <MinScaleDenominator>1</MinScaleDenominator>
           <MaxScaleDenominator>1500000</MaxScaleDenominator>
           <PolygonSymbolizer>
             <Fill>
@@ -83,7 +80,6 @@
               <ogc:Literal>4</ogc:Literal>
             </ogc:PropertyIsEqualTo>
           </ogc:Filter>
-          <MinScaleDenominator>1</MinScaleDenominator>
           <MaxScaleDenominator>1500000</MaxScaleDenominator>
           <PolygonSymbolizer>
             <Fill>
