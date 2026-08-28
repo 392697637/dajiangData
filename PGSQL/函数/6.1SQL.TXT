@@ -1,3 +1,11 @@
+-- =============================================================================
+-- 扩展依赖
+-- 说明：启用 PostGIS 几何和 PostGIS Raster 能力。
+-- =============================================================================
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS postgis_raster;
+
+
 ```cmd
 raster2pgsql -s 4326 -I -C -M -t 256x256 "E:\DEM\HENAN_4326.tif" public.gis_dem_henan_4326 > E:\DEM\gis_dem_henan_4326.sql
 ```
@@ -52,3 +60,8 @@ gdal_contour -a elevation -i 10 D:\MAPDATA\DEM\4326\HENAN-4326.tif D:\MAPDATA\DE
 
 set PGPASSWORD=KtdpostSQL@2026!@#
 shp2pgsql -s 4326 -I -W UTF-8 D:\MAPDATA\DEM\4326\gis_dem_henan_contour.shp public.gis_dem_henan_contour | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis
+
+-------------------------DEV-------------------------
+set PGPASSWORD=KtdpostSQL@2026!@#
+psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lc_gis -f D:\MAPDATA\DEM\4326\gis_dem_shandong.sql
+

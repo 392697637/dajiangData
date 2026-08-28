@@ -405,48 +405,48 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION gis_get_electric_fence_project(text, text) IS '查询项目电子围栏数据';
--- =============================================
--- 函数调用示例
--- 功能：查询项目ID为 taiyuan_demo 的电子围栏数据
--- 注意：实际调用时不需要 %%，直接传项目ID
--- =============================================
--- PG库调用
-SELECT * FROM gis_get_electric_fence_project('%project_id%', '%fence_type%')
+-- -- =============================================
+-- -- 函数调用示例
+-- -- 功能：查询项目ID为 taiyuan_demo 的电子围栏数据
+-- -- 注意：实际调用时不需要 %%，直接传项目ID
+-- -- =============================================
+-- -- PG库调用
+-- SELECT * FROM gis_get_electric_fence_project('%project_id%', '%fence_type%')
  
--- geoserverUrl  
--- http://192.168.110.6:8089/geoserver/ktd_lx_2026gis/wms
--- geoserver服务地址
+-- -- geoserverUrl  
+-- -- http://192.168.110.6:8089/geoserver/ktd_lx_2026gis/wms
+-- -- geoserver服务地址
 
--- geoserverEelectricFenceLayers
--- ktd_lx_2026gis:electric_fence_project
--- geoserver电子围栏图层名称
--- --  
---  project_id  zhengzhou_demo  ^[a-zA-Z0-9_]+$
--- fence_type  1,2,3   ^(-1|\d+([;,]\d+)*|)$
--- 单类型
-SELECT * FROM gis_get_electric_fence_project('2c95908e958f3b75019593551f520126', '1');
+-- -- geoserverEelectricFenceLayers
+-- -- ktd_lx_2026gis:electric_fence_project
+-- -- geoserver电子围栏图层名称
+-- -- --  
+-- --  project_id  zhengzhou_demo  ^[a-zA-Z0-9_]+$
+-- -- fence_type  1,2,3   ^(-1|\d+([;,]\d+)*|)$
+-- -- 单类型
+-- SELECT * FROM gis_get_electric_fence_project('2c95908e958f3b75019593551f520126', '1');
 
--- 多类型（两种分隔符都支持）
-SELECT * FROM gis_get_electric_fence_project('2c95908e958f3b75019593551f520126', '1;2');
-SELECT * FROM gis_get_electric_fence_project('2c95908e958f3b75019593551f520126', '1,2,3');
+-- -- 多类型（两种分隔符都支持）
+-- SELECT * FROM gis_get_electric_fence_project('2c95908e958f3b75019593551f520126', '1;2');
+-- SELECT * FROM gis_get_electric_fence_project('2c95908e958f3b75019593551f520126', '1,2,3');
 
--- 无数据
-SELECT * FROM gis_get_electric_fence_project('2c95908e958f3b75019593551f520126', NULL);
-SELECT * FROM gis_get_electric_fence_project('zhengzhou_demo', '-1');
+-- -- 无数据
+-- SELECT * FROM gis_get_electric_fence_project('2c95908e958f3b75019593551f520126', NULL);
+-- SELECT * FROM gis_get_electric_fence_project('zhengzhou_demo', '-1');
 
 
-SELECT * FROM gis_get_electric_fence_project('zhengzhou_demo',  '1,2,3');
+-- SELECT * FROM gis_get_electric_fence_project('zhengzhou_demo',  '1,2,3');
 
--- =============================================================================
--- gis_electric_fence_project 调用示例
--- =============================================================================
--- SELECT gis_electric_fence_project(
---     'zhengzhou_demo',
---     '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'
--- );
+-- -- =============================================================================
+-- -- gis_electric_fence_project 调用示例
+-- -- =============================================================================
+-- -- SELECT gis_electric_fence_project(
+-- --     'zhengzhou_demo',
+-- --     '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'
+-- -- );
 
--- 示例：按真实项目ID创建项目电子围栏表，并返回创建结果。
--- SELECT * FROM gis_electric_fence_project(
---     '2c95908e958f3b75019593551f520126',
---     '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'
--- );
+-- -- 示例：按真实项目ID创建项目电子围栏表，并返回创建结果。
+-- -- SELECT * FROM gis_electric_fence_project(
+-- --     '2c95908e958f3b75019593551f520126',
+-- --     '{"type":"Polygon","coordinates":[[[113.0,34.5],[114.0,34.5],[114.0,35.0],[113.0,35.0],[113.0,34.5]]]}'
+-- -- );
