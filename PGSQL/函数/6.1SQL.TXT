@@ -8,6 +8,8 @@ CREATE EXTENSION IF NOT EXISTS postgis_raster;
 
 ```cmd
 raster2pgsql -s 4326 -I -C -M -t 256x256 "E:\DEM\HENAN_4326.tif" public.gis_dem_henan_4326 > E:\DEM\gis_dem_henan_4326.sql
+
+
 -- -s 4326：指定输入栅格数据的坐标参考系统（CRS）为 WGS 84
 -- -I：创建一个索引
 -- -C：创建一个带有空值的栅格表
@@ -19,6 +21,14 @@ raster2pgsql -s 4326 -I -C -M -t 256x256 -b 1:32BF "E:\DEM\HENAN_4326.tif" publi
 
 ```
 导入数据库：
+-- `set PGPASSWORD=Ktd@postSQL@2026!@#`：在当前 cmd 会话临时设置 PG 数据库密码
+-- `psql`：PostgreSQL 命令行客户端
+-- `-h 192.168.110.6`：DEV 数据库 IP 地址
+-- `-p 5432`：数据库端口
+-- `-U zhuoyi`：登录用户名
+-- `-d ktd_lx_2026gis`：目标数据库名称
+-- `-f E:\DEM\gis_dem_henan_4326.sql`：读取并执行 raster2pgsql 生成的河南 DEM 的 SQL 脚本，将栅格 DEM 导入`ktd_lx_2026gis`库
+
 ```cmd
 set PGPASSWORD=Ktd@postSQL@2026!@#
 psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f E:\DEM\gis_dem_henan_4326.sql
@@ -59,11 +69,33 @@ psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\432
 psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_sichuan.sql
 psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_zhejiang.sql
 psql -h 101.201.32.79 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_henan.sql
+
+
 ------------------------- 等高线入库 -------------------------
 -------------------------DEV-------------------------
+-- `gdal_contour`：GDAL 工具，**从 DEM 高程影像提取等高线**
+-- `-a elevation`：等高线属性字段名`elevation`存储高程值
+-- `-i 10`：等高距 **10 米**，每间隔 10 米生成一条等高线
+-- 输入：河南 DEM 影像`HENAN-4326.tif`
+-- 输出：shp 矢量文件`gis_dem_henan_contour.shp`，包含高程字段`elevation`
 gdal_contour -a elevation -i 10 D:\MAPDATA\DEM\4326\HENAN-4326.tif D:\MAPDATA\DEM\4326\gis_dem_henan_contour.shp
+
+
+-- `set PGPASSWORD`：临时设置 PG 数据库密码
+-- `shp2pgsql`：shp 转 PostGIS 数据库表工具
+-- `-s 4326`：坐标系 WGS84 (4326)
+-- `-I`：自动创建空间索引
+-- `-W UTF-8`：字符编码 UTF8
+-- 把 shp 导入到库`ktd_lx_2026gis`，表名`public.gis_dem_henan_contour`
 set PGPASSWORD=KtdpostSQL@2026!@#
 shp2pgsql -s 4326 -I -W UTF-8 D:\MAPDATA\DEM\4326\gis_dem_henan_contour.shp public.gis_dem_henan_contour | psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis
+
+
+
+
 -------------------------DEV-------------------------
+-- 使用 psql 工具，连接 DEV 库`ktd_lc_gis`
+-- 执行山东 DEM 生成好的 sql 脚本，**把山东栅格 DEM 入库到 ktd_lc_gis 库**，表名`public.gis_dem_shandong`
 set PGPASSWORD=KtdpostSQL@2026!@#
 psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lc_gis -f D:\MAPDATA\DEM\4326\gis_dem_shandong.sql
+
