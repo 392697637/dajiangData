@@ -31,6 +31,8 @@ raster2pgsql -s 4326 -I -C -M -t 256x256 -b 1:32BF "E:\DEM\HENAN_4326.tif" publi
 
 ```cmd
 set PGPASSWORD=Ktd@postSQL@2026!@#
+psql -h 218.57.15.226 -p 8085 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_shandong.sql
+
 psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lx_2026gis -f E:\DEM\gis_dem_henan_4326.sql
 ``
 

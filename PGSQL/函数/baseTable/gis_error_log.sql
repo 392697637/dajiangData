@@ -1,5 +1,12 @@
 
+CREATE SEQUENCE "public"."gis_error_log_id_seq";
+CREATE SEQUENCE "public"."gis_flight_paths_id_seq";
 
+CREATE SEQUENCE "public"."jc_sheng_id_seq";
+CREATE SEQUENCE "public"."jc_shi_id_seq";
+CREATE SEQUENCE "public"."jc_xian_id_seq";
+
+CREATE SEQUENCE "public"."wrj_jfq_dj_id_seq";
 --   gis_error_log                        创建PG相关GIS错误日志
 
 -- =============================================================================
