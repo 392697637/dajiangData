@@ -38,12 +38,29 @@
 --      1. 水平偏移距离＞20米，校验不通过，提醒用户，不阻断提交。
 --      2. 水平偏移距离≤20米，校验通过。
 -- 函数见以下：
---3.gis_flight_route_deviation   飞行审核航线偏离校验
+--3.gis_flight_height_check       飞行审核高度检查
+--4.gis_flight_height_plan        飞行审核计划高度校验
+--5.gis_flight_route_deviation    飞行审核航线偏离校验
  
--- 返回说明：
+-- 3高度检查返回说明：
+--   code       状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   msg        返回信息
+--   ischeck    是否通过高度校验
+--   minheight  最小飞行真高，单位米
+--   maxheight  最大飞行真高，单位米
+--
+-- 4计划高度校验返回说明：
+--   code        状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   msg         返回信息
+--   ischeck     是否通过计划高度校验，true=高度偏差≤阈值，false=高度偏差＞阈值
+--   height      高度偏差米数，当前取最大高度偏差
+--   max_height  最大高度偏差米数
+--   min_height  最小高度偏差米数
+--
+-- 5飞行偏离校验返回说明：
 --   code          状态码：200=执行成功 400=参数错误/无数据 500=执行异常
 --   msg           返回信息
---   isdeviation   是否偏移，true=水平偏移距离＞阈值，false=水平偏移距离≤阈值
+--   ischeck       是否通过偏离校验，true=水平偏移距离≤阈值，false=水平偏移距离＞阈值
 --   distance      偏移米数，当前取最大偏移米数
 --   max_distance  最大偏移米数
 --   min_distance  最小偏移米数
@@ -359,6 +376,276 @@ COMMENT ON FUNCTION public.gis_flight_route_polygon(text, text)
 IS '飞行审核面空域航线校验';
 
 -- =============================================================================
+-- 函数名称：gis_flight_height_check
+-- 函数功能：飞行高度检查
+-- 函数描述：
+--   1. 接收任务航线GeoJSON。
+--   2. 从航线点Z值获取飞行高度。
+--   3. 飞行高度≤120米通过，飞行高度＞120米不通过。
+-- 参数说明：
+--   p_route_geojson  任务航线GeoJSON，支持LineString/MultiLineString
+--   p_limit_height   限高阈值，单位米，默认120
+-- 返回说明：返回code、msg、ischeck、minheight、maxheight。
+-- 注意事项：ischeck=true表示校验通过。
+-- =============================================================================
+
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_flight_height_check');
+
+-- =============================================================================
+-- 函数介绍：gis_flight_height_check
+-- 主要作用：检查航线点飞行高度是否超过120米。
+-- 入参说明：任务航线GeoJSON、限高阈值。
+-- 返回说明：返回执行状态、是否通过、最小/最大飞行高度。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.gis_flight_height_check(
+    p_route_geojson text,
+    p_limit_height numeric DEFAULT 120
+)
+RETURNS TABLE (
+    code integer,
+    msg text,
+    ischeck boolean,
+    minheight numeric,
+    maxheight numeric
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_route geometry;
+    v_minheight numeric;
+    v_maxheight numeric;
+    v_ischeck boolean;
+    v_start_time timestamptz := clock_timestamp();
+BEGIN
+    IF p_route_geojson IS NULL OR btrim(p_route_geojson) = '' THEN
+        RETURN QUERY SELECT 400, format('参数错误：航线GeoJSON不能为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    IF p_limit_height IS NULL OR p_limit_height < 0 THEN
+        RETURN QUERY SELECT 400, format('参数错误：限高阈值不能小于0米，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    BEGIN
+        v_route := ST_SetSRID(public.gis_geojson_to_geom(p_route_geojson), 4326);
+    EXCEPTION WHEN OTHERS THEN
+        RETURN QUERY SELECT 400, format('参数错误：航线GeoJSON解析失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric;
+        RETURN;
+    END;
+
+    IF v_route IS NULL OR ST_IsEmpty(v_route) THEN
+        RETURN QUERY SELECT 400, format('参数错误：航线GeoJSON无有效空间数据，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    IF ST_GeometryType(v_route) NOT IN ('ST_LineString', 'ST_MultiLineString') THEN
+        RETURN QUERY SELECT 400, format('参数错误：航线必须是LineString或MultiLineString，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    WITH height_points AS (
+        SELECT ST_Z((dp).geom) AS height
+        FROM ST_DumpPoints(v_route) AS dp
+        WHERE ST_Z((dp).geom) IS NOT NULL
+    )
+    SELECT ROUND(MIN(height)::numeric, 3), ROUND(MAX(height)::numeric, 3)
+    INTO v_minheight, v_maxheight
+    FROM height_points;
+
+    IF v_minheight IS NULL OR v_maxheight IS NULL THEN
+        RETURN QUERY SELECT 400, format('无数据：航线点未获取到有效飞行高度，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    v_ischeck := v_maxheight <= p_limit_height;
+
+    RETURN QUERY SELECT
+        200,
+        format('%s，最大飞行高度 %s 米，阈值 %s 米，执行时间 %s 秒',
+            CASE WHEN v_ischeck THEN '执行成功：飞行高度小于等于阈值' ELSE '执行成功：飞行高度大于阈值' END,
+            v_maxheight,
+            p_limit_height,
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)),
+        v_ischeck,
+        v_minheight,
+        v_maxheight;
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN QUERY SELECT 500, format('执行异常：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric;
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_flight_height_check(text, numeric)
+IS '飞行审核高度检查';
+
+-- =============================================================================
+-- 函数名称：gis_flight_height_plan
+-- 函数功能：计划高度校验
+-- 函数描述：
+--   1. 接收计划航线GeoJSON和任务航线GeoJSON。
+--   2. 计算任务航线与计划航线的高度偏差。
+--   3. 默认高度偏差阈值为0米。
+-- 参数说明：
+--   p_plan_route_geojson  计划航线GeoJSON，支持LineString/MultiLineString
+--   p_task_route_geojson  任务航线GeoJSON，支持LineString/MultiLineString
+--   p_height_m            允许高度偏差，单位米，默认0
+-- 返回说明：返回code、msg、ischeck、height、max_height、min_height。
+-- 注意事项：ischeck=true表示高度偏差≤阈值。
+-- =============================================================================
+
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_flight_height_plan');
+
+-- =============================================================================
+-- 函数介绍：gis_flight_height_plan
+-- 主要作用：校验任务航线与计划航线的高度偏差。
+-- 入参说明：计划航线GeoJSON、任务航线GeoJSON、允许高度偏差米数。
+-- 返回说明：返回执行状态、是否通过、高度偏差、最大/最小高度偏差。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.gis_flight_height_plan(
+    p_plan_route_geojson text,
+    p_task_route_geojson text,
+    p_height_m numeric DEFAULT 0
+)
+RETURNS TABLE (
+    code integer,
+    msg text,
+    ischeck boolean,
+    height numeric,
+    max_height numeric,
+    min_height numeric
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_plan_route geometry;
+    v_task_route geometry;
+    v_height numeric;
+    v_max_height numeric;
+    v_min_height numeric;
+    v_ischeck boolean;
+    v_start_time timestamptz := clock_timestamp();
+BEGIN
+    IF p_plan_route_geojson IS NULL OR btrim(p_plan_route_geojson) = '' THEN
+        RETURN QUERY SELECT 400, format('参数错误：计划航线GeoJSON不能为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    IF p_task_route_geojson IS NULL OR btrim(p_task_route_geojson) = '' THEN
+        RETURN QUERY SELECT 400, format('参数错误：任务航线GeoJSON不能为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    IF p_height_m IS NULL OR p_height_m < 0 THEN
+        RETURN QUERY SELECT 400, format('参数错误：允许高度偏差不能小于0米，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    BEGIN
+        v_plan_route := ST_SetSRID(public.gis_geojson_to_geom(p_plan_route_geojson), 4326);
+        v_task_route := ST_SetSRID(public.gis_geojson_to_geom(p_task_route_geojson), 4326);
+    EXCEPTION WHEN OTHERS THEN
+        RETURN QUERY SELECT 400, format('参数错误：航线GeoJSON解析失败：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric, NULL::numeric;
+        RETURN;
+    END;
+
+    IF v_plan_route IS NULL OR ST_IsEmpty(v_plan_route) THEN
+        RETURN QUERY SELECT 400, format('参数错误：计划航线GeoJSON无有效空间数据，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    IF v_task_route IS NULL OR ST_IsEmpty(v_task_route) THEN
+        RETURN QUERY SELECT 400, format('参数错误：任务航线GeoJSON无有效空间数据，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    IF ST_GeometryType(v_plan_route) NOT IN ('ST_LineString', 'ST_MultiLineString') THEN
+        RETURN QUERY SELECT 400, format('参数错误：计划航线必须是LineString或MultiLineString，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    IF ST_GeometryType(v_task_route) NOT IN ('ST_LineString', 'ST_MultiLineString') THEN
+        RETURN QUERY SELECT 400, format('参数错误：任务航线必须是LineString或MultiLineString，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    WITH plan_parts AS (
+        SELECT
+            (d).geom AS geom,
+            GREATEST(CEIL(ST_Length(ST_Force2D((d).geom)::geography) / 20)::integer, 1) AS step_count
+        FROM ST_Dump(v_plan_route) AS d
+    ),
+    plan_points AS (
+        SELECT
+            ST_LineInterpolatePoint(pp.geom, gs.i::double precision / pp.step_count) AS geom
+        FROM plan_parts pp
+        CROSS JOIN LATERAL generate_series(0, pp.step_count) AS gs(i)
+        WHERE ST_Z(ST_LineInterpolatePoint(pp.geom, gs.i::double precision / pp.step_count)) IS NOT NULL
+    ),
+    task_parts AS (
+        SELECT
+            (d).geom AS geom,
+            GREATEST(CEIL(ST_Length(ST_Force2D((d).geom)::geography) / 20)::integer, 1) AS step_count
+        FROM ST_Dump(v_task_route) AS d
+    ),
+    task_points AS (
+        SELECT
+            ST_LineInterpolatePoint(tp.geom, gs.i::double precision / tp.step_count) AS geom
+        FROM task_parts tp
+        CROSS JOIN LATERAL generate_series(0, tp.step_count) AS gs(i)
+        WHERE ST_Z(ST_LineInterpolatePoint(tp.geom, gs.i::double precision / tp.step_count)) IS NOT NULL
+    ),
+    height_points AS (
+        SELECT ABS(ST_Z(t.geom) - ST_Z(p.geom)) AS height_diff
+        FROM task_points t
+        CROSS JOIN LATERAL (
+            SELECT p.geom
+            FROM plan_points p
+            ORDER BY ST_Force2D(t.geom) <-> ST_Force2D(p.geom)
+            LIMIT 1
+        ) p
+    )
+    SELECT ROUND(MAX(height_diff)::numeric, 3), ROUND(MIN(height_diff)::numeric, 3)
+    INTO v_max_height, v_min_height
+    FROM height_points;
+
+    IF v_max_height IS NULL OR v_min_height IS NULL THEN
+        RETURN QUERY SELECT 400, format('无数据：航线采样点未获取到有效飞行高度，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
+    v_height := v_max_height;
+    v_ischeck := v_height <= p_height_m;
+
+    RETURN QUERY SELECT
+        200,
+        format('%s，高度偏差 %s 米，阈值 %s 米，执行时间 %s 秒',
+            CASE WHEN v_ischeck THEN '执行成功：高度偏差小于等于阈值' ELSE '执行成功：高度偏差大于阈值' END,
+            v_height,
+            p_height_m,
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)),
+        v_ischeck,
+        v_height,
+        v_max_height,
+        v_min_height;
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN QUERY SELECT 500, format('执行异常：%s，执行时间 %s 秒', SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric, NULL::numeric;
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_flight_height_plan(text, text, numeric)
+IS '飞行审核计划高度校验';
+
+-- =============================================================================
 -- 函数名称：gis_flight_route_deviation
 -- 函数功能：航线偏离校验
 -- 函数描述：
@@ -369,8 +656,8 @@ IS '飞行审核面空域航线校验';
 --   p_plan_route_geojson  计划航线GeoJSON，支持LineString/MultiLineString
 --   p_task_route_geojson  任务航线GeoJSON，支持LineString/MultiLineString
 --   p_offset_m            允许水平偏移距离，单位米，默认20
--- 返回说明：返回code、msg、isdeviation、distance、max_distance、min_distance。
--- 注意事项：isdeviation=true表示偏移距离＞阈值。
+-- 返回说明：返回code、msg、ischeck、distance、max_distance、min_distance。
+-- 注意事项：ischeck=true表示偏移距离≤阈值。
 -- =============================================================================
 
 -- =============================================================================
@@ -382,7 +669,7 @@ SELECT gis_drop_function('gis_flight_route_deviation');
 -- 函数介绍：gis_flight_route_deviation
 -- 主要作用：校验任务航线与计划航线的水平偏移距离。
 -- 入参说明：计划航线GeoJSON、任务航线GeoJSON、允许偏移米数。
--- 返回说明：返回执行状态、是否偏移、偏移米数、最大/最小偏移米数。
+-- 返回说明：返回执行状态、是否通过、偏移米数、最大/最小偏移米数。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_flight_route_deviation(
     p_plan_route_geojson text,
@@ -392,7 +679,7 @@ CREATE OR REPLACE FUNCTION public.gis_flight_route_deviation(
 RETURNS TABLE (
     code integer,
     msg text,
-    isdeviation boolean,
+    ischeck boolean,
     distance numeric,
     max_distance numeric,
     min_distance numeric
@@ -406,7 +693,7 @@ DECLARE
     v_distance numeric;
     v_max_distance numeric;
     v_min_distance numeric;
-    visdeviation boolean;
+    v_ischeck boolean;
     v_start_time timestamptz := clock_timestamp();
 BEGIN
     IF p_plan_route_geojson IS NULL OR btrim(p_plan_route_geojson) = '' THEN
@@ -537,16 +824,16 @@ BEGIN
     FROM plan_to_task, task_to_plan;
 
     v_distance := v_max_distance;
-    visdeviation := v_distance > p_offset_m;
+    v_ischeck := v_distance <= p_offset_m;
 
     RETURN QUERY SELECT
         200,
         format('%s，水平偏移距离 %s 米，阈值 %s 米，执行时间 %s 秒',
-            CASE WHEN visdeviation THEN '执行成功：水平偏移距离超出阈值' ELSE '执行成功：水平偏移距离未超出阈值' END,
+            CASE WHEN v_ischeck THEN '执行成功：水平偏移距离未超出阈值' ELSE '执行成功：水平偏移距离超出阈值' END,
             v_distance,
             p_offset_m,
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)),
-        visdeviation,
+        v_ischeck,
         v_distance,
         v_max_distance,
         v_min_distance;
@@ -586,8 +873,23 @@ IS '飞行审核航线偏离校验';
 --     '{"type":"LineString","coordinates":[[115.984,36.454,120],[115.990,36.458,120]]}'
 -- );
 
+-- 飞行高度检查
+-- SELECT code, msg, ischeck, minheight, maxheight
+-- FROM public.gis_flight_height_check(
+--     '{"type":"LineString","coordinates":[[115.984,36.454,180],[115.990,36.458,180]]}',
+--     120
+-- );
+
+-- 飞行审核计划高度校验
+-- SELECT code, msg, ischeck, height, max_height, min_height
+-- FROM public.gis_flight_height_plan(
+--     '{"type":"LineString","coordinates":[[115.984,36.454,150],[115.990,36.458,180]]}',
+--     '{"type":"LineString","coordinates":[[115.984,36.454,160],[115.990,36.458,170]]}',
+--     20
+-- );
+
 -- 飞行偏离校验
--- SELECT code, msg, isdeviation, distance, max_distance, min_distance
+-- SELECT code, msg, ischeck, distance, max_distance, min_distance
 -- FROM public.gis_flight_route_deviation(
 --     '{"type":"LineString","coordinates":[[115.984,36.454,120],[115.990,36.458,120]]}',
 --     '{"type":"LineString","coordinates":[[115.9841,36.4541,120],[115.9901,36.4581,120]]}',
