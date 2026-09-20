@@ -892,6 +892,15 @@ IS '飞行审核航线偏离校验';
 -- =============================================================================
 
 -- 点+半径计划空域
+-- 入参：
+--   1. p_center_geojson 中心点GeoJSON，格式为Point，坐标为[经度,纬度]
+--   2. p_radius_m      计划空域半径，单位米
+--   3. p_route_geojson  航线GeoJSON，格式为LineString/MultiLineString，坐标可带高度[经度,纬度,高度]
+-- 返回：
+--   code       状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   msg        返回信息，包含校验结果和执行耗时
+--   ischeck    是否在点+半径计划空域内，true=在范围内，false=超出范围
+--   check_type 空间关系类型：ln_within=包含于 ln_outside=相离 ln_crosses=交叉 ln_enters=穿入/穿出 ln_overlaps=重叠
 -- SELECT code, msg, ischeck, check_type
 -- FROM public.gis_flight_route_circle(
 --     '{"type":"Point","coordinates":[115.985,36.455]}',
@@ -900,6 +909,14 @@ IS '飞行审核航线偏离校验';
 -- );
 
 -- 面计划空域
+-- 入参：
+--   1. p_polygon_geojson 计划面空域GeoJSON，格式为Polygon/MultiPolygon
+--   2. p_route_geojson   航线GeoJSON，格式为LineString/MultiLineString，坐标可带高度[经度,纬度,高度]
+-- 返回：
+--   code       状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   msg        返回信息，包含校验结果和执行耗时
+--   ischeck    是否在面计划空域内，true=在范围内，false=超出范围
+--   check_type 空间关系类型：ln_within=包含于 ln_outside=相离 ln_crosses=交叉 ln_enters=穿入/穿出 ln_overlaps=重叠
 -- SELECT code, msg, ischeck, check_type
 -- FROM public.gis_flight_route_polygon(
 --     '{"type":"Polygon","coordinates":[[[115.970,36.440],[116.000,36.440],[116.000,36.470],[115.970,36.470],[115.970,36.440]]]}',
@@ -907,6 +924,16 @@ IS '飞行审核航线偏离校验';
 -- );
 
 -- 飞行高度检查
+-- 入参：
+--   1. p_route_geojson 航线GeoJSON，格式为LineString/MultiLineString，坐标高度为海拔高度或飞行高度
+--   2. p_limit_height  限高阈值，单位米，例如120
+--   3. p_is_altitude   是否按海拔高度计算：true=坐标高度为海拔高度，需结合DEM计算真高；false=直接使用航线点高度
+-- 返回：
+--   code      状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   msg       返回信息，包含校验结果和执行耗时
+--   ischeck   是否通过高度校验，true=最大飞行高度小于等于阈值，false=最大飞行高度大于阈值
+--   minheight 最小飞行高度，单位米
+--   maxheight 最大飞行高度，单位米
 -- SELECT code, msg, ischeck, minheight, maxheight
 -- FROM public.gis_flight_height_check(
 --     '{"type":"LineString","coordinates":[[115.984,36.454,180],[115.990,36.458,180]]}',
@@ -915,6 +942,16 @@ IS '飞行审核航线偏离校验';
 -- );
 
 -- 直接使用航线点高度
+-- 入参：
+--   1. p_route_geojson 航线GeoJSON，坐标第三位直接作为飞行高度
+--   2. p_limit_height  限高阈值，单位米，例如120
+--   3. p_is_altitude   false=不结合DEM，直接使用航线点高度
+-- 返回：
+--   code      状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   msg       返回信息，包含校验结果和执行耗时
+--   ischeck   是否通过高度校验，true=最大飞行高度小于等于阈值，false=最大飞行高度大于阈值
+--   minheight 最小飞行高度，单位米
+--   maxheight 最大飞行高度，单位米
 -- SELECT code, msg, ischeck, minheight, maxheight
 -- FROM public.gis_flight_height_check(
 --     '{"type":"LineString","coordinates":[[115.984,36.454,110],[115.990,36.458,180]]}',
@@ -923,6 +960,17 @@ IS '飞行审核航线偏离校验';
 -- );
 
 -- 飞行审核计划高度校验
+-- 入参：
+--   1. p_plan_route_geojson 计划航线GeoJSON，坐标第三位为计划高度
+--   2. p_task_route_geojson 任务航线GeoJSON，坐标第三位为任务高度
+--   3. p_height_m           允许高度偏差阈值，单位米
+-- 返回：
+--   code       状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   msg        返回信息，包含校验结果和执行耗时
+--   ischeck    是否通过计划高度校验，true=高度偏差小于等于阈值，false=高度偏差大于阈值
+--   height     高度偏差米数，当前取最大高度偏差
+--   max_height 最大高度偏差米数
+--   min_height 最小高度偏差米数
 -- SELECT code, msg, ischeck, height, max_height, min_height
 -- FROM public.gis_flight_height_plan(
 --     '{"type":"LineString","coordinates":[[115.984,36.454,150],[115.990,36.458,180]]}',
@@ -931,6 +979,17 @@ IS '飞行审核航线偏离校验';
 -- );
 
 -- 飞行偏离校验
+-- 入参：
+--   1. p_plan_route_geojson 计划航线GeoJSON，格式为LineString/MultiLineString
+--   2. p_task_route_geojson 任务航线GeoJSON，格式为LineString/MultiLineString
+--   3. p_offset_m           允许水平偏移阈值，单位米
+-- 返回：
+--   code         状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   msg          返回信息，包含校验结果和执行耗时
+--   ischeck      是否通过偏离校验，true=水平偏移距离小于等于阈值，false=水平偏移距离大于阈值
+--   distance     偏移米数，当前取最大偏移米数
+--   max_distance 最大偏移米数
+--   min_distance 最小偏移米数
 -- SELECT code, msg, ischeck, distance, max_distance, min_distance
 -- FROM public.gis_flight_route_deviation(
 --     '{"type":"LineString","coordinates":[[115.984,36.454,120],[115.990,36.458,120]]}',
