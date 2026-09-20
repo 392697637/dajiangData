@@ -46,8 +46,8 @@
 --   code       状态码：200=执行成功 400=参数错误/无数据 500=执行异常
 --   msg        返回信息
 --   ischeck    是否通过高度校验
---   minheight  最小飞行真高，单位米
---   maxheight  最大飞行真高，单位米
+--   minheight  最小飞行高度，单位米
+--   maxheight  最大飞行高度，单位米
 --
 -- 4计划高度校验返回说明：
 --   code        状态码：200=执行成功 400=参数错误/无数据 500=执行异常
@@ -385,6 +385,7 @@ IS '飞行审核面空域航线校验';
 -- 参数说明：
 --   p_route_geojson  任务航线GeoJSON，支持LineString/MultiLineString
 --   p_limit_height   限高阈值，单位米，默认120
+--   p_is_elevation   是否按海拔高度计算，true=航线点海拔高度减地面高程计算真高，false=直接使用航线点高度，默认true
 -- 返回说明：返回code、msg、ischeck、minheight、maxheight。
 -- 注意事项：ischeck=true表示校验通过。
 -- =============================================================================
@@ -397,12 +398,13 @@ SELECT gis_drop_function('gis_flight_height_check');
 -- =============================================================================
 -- 函数介绍：gis_flight_height_check
 -- 主要作用：检查航线点飞行高度是否超过120米。
--- 入参说明：任务航线GeoJSON、限高阈值。
+-- 入参说明：任务航线GeoJSON、限高阈值、是否海拔高度。
 -- 返回说明：返回执行状态、是否通过、最小/最大飞行高度。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_flight_height_check(
     p_route_geojson text,
-    p_limit_height numeric DEFAULT 120
+    p_limit_height numeric DEFAULT 120,
+    p_is_elevation boolean DEFAULT true
 )
 RETURNS TABLE (
     code integer,
@@ -431,6 +433,11 @@ BEGIN
         RETURN;
     END IF;
 
+    IF p_is_elevation IS NULL THEN
+        RETURN QUERY SELECT 400, format('参数错误：是否海拔高度不能为空，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric;
+        RETURN;
+    END IF;
+
     BEGIN
         v_route := ST_SetSRID(public.gis_geojson_to_geom(p_route_geojson), 4326);
     EXCEPTION WHEN OTHERS THEN
@@ -448,17 +455,42 @@ BEGIN
         RETURN;
     END IF;
 
-    WITH height_points AS (
-        SELECT ST_Z((dp).geom) AS height
-        FROM ST_DumpPoints(v_route) AS dp
-        WHERE ST_Z((dp).geom) IS NOT NULL
-    )
-    SELECT ROUND(MIN(height)::numeric, 3), ROUND(MAX(height)::numeric, 3)
-    INTO v_minheight, v_maxheight
-    FROM height_points;
+    IF NOT p_is_elevation THEN
+        WITH height_points AS (
+            SELECT ST_Z((dp).geom) AS height
+            FROM ST_DumpPoints(v_route) AS dp
+            WHERE ST_Z((dp).geom) IS NOT NULL
+        )
+        SELECT ROUND(MIN(height)::numeric, 3), ROUND(MAX(height)::numeric, 3)
+        INTO v_minheight, v_maxheight
+        FROM height_points;
+    ELSE
+        WITH height_points AS (
+            SELECT ST_Z((dp).geom) - ST_Z(dem.geom) AS height
+            FROM ST_DumpPoints(v_route) AS dp
+            CROSS JOIN LATERAL (
+                SELECT public.gis_dem_elevation_base(
+                    ST_Force2D((dp).geom)
+                ) AS geom
+            ) AS dem
+            WHERE ST_Z((dp).geom) IS NOT NULL
+              AND dem.geom IS NOT NULL
+              AND ST_Z(dem.geom) IS NOT NULL
+        )
+        SELECT ROUND(MIN(height)::numeric, 3), ROUND(MAX(height)::numeric, 3)
+        INTO v_minheight, v_maxheight
+        FROM height_points;
+    END IF;
 
     IF v_minheight IS NULL OR v_maxheight IS NULL THEN
-        RETURN QUERY SELECT 400, format('无数据：航线点未获取到有效飞行高度，执行时间 %s 秒', ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)), false, NULL::numeric, NULL::numeric;
+        RETURN QUERY SELECT
+            400,
+            format('无数据：未获取到有效%s，执行时间 %s 秒',
+                CASE WHEN p_is_elevation THEN '真高' ELSE '飞行高度' END,
+                ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)),
+            false,
+            NULL::numeric,
+            NULL::numeric;
         RETURN;
     END IF;
 
@@ -466,8 +498,9 @@ BEGIN
 
     RETURN QUERY SELECT
         200,
-        format('%s，最大飞行高度 %s 米，阈值 %s 米，执行时间 %s 秒',
+        format('%s，最大%s %s 米，阈值 %s 米，执行时间 %s 秒',
             CASE WHEN v_ischeck THEN '执行成功：飞行高度小于等于阈值' ELSE '执行成功：飞行高度大于阈值' END,
+            CASE WHEN p_is_elevation THEN '真高' ELSE '飞行高度' END,
             v_maxheight,
             p_limit_height,
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3)),
@@ -480,7 +513,7 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_flight_height_check(text, numeric)
+COMMENT ON FUNCTION public.gis_flight_height_check(text, numeric, boolean)
 IS '飞行审核高度检查';
 
 -- =============================================================================
@@ -877,7 +910,16 @@ IS '飞行审核航线偏离校验';
 -- SELECT code, msg, ischeck, minheight, maxheight
 -- FROM public.gis_flight_height_check(
 --     '{"type":"LineString","coordinates":[[115.984,36.454,180],[115.990,36.458,180]]}',
---     120
+--     120,
+--     true
+-- );
+
+-- 直接使用航线点高度
+-- SELECT code, msg, ischeck, minheight, maxheight
+-- FROM public.gis_flight_height_check(
+--     '{"type":"LineString","coordinates":[[115.984,36.454,110],[115.990,36.458,180]]}',
+--     120,
+--     false
 -- );
 
 -- 飞行审核计划高度校验
