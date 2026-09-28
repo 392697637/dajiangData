@@ -55,9 +55,9 @@ COMMENT ON COLUMN public.bo_airspace_block.unit_id IS '所属单位ID';
 COMMENT ON COLUMN public.bo_airspace_block.unit_name IS '所属单位名称';
 COMMENT ON COLUMN public.bo_airspace_block.airspace_code IS '空域编号';
 COMMENT ON COLUMN public.bo_airspace_block.airspace_name IS '空域名称';
-COMMENT ON COLUMN public.bo_airspace_block.airspace_type IS '空域类型（B类、D类）';
+COMMENT ON COLUMN public.bo_airspace_block.airspace_type IS '空域类型字典编码：管制空域、监视空域、报告空域';
 COMMENT ON COLUMN public.bo_airspace_block.airspace_area IS '空域面积，单位：平方公里';
-COMMENT ON COLUMN public.bo_airspace_block.airspace_state IS '空域状态（管制、监视）';
+COMMENT ON COLUMN public.bo_airspace_block.airspace_state IS '默认状态字典编码：管控、报告、监视';
 COMMENT ON COLUMN public.bo_airspace_block.fence_type IS '围栏类型：1=禁飞区，2=管控区，3=试飞区/适飞区';
 COMMENT ON COLUMN public.bo_airspace_block.remark IS '备注';
 COMMENT ON COLUMN public.bo_airspace_block.sync_time IS '第三方同步时间';
@@ -443,9 +443,17 @@ BEGIN
         format('模拟用空单位%s', ((seq - 1) % 10 + 1)),
         format('DEMO-AS-%s', lpad(seq::text, 6, '0')),
         format('模拟空域区块%s', lpad(seq::text, 6, '0')),
-        CASE WHEN seq % 2 = 0 THEN 'B类' ELSE 'D类' END,
+        CASE seq % 3
+            WHEN 0 THEN 'REPORT'
+            WHEN 1 THEN 'CONTROL'
+            ELSE 'MONITOR'
+        END,
         round((0.018 + (seq % 7) * 0.006)::numeric, 3)::double precision,
-        CASE WHEN seq % 3 = 0 THEN '监视' ELSE '管制' END,
+        CASE seq % 3
+            WHEN 0 THEN 'MONITOR'
+            WHEN 1 THEN 'CONTROL'
+            ELSE 'REPORT'
+        END,
         '2',
         '模拟数据：空域区块',
         now(),
@@ -592,6 +600,314 @@ IS '生成或更新模拟用空计划数据';
 -- SELECT public.gis_airspace_plan_demo(3, 2);
 -- SELECT * FROM public.gis_airspace_plan_fence(current_date, 2);
 
-SELECT public.gis_airspace_block_demo(100);
-SELECT public.gis_airspace_plan_demo(3, 2);
--- SELECT * FROM public.gis_airspace_plan_fence(current_date, 2);
+-- =============================================================================
+-- 五、空域区块查询接口及后台SQL
+-- =============================================================================
+-- 1.1 空域区块查询
+-- 接口：GET /api/airspace/blocks
+-- 用途：查询空域区块界面列表和地图展示数据。
+--
+--  查询空域前端请求参数
+-- 参数：
+--   airspace_code  string    否，空域编号，支持模糊查询
+--   airspace_name  string    否，空域名称，支持模糊查询
+--   airspace_type  string    否，空域类型字典编码
+--   airspace_state string    否，默认状态字典编码
+--
+-- 查询规则：
+--   1. 一个接口直接查询符合条件的全部未删除空域区块。
+--   2. 不分页，不区分列表模式和地图模式。
+--   3. 每条记录直接返回GeoJSON空间字段。
+--   4. 数据量较大时，后端应结合筛选条件和数据库空间索引控制查询耗时。
+--   5. airspace_type、airspace_state均为字典字段，前端传字典编码，
+--      后端按编码查询；字典名称由前端或后端字典服务转换。
+--
+--  后端返回参数
+-- 返回格式：
+--   code       integer   0表示成功，非0表示失败
+--   message    string    返回说明
+--   data       array     空域区块集合
+--
+-- data数组元素字段：
+--   id             bigint    区块主键
+--   outid          string    第三方空域区块唯一标识
+--   unit_id        string    所属单位ID
+--   unit_name      string    所属单位名称
+--   airspace_code  string    空域编号
+--   airspace_name  string    空域名称
+--   airspace_type  string    空域类型字典编码
+--   airspace_state string    默认状态字典编码
+--   airspace_area  number    空域面积，平方公里
+--   fence_type     string    围栏类型
+--   geom           object    GeoJSON Feature
+--
+-- 空间字段返回规则：
+--   1. geom使用GeoJSON格式，坐标系为WGS84（EPSG:4326）。
+--   2. 前端地图建议接收GeoJSON Geometry；如果地图组件要求Feature，
+--      后端再将属性字段组装为GeoJSON Feature。
+--
+--   PostgreSQL语句
+-- 接口：GET /api/airspace/blocks
+-- 查询符合条件的全部区块数据。
+SELECT
+    b.id,
+    b.outid,
+    b.unit_id AS unit_id,
+    b.unit_name AS unit_name,
+    b.airspace_code AS airspace_code,
+    b.airspace_name AS airspace_name,
+    b.airspace_type AS airspace_type,
+    b.airspace_state AS airspace_state,
+    b.airspace_area,
+    b.fence_type,
+    json_build_object(
+        'type', 'Feature',
+        'properties', '{}'::json,
+        'geometry', ST_AsGeoJSON(b.geom)::json
+    ) AS geom,
+    b.create_time,
+    b.update_time
+FROM public.bo_airspace_block b
+WHERE b.del_flag = false
+ORDER BY b.airspace_code NULLS LAST, b.id;
+
+-- =============================================================================
+-- 2.1 用空计划查询
+-- =============================================================================
+-- 接口：GET /api/airspace/plans
+-- 用途：根据空域区块条件和使用日期查询用空计划明细。
+-- 关联关系：
+--   bo_airspace_plan.block_id = bo_airspace_block.id
+--   一条 bo_airspace_block 记录可以关联多条 bo_airspace_plan 记录（一对多）。
+--   本接口按计划明细返回，一条用空计划返回一条记录。
+--   同一区块存在多条计划时，区块字段会随每条计划重复返回，这是正常结果。
+--
+--   查询用空计划前端请求参数
+-- 参数：
+--   airspace_code  string    否，空域编号，支持模糊查询
+--   airspace_name  string    否，空域名称，支持模糊查询
+--   airspace_type  string    否，空域类型字典编码
+--   airspace_state string    否，默认状态字典编码
+--   use_date       date      是，使用日期，格式：YYYY-MM-DD
+--
+-- 查询规则：
+--   1. 以上四个空域区块查询条件关联 bo_airspace_block 使用。
+--   2. use_date 关联 bo_airspace_plan.use_date 查询。
+--   3. 只返回存在指定日期有效用空计划的空域区块和计划。
+--   4. 本接口只返回空域区块，不返回plans计划数组。
+--   5. 当前 SQL 示例日期先写死为 DATE '2026-09-28'，便于直接执行测试；
+--      后端正式调用时，将 DATE '2026-09-28' 替换为 :use_date::date。
+--
+--   用空计划后端返回参数
+-- 返回格式：
+--   code       integer   0表示成功，非0表示失败
+--   message    string    返回说明
+--   data       array     空域区块集合
+--   注意：data数组元素是一个空域区块，不包含plans计划数组。
+--
+-- data数组元素（区块）字段：
+--   id             bigint    区块主键
+--   outid          string    第三方空域区块唯一标识
+--   unit_id        string    所属单位ID
+--   unit_name      string    所属单位名称
+--   airspace_code  string    空域编号
+--   airspace_name  string    空域名称
+--   airspace_type  string    空域类型字典编码
+--   airspace_state string    默认状态字典编码
+--   airspace_area  number    空域面积，平方公里
+--   fence_type     string    围栏类型
+--   geom           object    GeoJSON Feature
+--
+--   PostgreSQL语句
+-- 查询符合条件且在指定日期存在有效用空计划的全部空域区块。
+SELECT
+    b.id,
+    b.outid,
+    b.unit_id,
+    b.unit_name,
+    b.airspace_code,
+    b.airspace_name,
+    b.airspace_type,
+    b.airspace_state,
+    b.airspace_area,
+    b.fence_type,
+    json_build_object(
+        'type', 'Feature',
+        'properties', '{}'::json,
+        'geometry', ST_AsGeoJSON(b.geom)::json
+    ) AS geom
+FROM public.bo_airspace_block b
+WHERE b.del_flag = false
+  AND EXISTS (
+      SELECT 1
+      FROM public.bo_airspace_plan p
+      WHERE p.block_id = b.id
+        AND p.del_flag = false
+        AND p.use_date = DATE '2026-09-28'
+  )
+ 
+ORDER BY b.airspace_code NULLS LAST, b.id;
+
+-- =============================================================================
+-- 2.2 根据区块ID查询用空计划
+-- =============================================================================
+-- 接口：GET /api/airspace/blocks/{block_id}/plans
+-- 用途：根据空域区块ID和使用日期查询该区块下的用空计划数组。
+--
+--  查询用空计划前端请求参数
+-- 参数：
+--   block_id       bigint    必填，空域区块主键
+--   use_date       date      必填，使用日期，格式：YYYY-MM-DD
+--
+--   用空计划后端返回参数
+-- 返回格式：
+--   code       integer   0表示成功，非0表示失败
+--   message    string    返回说明
+--   data       array     当前区块下的用空计划集合
+--
+-- data数组元素字段：
+--   plan_id        bigint    用空计划主键
+--   block_id       bigint    空域区块主键
+--   plan_outid     string    第三方计划唯一标识
+--   use_date       date      使用日期
+--   time_plan      string    时间计划，仅保存时分秒
+--   min_height    number     最低高度，米
+--   max_height    number     最高高度，米
+--   buffer_height number     缓冲高度，米
+--   plan_status    string    计划状态字典编码
+--   remark         string    计划备注
+--
+--   PostgreSQL语句
+-- 当前 SQL 示例日期先写死为 DATE '2026-09-28'，后端调用时替换为 :use_date::date。
+-- 后端查询结果统一封装为 data 数组；SQL 每条计划返回一行。
+SELECT
+    p.plan_id,
+    p.block_id,
+    p.plan_outid,
+    p.use_date,
+    p.time_plan,
+    p.min_height,
+    p.max_height,
+    p.buffer_height,
+    p.plan_status,
+    p.remark
+FROM public.bo_airspace_plan p
+WHERE p.block_id = :block_id
+  AND p.del_flag = false
+  AND p.use_date = DATE '2026-09-28'
+ORDER BY p.plan_id;
+
+-- =============================================================================
+-- 四、按日期和24小时时间轴查询空域区块
+-- =============================================================================
+-- 用途：选择某一天后，时间轴按24小时移动，查询当前时刻对应的空域区块。
+-- 关联关系：
+--   bo_airspace_plan.block_id = bo_airspace_block.id
+--   一个空域区块可以对应多条用空计划。
+--   只要区块下有一条计划在当前时间段内生效，就返回该区块。
+--
+-- 4.1 查询空域区块前端请求参数
+-- 参数：
+--   airspace_code  string    否，空域编号，支持模糊查询
+--   airspace_name  string    否，空域名称，支持模糊查询
+--   airspace_type  string    否，空域类型字典编码
+--   airspace_state string    否，默认状态字典编码
+--   use_date       date      必填，查询日期，格式：YYYY-MM-DD
+--   axis_time      time      必填，24小时时间轴当前时间，格式：HH24:MI:SS
+--
+-- 4.2 查询结果
+-- 返回符合空域区块筛选条件、指定日期、指定时间段内有效的区块。
+-- 一个区块如果同时匹配多条计划，SQL按计划返回多行，后端可按block_id合并；
+-- 如果前端只需要区块列表，可在后端按block_id去重。
+-- 返回字段：
+--   block_id       bigint    空域区块主键
+--   outid          string    第三方空域区块唯一标识
+--   airspace_code  string    空域编号
+--   airspace_name  string    空域名称
+--   airspace_type  string    空域类型字典编码
+--   airspace_state string    默认状态字典编码
+--   plan_id        bigint    当前生效计划主键
+--   plan_outid     string    第三方计划唯一标识
+--   use_date       date      使用日期
+--   time_plan      string    时间计划
+--   min_height     number    最低高度，米
+--   max_height     number    最高高度，米
+--   buffer_height  number    缓冲高度，米
+--   plan_status    string    计划状态字典编码
+--   geom           object    GeoJSON Feature
+--
+-- 4.3 PostgreSQL语句
+-- 当前 SQL 示例日期和时间先写死，后端调用时替换为 :use_date::date
+-- 和 :axis_time::time。
+SELECT
+    b.id AS block_id,
+    b.outid,
+    b.unit_id,
+    b.unit_name,
+    b.airspace_code,
+    b.airspace_name,
+    b.airspace_type,
+    b.airspace_state,
+    b.airspace_area,
+    b.fence_type,
+    p.plan_id,
+    p.plan_outid,
+    p.use_date,
+    p.time_plan,
+    p.min_height,
+    p.max_height,
+    p.buffer_height,
+    p.plan_status,
+    p.remark,
+    json_build_object(
+        'type', 'Feature',
+        'properties', '{}'::json,
+        'geometry', ST_AsGeoJSON(b.geom)::json
+    ) AS geom
+FROM public.bo_airspace_block b
+JOIN public.bo_airspace_plan p
+    ON p.block_id = b.id
+WHERE b.del_flag = false
+  AND p.del_flag = false
+  AND p.plan_status = '1'
+  AND p.use_date = DATE '2026-09-28'
+  AND EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(
+          CASE
+              WHEN btrim(COALESCE(p.time_plan, '')) ~ '^\s*\['
+              THEN p.time_plan::jsonb
+              ELSE '[]'::jsonb
+          END
+      ) AS time_item(item)
+      WHERE
+          (
+              :axis_time::time >= (time_item.item->>'startTime')::time
+              AND :axis_time::time < (time_item.item->>'endTime')::time
+          )
+          OR (
+              (time_item.item->>'startTime')::time >
+                  (time_item.item->>'endTime')::time
+              AND (
+                  :axis_time::time >= (time_item.item->>'startTime')::time
+                  OR :axis_time::time < (time_item.item->>'endTime')::time
+              )
+          )
+  )
+  AND (
+      NULLIF(btrim(:airspace_code), '') IS NULL
+      OR b.airspace_code ILIKE '%' || btrim(:airspace_code) || '%'
+  )
+  AND (
+      NULLIF(btrim(:airspace_name), '') IS NULL
+      OR b.airspace_name ILIKE '%' || btrim(:airspace_name) || '%'
+  )
+  AND (
+      NULLIF(btrim(:airspace_type), '') IS NULL
+      OR b.airspace_type = btrim(:airspace_type)
+  )
+  AND (
+      NULLIF(btrim(:airspace_state), '') IS NULL
+      OR b.airspace_state = btrim(:airspace_state)
+  )
+ORDER BY b.airspace_code NULLS LAST, b.id, p.plan_id;
