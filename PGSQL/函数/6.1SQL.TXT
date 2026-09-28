@@ -101,3 +101,8 @@ shp2pgsql -s 4326 -I -W UTF-8 D:\MAPDATA\DEM\4326\gis_dem_henan_contour.shp publ
 set PGPASSWORD=KtdpostSQL@2026!@#
 psql -h 192.168.110.6 -p 5432 -U zhuoyi -d ktd_lc_gis -f D:\MAPDATA\DEM\4326\gis_dem_shandong.sql
 
+
+set PGPASSWORD=KtdpostSQL@2026!@#
+psql -h 218.57.15.226 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_shandong.sql
+
+218.57.15.226
