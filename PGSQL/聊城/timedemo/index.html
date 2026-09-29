@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>飞行计划申请 Demo</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/cesium@1.92/Build/Cesium/Widgets/widgets.css"
+    />
+    <link rel="stylesheet" href="time.css" />
+  </head>
+  <body data-page="plan">
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <h1>聊城市低空综合感知服务平台</h1>
+          <span>LIAOCHENG CITY LOW-ALTITUDE COMPREHENSIVE PERCEPTION SERVICE PLATFORM</span>
+        </div>
+        <div class="header-time">
+          <strong id="clockText">00:00:00</strong>
+          <span id="dateText">2026-09-29</span>
+        </div>
+      </header>
+
+      <main>
+        <aside class="nav-panel">
+          <div class="nav-section">
+            <strong>空域设置</strong>
+            <a href="#block" data-page-link="block">空域区块</a>
+            <a class="active" href="#plan" data-page-link="plan">用空计划</a>
+          </div>
+        </aside>
+
+        <aside class="sidebar panel">
+          <section class="filters">
+            <h2 id="filterTitle">用空计划</h2>
+            <div class="filter-grid">
+              <label class="page-plan-only"
+                >使用日期
+                <input id="useDate" type="date" value="2026-09-29" />
+              </label>
+              <label
+                >空域类型
+                <select id="airspaceType">
+                  <option value="">全部</option>
+                  <option value="CONTROL">管制空域</option>
+                  <option value="MONITOR">监视空域</option>
+                  <option value="REPORT">报告空域</option>
+                </select>
+              </label>
+              <label
+                >空域编号
+                <input id="airspaceCode" placeholder="支持模糊查询" />
+              </label>
+              <label
+                >空域名称
+                <input id="airspaceName" placeholder="支持模糊查询" />
+              </label>
+              <label
+                >默认状态
+                <select id="airspaceState">
+                  <option value="">全部</option>
+                  <option value="CONTROL">管控</option>
+                  <option value="MONITOR">监视</option>
+                  <option value="REPORT">报告</option>
+                </select>
+              </label>
+            </div>
+            <div class="filter-actions">
+              <button id="searchBtn">查询</button>
+              <button id="resetBtn" class="secondary">重置</button>
+            </div>
+          </section>
+          <section class="results">
+            <div class="result-head">
+              <h2 id="resultTitle">当天空域区块</h2>
+              <span id="resultCount" class="result-count"></span>
+            </div>
+            <div id="blockList"></div>
+          </section>
+        </aside>
+
+        <section class="panel">
+          <div class="stage">
+            <div id="cesiumContainer"></div>
+            <section class="plan-popup">
+              <div class="popup-head">
+                <strong id="popupTitle">用空计划详情</strong>
+                <button type="button" id="popupClose">×</button>
+              </div>
+              <div id="popupContent" class="popup-content">
+              <div class="popup-block">
+                <strong>这里是空域名称</strong>
+                <p>高度层：300-400m</p>
+                <p>可用时段：09:00 - 18:00</p>
+                <p>状态：不可用</p>
+                <p>缓冲区：50</p>
+              </div>
+              <div class="popup-block">
+                <strong>这里是空域名称</strong>
+                <p>高度层：300-400m</p>
+                <p>可用时段：09:00 - 18:00</p>
+                <p>状态：不可用</p>
+                <p>缓冲区：50</p>
+              </div>
+              </div>
+            </section>
+            <div class="legend">
+              <label class="legend-item"><input type="checkbox" checked /><i class="forbidden"></i>禁飞区</label>
+              <label class="legend-item"><input type="checkbox" checked /><i class="control"></i>管制区</label>
+              <label class="legend-item"><input type="checkbox" checked /><i class="suitable"></i>适飞区</label>
+              <label class="legend-item"><input type="checkbox" checked /><i class="control-state"></i>管制状态</label>
+              <label class="legend-item"><input type="checkbox" checked /><i class="monitor-state"></i>监控状态</label>
+              <label class="legend-item"><input type="checkbox" checked /><i class="alarm-state"></i>报警状态</label>
+            </div>
+            <div class="timeline">
+              <div class="timeline-top">
+                <button id="playBtn" class="secondary" title="播放时间轴">
+                  播放
+                </button>
+                <button id="backBtn" class="secondary" title="退回一小时">
+                  -1小时
+                </button>
+                <strong id="timelineTime">00:00:00</strong>
+                <input
+                  id="timeSlider"
+                  type="range"
+                  min="0"
+                  max="86399"
+                  value="0"
+                  step="1"
+                />
+                <button id="forwardBtn" class="secondary" title="前进一小时">
+                  +1小时
+                </button>
+              </div>
+              <div class="timeline-scale">
+                <span>00:00</span><span>06:00</span><span>12:00</span
+                ><span>18:00</span><span>24:00</span>
+              </div>
+              <div id="timelineSegments" class="timeline-segments"></div>
+              <div id="timelineNote" class="timeline-note"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        当前为前后端联调 Demo：time.json
+        模拟后端返回，时间轴变化在前端本地计算，不重复请求空间数据。
+      </footer>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/cesium@1.92/Build/Cesium/Cesium.js"></script>
+    <script src="airspace-block.js"></script>
+    <script src="airspace-plan.js"></script>
+    <script src="time.js"></script>
+  </body>
+</html>
