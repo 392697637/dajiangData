@@ -1,5 +1,5 @@
 ﻿const PLAN_TYPES = { CONTROL: "管制空域", MONITOR: "监视空域", REPORT: "报告空域" };
-const PLAN_STATES = { CONTROL: "管控", MONITOR: "监视", REPORT: "报告" };
+const PLAN_STATES = { CONTROL: "管制状态", MONITOR: "监控状态", REPORT: "报警状态" };
 const PLAN_STATUS = { ACTIVE: "当前生效", APPLIED: "已申请", DISABLED: "不可用", NOT_APPLIED: "未申请" };
 
 function planEls() {
@@ -41,7 +41,15 @@ function planNowSecond() {
   return now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
 }
 function planColor(status) {
-  const colors = { ACTIVE: Cesium.Color.RED.withAlpha(0.55), APPLIED: Cesium.Color.GOLD.withAlpha(0.45), DISABLED: Cesium.Color.MEDIUMPURPLE.withAlpha(0.45), NOT_APPLIED: Cesium.Color.GRAY.withAlpha(0.28) };
+  const colors = {
+    ACTIVE: Cesium.Color.RED.withAlpha(0.55),
+    APPLIED: Cesium.Color.GOLD.withAlpha(0.45),
+    DISABLED: Cesium.Color.MEDIUMPURPLE.withAlpha(0.45),
+    NOT_APPLIED: Cesium.Color.GRAY.withAlpha(0.28),
+    CONTROL: Cesium.Color.fromCssColorString("rgba(24, 169, 255, 0.58)"),
+    MONITOR: Cesium.Color.fromCssColorString("rgba(155, 125, 255, 0.56)"),
+    REPORT: Cesium.Color.fromCssColorString("rgba(255, 86, 168, 0.56)"),
+  };
   return colors[status] || Cesium.Color.YELLOW.withAlpha(0.5);
 }
 
@@ -118,8 +126,8 @@ window.AirspacePlanPage = {
     const none = blocks.filter((b) => this.status(b) === "NOT_APPLIED").length;
     this.els.note.textContent = `当前 ${planTimeText(this.seconds)}：${active} 个生效，${applied} 个已申请未生效，${none} 个当天未申请。`;
     this.els.list.innerHTML = blocks.map((block) => {
-      const status = this.status(block);
-      return `<div class="block-row" data-id="${block.block_id}"><i class="status-dot ${status.toLowerCase()}"></i><div><div class="block-title">${block.airspace_code} · ${block.airspace_name}</div><div class="block-meta">${PLAN_TYPES[block.airspace_type]} · ${block.plans.length} 条当天计划</div></div><span class="status-label ${status.toLowerCase()}">${PLAN_STATUS[status]}</span></div>`;
+      const state = block.airspace_state;
+      return `<div class="block-row" data-id="${block.block_id}"><i class="status-dot ${state.toLowerCase()}"></i><div><div class="block-title">${block.airspace_code} · ${block.airspace_name}</div><div class="block-meta">${PLAN_TYPES[block.airspace_type]} · ${block.plans.length} 条当天计划</div></div><span class="status-label ${state.toLowerCase()}">${PLAN_STATES[state]}</span></div>`;
     }).join("");
     this.els.list.querySelectorAll("[data-id]").forEach((row) => row.addEventListener("click", () => this.showBlock(row.dataset.id)));
     this.renderTimeline(blocks);
@@ -127,7 +135,7 @@ window.AirspacePlanPage = {
   },
 
   draw(blocks) {
-    const featureCollection = { type: "FeatureCollection", features: blocks.map((block) => ({ type: "Feature", properties: { blockId: block.block_id, code: block.airspace_code, status: this.status(block) }, geometry: block.geom.geometry })) };
+    const featureCollection = { type: "FeatureCollection", features: blocks.map((block) => ({ type: "Feature", properties: { blockId: block.block_id, code: block.airspace_code, status: block.airspace_state }, geometry: block.geom.geometry })) };
     Cesium.GeoJsonDataSource.load(featureCollection, { stroke: Cesium.Color.WHITE, fill: Cesium.Color.YELLOW.withAlpha(0.5), strokeWidth: 4 }).then((source) => {
       if (this.source) this.viewer.dataSources.remove(this.source, true);
       this.source = source;
@@ -138,7 +146,7 @@ window.AirspacePlanPage = {
         const code = entity.properties.code.getValue();
         const status = entity.properties.status.getValue();
         const block = blocks.find((item) => String(item.block_id) === id);
-        entity.position = AirspaceMap.center(block);
+        entity.position = AirspaceMap.center(block, 80);
         entity.polygon.material = planColor(status);
         entity.polygon.outline = true;
         entity.polygon.outlineColor = Cesium.Color.WHITE;

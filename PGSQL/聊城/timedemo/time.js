@@ -57,7 +57,7 @@ window.AirspaceMap = {
     if (viewer && !viewer.isDestroyed()) viewer.destroy();
   },
 
-  center(block) {
+  center(block, height = 0) {
     const ring = block.geom.geometry.coordinates[0];
     const bounds = ring.reduce((acc, p) => ({
       west: Math.min(acc.west, p[0]),
@@ -65,7 +65,11 @@ window.AirspaceMap = {
       south: Math.min(acc.south, p[1]),
       north: Math.max(acc.north, p[1]),
     }), { west: Infinity, east: -Infinity, south: Infinity, north: -Infinity });
-    return Cesium.Cartesian3.fromDegrees((bounds.west + bounds.east) / 2, (bounds.south + bounds.north) / 2);
+    return Cesium.Cartesian3.fromDegrees(
+      (bounds.west + bounds.east) / 2,
+      (bounds.south + bounds.north) / 2,
+      height,
+    );
   },
 
   boundary(block) {
@@ -118,12 +122,16 @@ const App = {
         this.switchTo(link.dataset.pageLink);
       });
     });
-    this.els.search.addEventListener("click", () => this.current?.render());
+    this.els.search.addEventListener("click", () => {
+      if (typeof this.current?.pageNo === "number") this.current.pageNo = 1;
+      this.current?.render();
+    });
     this.els.reset.addEventListener("click", () => {
       this.els.type.value = "";
       this.els.code.value = "";
       this.els.name.value = "";
       this.els.state.value = "";
+      if (typeof this.current?.pageNo === "number") this.current.pageNo = 1;
       this.current?.render();
     });
     this.els.date.addEventListener("change", () => this.current?.render());

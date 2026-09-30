@@ -261,6 +261,28 @@ button.secondary {
   background: rgba(7, 73, 147, 0.78);
 }
 
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  color: #9bd6ff;
+  font-size: 12px;
+}
+
+.pager button {
+  min-width: 56px;
+  min-height: 24px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.pager button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
@@ -273,9 +295,9 @@ button.secondary {
 .status-dot.applied { background: var(--applied); }
 .status-dot.disabled { background: var(--disabled); }
 .status-dot.not_applied { background: var(--none); }
-.status-dot.control { background: var(--active); }
-.status-dot.monitor { background: var(--disabled); }
-.status-dot.report { background: var(--none); }
+.status-dot.control { background: rgba(24, 169, 255, 0.95); }
+.status-dot.monitor { background: rgba(155, 125, 255, 0.95); }
+.status-dot.report { background: rgba(255, 86, 168, 0.95); }
 
 .block-title {
   overflow: hidden;
@@ -305,9 +327,9 @@ button.secondary {
 .status-label.applied { background: rgba(255, 207, 74, 0.58); }
 .status-label.disabled { background: rgba(155, 125, 255, 0.58); }
 .status-label.not_applied { background: rgba(63, 230, 191, 0.34); }
-.status-label.control { background: rgba(255, 77, 100, 0.72); }
-.status-label.monitor { background: rgba(155, 125, 255, 0.58); }
-.status-label.report { background: rgba(63, 230, 191, 0.34); }
+.status-label.control { background: rgba(24, 169, 255, 0.72); }
+.status-label.monitor { background: rgba(155, 125, 255, 0.72); }
+.status-label.report { background: rgba(255, 86, 168, 0.72); }
 
 .stage {
   position: relative;
@@ -332,13 +354,34 @@ button.secondary {
   position: absolute;
   top: 10px;
   left: 10px;
-  z-index: 3;
+  z-index: 6;
   width: 250px;
   max-height: calc(100% - 96px);
   overflow: auto;
   border: 1px solid rgba(35, 185, 255, 0.92);
   background: linear-gradient(180deg, rgba(4, 86, 151, 0.92), rgba(3, 48, 105, 0.88));
   box-shadow: 0 0 18px rgba(0, 149, 255, 0.34);
+}
+
+body[data-page="block"] .plan-popup {
+  width: 245px;
+  overflow: visible;
+  border-color: rgba(41, 196, 255, 0.96);
+  background: linear-gradient(180deg, rgba(6, 107, 172, 0.94), rgba(3, 58, 119, 0.92));
+}
+
+body[data-page="block"] .plan-popup::before {
+  content: "";
+  position: absolute;
+  left: clamp(18px, var(--arrow-left, 50%), 227px);
+  bottom: -24px;
+  width: 0;
+  height: 0;
+  transform: translateX(-50%);
+  border-left: 22px solid transparent;
+  border-right: 22px solid transparent;
+  border-top: 24px solid rgba(3, 58, 119, 0.92);
+  filter: drop-shadow(0 3px 0 rgba(41, 196, 255, 0.78));
 }
 
 .popup-head {
@@ -391,6 +434,10 @@ button.secondary {
   font-size: 12px;
 }
 
+body[data-page="block"] .popup-block p {
+  line-height: 1.55;
+}
+
 .legend {
   position: absolute;
   left: 12px;
@@ -428,9 +475,6 @@ button.secondary {
   border: 1px solid rgba(255, 255, 255, 0.72);
 }
 
-.legend .forbidden { background: rgba(255, 77, 100, 0.78); }
-.legend .control { background: rgba(255, 207, 74, 0.76); }
-.legend .suitable { background: rgba(63, 230, 191, 0.68); }
 .legend .control-state { background: rgba(24, 169, 255, 0.78); }
 .legend .monitor-state { background: rgba(155, 125, 255, 0.76); }
 .legend .alarm-state { background: rgba(255, 86, 168, 0.78); }
