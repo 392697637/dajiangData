@@ -174,7 +174,7 @@ const App = {
       this.els.resultTitle.textContent = "当天空域区块";
       this.current = window.AirspacePlanPage;
     }
-    this.current.init(this.data.plan);
+    this.current.init(this.data.block, this.data.plan);
   },
 };
 

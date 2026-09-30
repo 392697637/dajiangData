@@ -84,8 +84,14 @@ window.AirspacePlanPage = {
   pageNo: 1,
   pageSize: 6,
 
-  init(data) {
-    this.blocks = data.data.blocks;
+  init(blockData, planData) {
+    const planMap = new Map(
+      planData.data.plans.map((item) => [String(item.block_id), item.plans || []]),
+    );
+    this.blocks = blockData.data.map((block) => ({
+      ...block,
+      plans: planMap.get(String(block.block_id)) || [],
+    }));
     this.els = planEls();
     this.els.date.value = planToday();
     this.seconds = planNowSecond();
