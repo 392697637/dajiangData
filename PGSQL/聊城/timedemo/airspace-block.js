@@ -37,7 +37,7 @@ window.AirspaceBlockPage = {
   pageSize: 6,
 
   init(data) {
-    this.blocks = data.data.blocks;
+    this.blocks = data.data;
     this.els = blockEls();
     this.els.popup.hidden = true;
     this.els.popupTitle.textContent = "空域区块详情";
@@ -210,7 +210,6 @@ window.AirspaceBlockPage = {
         <p>空域编号：${block.airspace_code}</p>
         <p>空域类型：${AIRSPACE_TYPES[block.airspace_type]}</p>
         <p>默认状态：${AIRSPACE_STATES[block.airspace_state]}</p>
-        <p>关联计划：${block.plans.length} 条</p>
       </div>`;
     this.popupAnchor = AirspaceMap.center(block, 120);
     this.els.popup.hidden = false;

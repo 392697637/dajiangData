@@ -108,9 +108,16 @@ const App = {
       forward: document.querySelector("#forwardBtn"),
       play: document.querySelector("#playBtn"),
     };
-    const response = await fetch("time.json", { cache: "no-store" });
-    if (!response.ok) throw new Error("time.json 请求失败");
-    this.data = await response.json();
+    const [blockResponse, planResponse] = await Promise.all([
+      fetch("airspace-block.json", { cache: "no-store" }),
+      fetch("airspace-plan.json", { cache: "no-store" }),
+    ]);
+    if (!blockResponse.ok) throw new Error("airspace-block.json 请求失败");
+    if (!planResponse.ok) throw new Error("airspace-plan.json 请求失败");
+    this.data = {
+      block: await blockResponse.json(),
+      plan: await planResponse.json(),
+    };
     this.bind();
     this.switchTo("plan");
   },
@@ -134,7 +141,10 @@ const App = {
       if (typeof this.current?.pageNo === "number") this.current.pageNo = 1;
       this.current?.render();
     });
-    this.els.date.addEventListener("change", () => this.current?.render());
+    this.els.date.addEventListener("change", () => {
+      if (typeof this.current?.pageNo === "number") this.current.pageNo = 1;
+      this.current?.render();
+    });
     this.els.slider.addEventListener("input", (event) => this.current?.setSeconds?.(event.target.value));
     this.els.back.addEventListener("click", () => this.current?.setSeconds?.((this.current.seconds || 0) - 3600));
     this.els.forward.addEventListener("click", () => this.current?.setSeconds?.((this.current.seconds || 0) + 3600));
@@ -157,12 +167,14 @@ const App = {
       this.els.filterTitle.textContent = "空域区块";
       this.els.resultTitle.textContent = "空域区块列表";
       this.current = window.AirspaceBlockPage;
+      this.current.init(this.data.block);
+      return;
     } else {
       this.els.filterTitle.textContent = "用空计划";
       this.els.resultTitle.textContent = "当天空域区块";
       this.current = window.AirspacePlanPage;
     }
-    this.current.init(this.data);
+    this.current.init(this.data.plan);
   },
 };
 

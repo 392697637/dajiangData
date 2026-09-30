@@ -10,6 +10,7 @@ function planEls() {
     name: document.querySelector("#airspaceName"),
     state: document.querySelector("#airspaceState"),
     list: document.querySelector("#blockList"),
+    pager: document.querySelector("#blockPager"),
     count: document.querySelector("#resultCount"),
     slider: document.querySelector("#timeSlider"),
     time: document.querySelector("#timelineTime"),
@@ -53,14 +54,35 @@ function planColor(status) {
   return colors[status] || Cesium.Color.YELLOW.withAlpha(0.5);
 }
 
+function planHeightRange(block, isActiveSegment) {
+  const usablePlans = block.plans.filter((plan) => plan.plan_status === "1");
+  const activePlan = usablePlans.find((plan) =>
+    plan.time_plan.some((segment) => isActiveSegment(segment)),
+  );
+  if (!activePlan) return null;
+  const minHeight = Number(activePlan.min_height || 0);
+  const maxHeight = Number(activePlan.max_height || 0);
+  const bufferHeight = Number(activePlan.buffer_height || 0);
+  return {
+    minHeight,
+    maxHeight,
+    bufferHeight,
+    fenceHeight: Math.max(maxHeight + bufferHeight, minHeight + 30),
+  };
+}
+
 window.AirspacePlanPage = {
   viewer: null,
   source: null,
   blocks: [],
   entities: new Map(),
+  entityStates: new Map(),
+  currentBlocks: [],
   seconds: 0,
   timer: null,
   playing: false,
+  pageNo: 1,
+  pageSize: 6,
 
   init(data) {
     this.blocks = data.data.blocks;
@@ -73,6 +95,7 @@ window.AirspacePlanPage = {
     this.viewer = AirspaceMap.createViewer();
     this.bindMap();
     this.render();
+    this.startPlay();
   },
 
   destroy() {
@@ -83,6 +106,8 @@ window.AirspacePlanPage = {
     this.viewer = null;
     this.source = null;
     this.entities.clear();
+    this.entityStates.clear();
+    this.currentBlocks = [];
   },
 
   activeSegment(segment) {
@@ -117,6 +142,10 @@ window.AirspacePlanPage = {
 
   render() {
     const blocks = this.filtered();
+    const totalPages = Math.max(1, Math.ceil(blocks.length / this.pageSize));
+    if (this.pageNo > totalPages) this.pageNo = totalPages;
+    const start = (this.pageNo - 1) * this.pageSize;
+    const pageBlocks = blocks.slice(start, start + this.pageSize);
     this.els.count.textContent = `${blocks.length} 个区块`;
     this.els.time.textContent = planTimeText(this.seconds);
     this.els.clock.textContent = planTimeText(this.seconds);
@@ -125,35 +154,103 @@ window.AirspacePlanPage = {
     const applied = blocks.filter((b) => this.status(b) === "APPLIED").length;
     const none = blocks.filter((b) => this.status(b) === "NOT_APPLIED").length;
     this.els.note.textContent = `当前 ${planTimeText(this.seconds)}：${active} 个生效，${applied} 个已申请未生效，${none} 个当天未申请。`;
-    this.els.list.innerHTML = blocks.map((block) => {
+    this.els.list.innerHTML = pageBlocks.map((block) => {
       const state = block.airspace_state;
       return `<div class="block-row" data-id="${block.block_id}"><i class="status-dot ${state.toLowerCase()}"></i><div><div class="block-title">${block.airspace_code} · ${block.airspace_name}</div><div class="block-meta">${PLAN_TYPES[block.airspace_type]} · ${block.plans.length} 条当天计划</div></div><span class="status-label ${state.toLowerCase()}">${PLAN_STATES[state]}</span></div>`;
     }).join("");
     this.els.list.querySelectorAll("[data-id]").forEach((row) => row.addEventListener("click", () => this.showBlock(row.dataset.id)));
+    this.renderPager(blocks.length, totalPages);
     this.renderTimeline(blocks);
     this.draw(blocks);
   },
 
+  renderPager(total, totalPages) {
+    this.els.pager.innerHTML = `
+      <button class="secondary" data-page-action="prev" ${this.pageNo <= 1 ? "disabled" : ""}>上一页</button>
+      <span>${this.pageNo}/${totalPages} 页 · 共 ${total} 条</span>
+      <button class="secondary" data-page-action="next" ${this.pageNo >= totalPages ? "disabled" : ""}>下一页</button>
+    `;
+    this.els.pager.querySelector("[data-page-action='prev']").addEventListener("click", () => {
+      if (this.pageNo <= 1) return;
+      this.pageNo -= 1;
+      this.renderListOnly();
+    });
+    this.els.pager.querySelector("[data-page-action='next']").addEventListener("click", () => {
+      if (this.pageNo >= totalPages) return;
+      this.pageNo += 1;
+      this.renderListOnly();
+    });
+  },
+
+  renderListOnly() {
+    const blocks = this.filtered();
+    const totalPages = Math.max(1, Math.ceil(blocks.length / this.pageSize));
+    if (this.pageNo > totalPages) this.pageNo = totalPages;
+    const start = (this.pageNo - 1) * this.pageSize;
+    const pageBlocks = blocks.slice(start, start + this.pageSize);
+    this.els.list.innerHTML = pageBlocks.map((block) => {
+      const state = block.airspace_state;
+      return `<div class="block-row" data-id="${block.block_id}"><i class="status-dot ${state.toLowerCase()}"></i><div><div class="block-title">${block.airspace_code} · ${block.airspace_name}</div><div class="block-meta">${PLAN_TYPES[block.airspace_type]} · ${block.plans.length} 条当天计划</div></div><span class="status-label ${state.toLowerCase()}">${PLAN_STATES[state]}</span></div>`;
+    }).join("");
+    this.els.list.querySelectorAll("[data-id]").forEach((row) => row.addEventListener("click", () => this.showBlock(row.dataset.id)));
+    this.renderPager(blocks.length, totalPages);
+  },
+
   draw(blocks) {
+    this.currentBlocks = blocks;
     const featureCollection = { type: "FeatureCollection", features: blocks.map((block) => ({ type: "Feature", properties: { blockId: block.block_id, code: block.airspace_code, status: block.airspace_state }, geometry: block.geom.geometry })) };
     Cesium.GeoJsonDataSource.load(featureCollection, { stroke: Cesium.Color.WHITE, fill: Cesium.Color.YELLOW.withAlpha(0.5), strokeWidth: 4 }).then((source) => {
       if (this.source) this.viewer.dataSources.remove(this.source, true);
       this.source = source;
       this.entities.clear();
+      this.entityStates.clear();
       this.viewer.dataSources.add(source);
       source.entities.values.forEach((entity) => {
         const id = String(entity.properties.blockId.getValue());
         const code = entity.properties.code.getValue();
         const status = entity.properties.status.getValue();
         const block = blocks.find((item) => String(item.block_id) === id);
-        entity.position = AirspaceMap.center(block, 80);
         entity.polygon.material = planColor(status);
         entity.polygon.outline = true;
         entity.polygon.outlineColor = Cesium.Color.WHITE;
         entity.label = new Cesium.LabelGraphics({ text: code, font: "14px Microsoft YaHei", fillColor: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK, outlineWidth: 3, style: Cesium.LabelStyle.FILL_AND_OUTLINE, disableDepthTestDistance: Number.POSITIVE_INFINITY });
         this.entities.set(id, entity);
       });
+      this.updatePlaybackState();
       if (source.entities.values.length) this.viewer.zoomTo(source);
+    });
+  },
+
+  updatePlaybackState() {
+    const blocks = this.currentBlocks.length ? this.currentBlocks : this.filtered();
+    const active = blocks.filter((b) => this.status(b) === "ACTIVE").length;
+    const applied = blocks.filter((b) => this.status(b) === "APPLIED").length;
+    const none = blocks.filter((b) => this.status(b) === "NOT_APPLIED").length;
+    this.els.time.textContent = planTimeText(this.seconds);
+    this.els.clock.textContent = planTimeText(this.seconds);
+    this.els.dateText.textContent = this.els.date.value;
+    this.els.note.textContent = `当前 ${planTimeText(this.seconds)}：${active} 个生效，${applied} 个已申请未生效，${none} 个当天未申请。`;
+    blocks.forEach((block) => {
+      const entity = this.entities.get(String(block.block_id));
+      if (!entity) return;
+      const heightRange = planHeightRange(block, (segment) => this.activeSegment(segment));
+      const stateKey = heightRange
+        ? `solid:${heightRange.minHeight}:${heightRange.fenceHeight}`
+        : "flat";
+      if (this.entityStates.get(String(block.block_id)) === stateKey) return;
+      this.entityStates.set(String(block.block_id), stateKey);
+      entity.show = true;
+      if (heightRange) {
+        entity.position = AirspaceMap.center(block, heightRange.fenceHeight + 80);
+        entity.polygon.height = heightRange.minHeight;
+        entity.polygon.extrudedHeight = heightRange.fenceHeight;
+        entity.polygon.perPositionHeight = false;
+      } else {
+        entity.position = AirspaceMap.center(block, 80);
+        entity.polygon.height = undefined;
+        entity.polygon.extrudedHeight = undefined;
+        entity.polygon.perPositionHeight = false;
+      }
     });
   },
 
@@ -196,7 +293,14 @@ window.AirspacePlanPage = {
   setSeconds(value) {
     this.seconds = Math.max(0, Math.min(86399, Number(value)));
     this.els.slider.value = this.seconds;
-    this.render();
+    this.updatePlaybackState();
+  },
+
+  startPlay() {
+    this.playing = true;
+    this.els.play.textContent = "暂停";
+    if (this.timer) clearInterval(this.timer);
+    this.timer = setInterval(() => this.setSeconds(this.seconds + 1 >= 86400 ? 0 : this.seconds + 1), 1000);
   },
 
   togglePlay() {
