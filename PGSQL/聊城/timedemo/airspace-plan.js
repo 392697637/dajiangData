@@ -22,6 +22,20 @@ function planEls() {
     popup: document.querySelector(".plan-popup"),
     popupTitle: document.querySelector("#popupTitle"),
     popupContent: document.querySelector("#popupContent"),
+    modal: document.querySelector("#planFormModal"),
+    formTitle: document.querySelector("#planFormTitle"),
+    formClose: document.querySelector("#planFormClose"),
+    formCancel: document.querySelector("#planFormCancel"),
+    formSave: document.querySelector("#planFormSave"),
+    formBlock: document.querySelector("#formPlanBlock"),
+    formDate: document.querySelector("#formPlanDate"),
+    formStart: document.querySelector("#formPlanStart"),
+    formEnd: document.querySelector("#formPlanEnd"),
+    formMinHeight: document.querySelector("#formPlanMinHeight"),
+    formMaxHeight: document.querySelector("#formPlanMaxHeight"),
+    formBufferHeight: document.querySelector("#formPlanBufferHeight"),
+    formStatus: document.querySelector("#formPlanStatus"),
+    formRemark: document.querySelector("#formPlanRemark"),
   };
 }
 
@@ -83,6 +97,7 @@ window.AirspacePlanPage = {
   playing: false,
   pageNo: 1,
   pageSize: 6,
+  editingPlan: null,
 
   init(blockData, planData) {
     const planMap = new Map(
@@ -98,10 +113,22 @@ window.AirspacePlanPage = {
     this.els.slider.value = this.seconds;
     this.els.popup.hidden = true;
     this.els.popupTitle.textContent = "用空计划详情";
+    this.els.popup.style.left = "10px";
+    this.els.popup.style.top = "10px";
+    this.els.popup.style.right = "auto";
+    this.els.popup.style.bottom = "auto";
+    this.els.popup.style.removeProperty("--arrow-left");
     this.viewer = AirspaceMap.createViewer();
+    this.bindForm();
     this.bindMap();
     this.render();
     this.startPlay();
+  },
+
+  bindForm() {
+    this.els.formClose.onclick = () => this.closePlanForm();
+    this.els.formCancel.onclick = () => this.closePlanForm();
+    this.els.formSave.onclick = () => this.savePlanForm();
   },
 
   destroy() {
@@ -162,9 +189,10 @@ window.AirspacePlanPage = {
     this.els.note.textContent = `当前 ${planTimeText(this.seconds)}：${active} 个生效，${applied} 个已申请未生效，${none} 个当天未申请。`;
     this.els.list.innerHTML = pageBlocks.map((block) => {
       const state = block.airspace_state;
-      return `<div class="block-row" data-id="${block.block_id}"><i class="status-dot ${state.toLowerCase()}"></i><div><div class="block-title">${block.airspace_code} · ${block.airspace_name}</div><div class="block-meta">${PLAN_TYPES[block.airspace_type]} · ${block.plans.length} 条当天计划</div></div><span class="status-label ${state.toLowerCase()}">${PLAN_STATES[state]}</span></div>`;
+      return `<div class="block-row" data-id="${block.block_id}"><i class="status-dot ${state.toLowerCase()}"></i><div><div class="block-title">${block.airspace_code} · ${block.airspace_name}</div><div class="block-meta">${PLAN_TYPES[block.airspace_type]} · ${block.plans.length} 条当天计划</div></div><div class="block-row-actions"><span class="status-label ${state.toLowerCase()}">${PLAN_STATES[state]}</span><button class="secondary" data-action="add-plan" data-id="${block.block_id}" type="button">新增</button></div></div>`;
     }).join("");
     this.els.list.querySelectorAll("[data-id]").forEach((row) => row.addEventListener("click", () => this.showBlock(row.dataset.id)));
+    this.bindPlanRowActions();
     this.renderPager(blocks.length, totalPages);
     this.renderTimeline(blocks);
     this.draw(blocks);
@@ -196,10 +224,130 @@ window.AirspacePlanPage = {
     const pageBlocks = blocks.slice(start, start + this.pageSize);
     this.els.list.innerHTML = pageBlocks.map((block) => {
       const state = block.airspace_state;
-      return `<div class="block-row" data-id="${block.block_id}"><i class="status-dot ${state.toLowerCase()}"></i><div><div class="block-title">${block.airspace_code} · ${block.airspace_name}</div><div class="block-meta">${PLAN_TYPES[block.airspace_type]} · ${block.plans.length} 条当天计划</div></div><span class="status-label ${state.toLowerCase()}">${PLAN_STATES[state]}</span></div>`;
+      return `<div class="block-row" data-id="${block.block_id}"><i class="status-dot ${state.toLowerCase()}"></i><div><div class="block-title">${block.airspace_code} · ${block.airspace_name}</div><div class="block-meta">${PLAN_TYPES[block.airspace_type]} · ${block.plans.length} 条当天计划</div></div><div class="block-row-actions"><span class="status-label ${state.toLowerCase()}">${PLAN_STATES[state]}</span><button class="secondary" data-action="add-plan" data-id="${block.block_id}" type="button">新增</button></div></div>`;
     }).join("");
     this.els.list.querySelectorAll("[data-id]").forEach((row) => row.addEventListener("click", () => this.showBlock(row.dataset.id)));
+    this.bindPlanRowActions();
     this.renderPager(blocks.length, totalPages);
+  },
+
+  openPlanForm(blockId, editFirst = false) {
+    const block = blockId
+      ? this.blocks.find((item) => String(item.block_id) === String(blockId))
+      : this.filtered()[0] || this.blocks[0];
+    if (!block) return;
+    const plan = editFirst
+      ? block.plans.find((item) => item.use_date === this.els.date.value) || null
+      : null;
+    this.editingPlan = plan ? { blockId: block.block_id, planId: plan.plan_id } : null;
+    this.els.formTitle.textContent = plan ? "编辑用空计划" : "新增用空计划";
+    this.els.formBlock.innerHTML = this.blocks
+      .map((item) => `<option value="${item.block_id}">${item.airspace_code} · ${item.airspace_name}</option>`)
+      .join("");
+    this.els.formBlock.value = String(block.block_id);
+    this.els.formDate.value = plan?.use_date || this.els.date.value;
+    this.els.formStart.value = plan?.time_plan?.[0]?.start_time || "09:00:00";
+    this.els.formEnd.value = plan?.time_plan?.[0]?.end_time || "10:00:00";
+    this.els.formMinHeight.value = plan?.min_height ?? 0;
+    this.els.formMaxHeight.value = plan?.max_height ?? 120;
+    this.els.formBufferHeight.value = plan?.buffer_height ?? 10;
+    this.els.formStatus.value = plan?.plan_status || "1";
+    this.els.formRemark.value = plan?.remark || "";
+    this.els.modal.hidden = false;
+  },
+
+  openPlanFormById(blockId, planId) {
+    const block = this.blocks.find((item) => String(item.block_id) === String(blockId));
+    if (!block) return;
+    const plan = block.plans.find((item) => String(item.plan_id) === String(planId));
+    if (!plan) return;
+    this.editingPlan = { blockId: block.block_id, planId: plan.plan_id };
+    this.els.formTitle.textContent = "编辑用空计划";
+    this.els.formBlock.innerHTML = this.blocks
+      .map((item) => `<option value="${item.block_id}">${item.airspace_code} · ${item.airspace_name}</option>`)
+      .join("");
+    this.els.formBlock.value = String(block.block_id);
+    this.els.formDate.value = plan.use_date;
+    this.els.formStart.value = plan.time_plan?.[0]?.start_time || "09:00:00";
+    this.els.formEnd.value = plan.time_plan?.[0]?.end_time || "10:00:00";
+    this.els.formMinHeight.value = plan.min_height ?? 0;
+    this.els.formMaxHeight.value = plan.max_height ?? 120;
+    this.els.formBufferHeight.value = plan.buffer_height ?? 10;
+    this.els.formStatus.value = plan.plan_status || "1";
+    this.els.formRemark.value = plan.remark || "";
+    this.els.modal.hidden = false;
+  },
+
+  closePlanForm() {
+    this.editingPlan = null;
+    this.els.modal.hidden = true;
+  },
+
+  savePlanForm() {
+    const block = this.blocks.find((item) => String(item.block_id) === String(this.els.formBlock.value));
+    if (!block) return;
+    let plan = null;
+    if (this.editingPlan) {
+      const oldBlock = this.blocks.find((item) => String(item.block_id) === String(this.editingPlan.blockId));
+      plan = oldBlock?.plans.find((item) => String(item.plan_id) === String(this.editingPlan.planId));
+      if (oldBlock && oldBlock !== block && plan) {
+        oldBlock.plans = oldBlock.plans.filter((item) => String(item.plan_id) !== String(plan.plan_id));
+        block.plans.push(plan);
+      }
+    }
+    if (!plan) {
+      plan = {
+        plan_id: this.nextPlanId(),
+        plan_outid: `PLAN-DEMO-${Date.now()}`,
+      };
+      block.plans.push(plan);
+    }
+    plan.use_date = this.els.formDate.value;
+    plan.time_plan = [{
+      start_time: this.els.formStart.value,
+      end_time: this.els.formEnd.value,
+    }];
+    plan.min_height = Number(this.els.formMinHeight.value || 0);
+    plan.max_height = Number(this.els.formMaxHeight.value || 0);
+    plan.buffer_height = Number(this.els.formBufferHeight.value || 0);
+    plan.plan_status = this.els.formStatus.value;
+    plan.remark = this.els.formRemark.value.trim();
+    this.closePlanForm();
+    this.pageNo = 1;
+    this.render();
+  },
+
+  nextPlanId() {
+    return this.blocks.reduce(
+      (max, block) => Math.max(max, ...block.plans.map((plan) => Number(plan.plan_id) || 0)),
+      0,
+    ) + 1;
+  },
+
+  deletePlan(blockId) {
+    const block = this.blocks.find((item) => String(item.block_id) === String(blockId));
+    if (!block) return;
+    const plan = block.plans.find((item) => item.use_date === this.els.date.value);
+    if (!plan) return;
+    block.plans = block.plans.filter((item) => String(item.plan_id) !== String(plan.plan_id));
+    this.render();
+  },
+
+  deletePlanById(blockId, planId) {
+    const block = this.blocks.find((item) => String(item.block_id) === String(blockId));
+    if (!block) return;
+    block.plans = block.plans.filter((item) => String(item.plan_id) !== String(planId));
+    this.els.popup.hidden = true;
+    this.render();
+  },
+
+  bindPlanRowActions() {
+    this.els.list.querySelectorAll("[data-action='add-plan']").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.openPlanForm(button.dataset.id);
+      });
+    });
   },
 
   draw(blocks) {
@@ -289,10 +437,16 @@ window.AirspacePlanPage = {
     const planHtml = block.plans.length ? block.plans.map((plan) => {
       const time = plan.time_plan.map((s) => `${s.start_time} - ${s.end_time}`).join("，");
       const fenceHeight = Number(plan.max_height || 0) + Number(plan.buffer_height || 0);
-      return `<div class="popup-block"><strong>${block.airspace_name}</strong><p>空域编号：${block.airspace_code}</p><p>高度层：${plan.min_height}-${plan.max_height}m</p><p>可用时段：${time}</p><p>状态：${plan.plan_status === "1" ? "可用" : "不可用"}</p><p>缓冲高度：${plan.buffer_height}m</p><p>管控高度：${fenceHeight}m</p></div>`;
+      return `<div class="popup-block"><strong>${block.airspace_name}</strong><p>空域编号：${block.airspace_code}</p><p>高度层：${plan.min_height}-${plan.max_height}m</p><p>可用时段：${time}</p><p>状态：${plan.plan_status === "1" ? "可用" : "不可用"}</p><p>缓冲高度：${plan.buffer_height}m</p><p>管控高度：${fenceHeight}m</p><div class="popup-actions"><button class="secondary" data-popup-action="edit-plan" data-block-id="${block.block_id}" data-plan-id="${plan.plan_id}" type="button">编辑</button><button class="secondary" data-popup-action="delete-plan" data-block-id="${block.block_id}" data-plan-id="${plan.plan_id}" type="button">删除</button></div></div>`;
     }).join("") : `<div class="popup-block"><strong>${block.airspace_name}</strong><p>空域编号：${block.airspace_code}</p><p>用空日期：${this.els.date.value}</p><p>当天未申请飞行计划</p></div>`;
     this.els.popupTitle.textContent = "用空计划详情";
     this.els.popupContent.innerHTML = planHtml;
+    this.els.popupContent.querySelectorAll("[data-popup-action='edit-plan']").forEach((button) => {
+      button.addEventListener("click", () => this.openPlanFormById(button.dataset.blockId, button.dataset.planId));
+    });
+    this.els.popupContent.querySelectorAll("[data-popup-action='delete-plan']").forEach((button) => {
+      button.addEventListener("click", () => this.deletePlanById(button.dataset.blockId, button.dataset.planId));
+    });
     this.els.popup.hidden = false;
   },
 

@@ -39,6 +39,18 @@ body[data-page="block"] .timeline {
   display: none;
 }
 
+body[data-page="block"] .legend {
+  display: none;
+}
+
+body:not([data-page="block"]) .block-only {
+  display: none;
+}
+
+body:not([data-page="plan"]) .plan-only {
+  display: none;
+}
+
 button,
 input,
 select {
@@ -104,7 +116,7 @@ select {
 main {
   min-height: 0;
   display: grid;
-  grid-template-columns: 176px 260px minmax(0, 1fr);
+  grid-template-columns: 176px 320px minmax(0, 1fr);
   gap: 0;
 }
 
@@ -274,6 +286,19 @@ button.secondary {
   background: rgba(7, 73, 147, 0.78);
 }
 
+.block-row-actions {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.block-row-actions button {
+  min-width: 36px;
+  min-height: 22px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
 .pager {
   display: flex;
   align-items: center;
@@ -356,6 +381,22 @@ button.secondary {
 #cesiumContainer {
   position: absolute;
   inset: 0;
+}
+
+.map-toolbar {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 5;
+  display: flex;
+  gap: 8px;
+}
+
+.map-toolbar button {
+  min-width: 112px;
+  min-height: 32px;
+  padding: 5px 12px;
+  font-weight: 700;
 }
 
 .cesium-widget-credits,
@@ -444,6 +485,19 @@ body[data-page="block"] .plan-popup::before {
 .popup-block p {
   margin: 5px 0;
   color: #ccefff;
+  font-size: 12px;
+}
+
+.popup-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.popup-actions button {
+  min-width: 48px;
+  min-height: 24px;
+  padding: 2px 8px;
   font-size: 12px;
 }
 
@@ -569,6 +623,82 @@ footer {
   display: none;
 }
 
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 12, 38, 0.48);
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal-panel {
+  width: 520px;
+  max-width: calc(100vw - 40px);
+  border: 1px solid rgba(41, 196, 255, 0.9);
+  background: linear-gradient(180deg, rgba(4, 61, 126, 0.98), rgba(2, 31, 76, 0.98));
+  box-shadow: 0 0 24px rgba(0, 149, 255, 0.32);
+}
+
+.modal-head {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(35, 185, 255, 0.45);
+  background: linear-gradient(90deg, rgba(25, 185, 255, 0.62), rgba(12, 75, 153, 0.32));
+}
+
+.modal-head button {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 20px;
+}
+
+.modal-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 14px;
+}
+
+.draw-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(92, 183, 255, 0.24);
+  background: rgba(2, 35, 82, 0.42);
+}
+
+.draw-actions button {
+  min-width: 78px;
+  min-height: 28px;
+  padding: 4px 10px;
+}
+
+.draw-actions span {
+  color: #9fd5ff;
+  font-size: 12px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 0 14px 14px;
+}
+
 @media (max-width: 1100px) {
   body {
     overflow: auto;
@@ -587,6 +717,6 @@ footer {
   }
 
   main {
-    grid-template-columns: 160px 260px minmax(640px, 1fr);
+    grid-template-columns: 160px 320px minmax(640px, 1fr);
   }
 }
