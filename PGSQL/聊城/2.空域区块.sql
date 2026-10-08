@@ -82,7 +82,7 @@ CREATE TABLE public.bo_airspace_plan (
     block_id bigint NOT NULL,
     use_date date NOT NULL,
     time_plan varchar(4000),
-    plan_status varchar(255) NOT NULL DEFAULT '1',
+    plan_status boolean NOT NULL DEFAULT false,
     remark varchar(1000),
     create_time timestamp(6) without time zone NOT NULL DEFAULT now(),
     create_user varchar(32),
@@ -102,7 +102,7 @@ COMMENT ON COLUMN public.bo_airspace_plan.id IS '计划主键';
 COMMENT ON COLUMN public.bo_airspace_plan.block_id IS '空域区块ID，关联bo_airspace_block.id';
 COMMENT ON COLUMN public.bo_airspace_plan.use_date IS '使用日期，分区键';
 COMMENT ON COLUMN public.bo_airspace_plan.time_plan IS '时间计划，仅保存时分秒，支持多段时间';
-COMMENT ON COLUMN public.bo_airspace_plan.plan_status IS '计划状态：1=可用，0=不可用';
+COMMENT ON COLUMN public.bo_airspace_plan.plan_status IS '计划状态：t可用；f不可用';
 COMMENT ON COLUMN public.bo_airspace_plan.remark IS '计划备注';
 COMMENT ON COLUMN public.bo_airspace_plan.create_time IS '计划创建时间';
 COMMENT ON COLUMN public.bo_airspace_plan.create_user IS '计划创建者';
@@ -532,7 +532,7 @@ BEGIN
                 'endTime', to_char(((10 + plan_seq * 2)::text || ':00:00')::time, 'HH24:MI:SS')
             )
         )::text,
-        '1',
+        false,
         '模拟数据：一个空域区块对应多个用空计划',
         now(),
         'demo',
@@ -738,7 +738,7 @@ ORDER BY b.airspace_code NULLS LAST, b.id;
 --   block_id       bigint    空域区块主键
 --   use_date       date      使用日期
 --   time_plan      string    时间计划，仅保存时分秒
---   plan_status    string    计划状态字典编码
+--   plan_status    boolean   计划状态：t可用；f不可用
 --   remark         string    计划备注
 --
 --   PostgreSQL语句
@@ -793,7 +793,7 @@ ORDER BY p.id;
 --   id             bigint    当前生效计划主键
 --   use_date       date      使用日期
 --   time_plan      string    时间计划
---   plan_status    string    计划状态字典编码
+--   plan_status    boolean   计划状态：t可用；f不可用
 --   geom           object    GeoJSON Feature
 --
 -- 4.3 PostgreSQL语句
@@ -825,7 +825,7 @@ JOIN public.bo_airspace_plan p
     ON p.block_id = b.id
 WHERE b.del_flag = false
   AND p.del_flag = false
-  AND p.plan_status = '1'
+  AND p.plan_status = true
   AND p.use_date = DATE '2026-09-28'
   AND EXISTS (
       SELECT 1
