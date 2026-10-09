@@ -133,6 +133,9 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_altitude double precision;
+    v_dem_code integer;
+    v_dem_msg text;
+    v_dem_geom geometry;
 BEGIN
     -- 原始几何为空时，最终范围和统计值一并置空或置零。
     IF NEW.geom IS NULL THEN
@@ -161,6 +164,43 @@ BEGIN
         );
     ELSE
         NEW.final_geom := NEW.geom;
+    END IF;
+
+    -- final_geom为面时，优先调用DEM函数补充海拔高程；函数不存在或执行失败时写日志并保留原几何。
+    IF GeometryType(NEW.final_geom) IN ('POLYGON', 'MULTIPOLYGON') THEN
+        IF to_regprocedure('public.gis_dem_elevation_polygon(geometry)') IS NOT NULL THEN
+            BEGIN
+                SELECT r.code, r.msg, r.geom
+                INTO v_dem_code, v_dem_msg, v_dem_geom
+                FROM public.gis_dem_elevation_polygon(NEW.final_geom) AS r
+                LIMIT 1;
+
+                IF v_dem_code = 200 AND v_dem_geom IS NOT NULL THEN
+                    NEW.final_geom := v_dem_geom;
+                ELSE
+                    INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                    VALUES (
+                        COALESCE(v_dem_code, 500),
+                        COALESCE(v_dem_msg, 'gis_dem_elevation_polygon未返回有效DEM结果'),
+                        'public.gis_bo_airspace_block_final_geom'
+                    );
+                END IF;
+            EXCEPTION WHEN OTHERS THEN
+                INSERT INTO public.gis_error_log(code, msg, sqlstring)
+                VALUES (
+                    500,
+                    format('bo_airspace_block final_geom补DEM海拔失败：%s', SQLERRM),
+                    'public.gis_bo_airspace_block_final_geom'
+                );
+            END;
+        ELSE
+            INSERT INTO public.gis_error_log(code, msg, sqlstring)
+            VALUES (
+                500,
+                'gis_dem_elevation_polygon(geometry)函数不存在，bo_airspace_block final_geom未补DEM海拔',
+                'public.gis_bo_airspace_block_final_geom'
+            );
+        END IF;
     END IF;
 
     -- final_geom为面时计算面积，单位：平方千米；已有有效面积则保留。
@@ -437,9 +477,9 @@ BEGIN
             '[]',
             false,
             '自动生成用空计划',
-            (current_date - 1 + time '23:50:00')::timestamp,
+            (bd.use_date - 1 + time '23:55:55')::timestamp,
             v_user,
-            (current_date - 1 + time '23:50:00')::timestamp,
+            (bd.use_date - 1 + time '23:55:55')::timestamp,
             v_user,
             false
         FROM block_days bd
