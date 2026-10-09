@@ -33,7 +33,7 @@ CREATE TABLE public.bo_airspace_block (
     airspace_radius double precision,
     airspace_area double precision,
     airspace_perimeter double precision,
-    is_main boolean NOT NULL DEFAULT false,
+    parent_id bigint NOT NULL DEFAULT -1,
     use_enabled boolean NOT NULL DEFAULT true,
     remark varchar(1000),
     create_time timestamp(6) without time zone NOT NULL DEFAULT now(),
@@ -42,6 +42,7 @@ CREATE TABLE public.bo_airspace_block (
     update_user varchar(32),
     del_flag boolean NOT NULL DEFAULT false,
     geom geometry(Geometry, 4326),
+    final_geom geometry(Geometry, 4326),
     -- 主键约束：id作为表内每条空域区块记录的唯一标识。
     CONSTRAINT pk_bo_airspace_block PRIMARY KEY (id)
 );
@@ -56,7 +57,7 @@ COMMENT ON COLUMN public.bo_airspace_block.airspace_type IS '空域类型：POIN
 COMMENT ON COLUMN public.bo_airspace_block.airspace_radius IS '空域缓冲半径，单位：米';
 COMMENT ON COLUMN public.bo_airspace_block.airspace_area IS '空域面积，单位：平方千米';
 COMMENT ON COLUMN public.bo_airspace_block.airspace_perimeter IS '空域周长，单位：千米';
-COMMENT ON COLUMN public.bo_airspace_block.is_main IS '是否主区域：t是；f否';
+COMMENT ON COLUMN public.bo_airspace_block.parent_id IS '父级空域区块ID：-1表示主区域；子区域填写主区域id';
 COMMENT ON COLUMN public.bo_airspace_block.use_enabled IS '启用状态：t启用；f停用';
 COMMENT ON COLUMN public.bo_airspace_block.remark IS '备注';
 COMMENT ON COLUMN public.bo_airspace_block.create_time IS '创建时间';
@@ -64,12 +65,73 @@ COMMENT ON COLUMN public.bo_airspace_block.create_user IS '创建者';
 COMMENT ON COLUMN public.bo_airspace_block.update_time IS '更新时间';
 COMMENT ON COLUMN public.bo_airspace_block.update_user IS '更新者';
 COMMENT ON COLUMN public.bo_airspace_block.del_flag IS '是否删除：t删除；f未删除';
-COMMENT ON COLUMN public.bo_airspace_block.geom IS '空域范围，WGS84坐标系';
+COMMENT ON COLUMN public.bo_airspace_block.geom IS '空域原始几何，WGS84坐标系：点、线或面';
+COMMENT ON COLUMN public.bo_airspace_block.final_geom IS '空域生成后的最终范围，WGS84坐标系：点/线按半径缓冲后的面或原始面';
 
--- 空间索引：用于加快geom字段的地图范围、相交、包含等空间查询。
+-- 自动生成最终范围：插入或修改原始几何、缓冲半径时，自动维护final_geom、面积、周长。
+CREATE OR REPLACE FUNCTION public.gis_bo_airspace_block_final_geom()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- 原始几何为空时，最终范围和统计值一并置空或置零。
+    IF NEW.geom IS NULL THEN
+        NEW.final_geom := NULL;
+        NEW.airspace_area := 0;
+        NEW.airspace_perimeter := 0;
+        RETURN NEW;
+    END IF;
+
+    -- 点/线且配置了缓冲半径时，按米生成最终面；面或未配置半径时直接使用原始几何。
+    IF GeometryType(NEW.geom) IN ('POINT', 'MULTIPOINT', 'LINESTRING', 'MULTILINESTRING')
+       AND COALESCE(NEW.airspace_radius, 0) > 0 THEN
+        NEW.final_geom := ST_Buffer(NEW.geom::geography, NEW.airspace_radius)::geometry;
+    ELSE
+        NEW.final_geom := NEW.geom;
+    END IF;
+
+    -- final_geom为面时计算面积，单位：平方千米。
+    NEW.airspace_area := CASE
+        WHEN GeometryType(NEW.final_geom) IN ('POLYGON', 'MULTIPOLYGON')
+        THEN round((ST_Area(NEW.final_geom::geography) / 1000000.0)::numeric, 6)::double precision
+        ELSE 0
+    END;
+
+    -- final_geom为线时计算长度，为面时计算周长，单位：千米。
+    NEW.airspace_perimeter := CASE
+        WHEN GeometryType(NEW.final_geom) IN ('LINESTRING', 'MULTILINESTRING')
+        THEN round((ST_Length(NEW.final_geom::geography) / 1000.0)::numeric, 6)::double precision
+        WHEN GeometryType(NEW.final_geom) IN ('POLYGON', 'MULTIPOLYGON')
+        THEN round((ST_Perimeter(NEW.final_geom::geography) / 1000.0)::numeric, 6)::double precision
+        ELSE 0
+    END;
+
+    RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_bo_airspace_block_final_geom()
+IS '空域区块写入时根据geom和airspace_radius自动生成final_geom，并维护面积、周长';
+
+CREATE TRIGGER trg_airspace_block_geom
+BEFORE INSERT OR UPDATE OF geom, airspace_radius
+ON public.bo_airspace_block
+FOR EACH ROW
+EXECUTE FUNCTION public.gis_bo_airspace_block_final_geom();
+
+-- 原始几何空间索引：用于加快geom字段的地图展示、编辑查询。
 CREATE INDEX idx_bo_airspace_block_geom
     ON public.bo_airspace_block
     USING gist (geom);
+
+-- 最终范围空间索引：用于加快final_geom字段的空域校验、相交、包含等空间查询。
+CREATE INDEX idx_bo_airspace_block_final_geom
+    ON public.bo_airspace_block
+    USING gist (final_geom);
+
+-- 父级区块索引：用于加快按parent_id查询子级空域区块。
+CREATE INDEX idx_bo_airspace_block_parent
+    ON public.bo_airspace_block (parent_id);
 
 -- =============================================================================
 -- 二、用空计划明细表
@@ -91,6 +153,8 @@ CREATE TABLE public.bo_airspace_plan (
     del_flag boolean NOT NULL DEFAULT false,
     -- 复合主键约束：id为计划主键，use_date为分区键，分区表主键需要包含分区键。
     CONSTRAINT pk_bo_airspace_plan PRIMARY KEY (id, use_date),
+    -- 唯一约束：同一个空域区块同一天只保留一条用空计划，time_plan中保存多段时间。
+    CONSTRAINT uk_bo_airspace_plan_block_date UNIQUE (block_id, use_date),
     -- 外键约束：block_id必须关联已存在的空域区块bo_airspace_block.id。
     CONSTRAINT fk_bo_airspace_plan_block FOREIGN KEY (block_id)
         REFERENCES public.bo_airspace_block (id)
@@ -119,367 +183,309 @@ CREATE TABLE public.bo_airspace_plan_default
 CREATE INDEX idx_bo_airspace_plan_block
     ON public.bo_airspace_plan (block_id, use_date);
 
--- 状态日期索引：用于加快按计划状态和使用日期筛选计划。
-CREATE INDEX idx_bo_airspace_plan_status
-    ON public.bo_airspace_plan (plan_status, use_date);
+-- 日期状态索引：用于加快按使用日期和计划状态筛选计划。
+CREATE INDEX idx_bo_airspace_plan_date_status
+    ON public.bo_airspace_plan (use_date, plan_status);
 
 -- =============================================================================
--- 用空计划分区函数
+-- 用空计划分区及计划刷新函数
 -- =============================================================================
 SELECT gis_drop_function('gis_airspace_plan_part');
 
 CREATE OR REPLACE FUNCTION public.gis_airspace_plan_part(
     p_start_date date DEFAULT current_date,
-    p_days integer DEFAULT 32
+    p_months integer DEFAULT 36
 )
-RETURNS void
+RETURNS TABLE (
+    insert_count integer,
+    delete_count integer
+)
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_day_start date;
-    v_day_end date;
+    v_start_date date;
+    v_end_date date;
+    v_month_start date;
+    v_month_end date;
     v_partition_name text;
+    v_user varchar := 'system';
     i integer;
 BEGIN
-    IF p_days IS NULL OR p_days <= 0 THEN
-        RAISE EXCEPTION 'p_days must be greater than 0';
+    IF p_start_date IS NULL THEN
+        RAISE EXCEPTION 'p_start_date must not be null';
     END IF;
 
-    FOR i IN 0..(p_days - 1) LOOP
-        v_day_start := (p_start_date + i)::date;
-        v_day_end := (v_day_start + 1)::date;
-        v_partition_name := format('bo_airspace_plan_%s', to_char(v_day_start, 'YYYY_MM_DD'));
+    IF p_months IS NULL OR p_months <= 0 THEN
+        RAISE EXCEPTION 'p_months must be greater than 0';
+    END IF;
+
+    v_start_date := p_start_date;
+    v_end_date := (p_start_date + (p_months || ' month')::interval)::date;
+
+    -- 先检查并创建未来月份分区；已存在的分区不重复创建。
+    FOR i IN 0..(p_months - 1) LOOP
+        v_month_start := (date_trunc('month', p_start_date)::date + (i || ' month')::interval)::date;
+        v_month_end := (v_month_start + interval '1 month')::date;
+        v_partition_name := format('bo_airspace_plan_%s', to_char(v_month_start, 'YYYY_MM'));
 
         IF to_regclass(format('public.%I', v_partition_name)) IS NULL THEN
             EXECUTE format(
                 'CREATE TABLE public.%I PARTITION OF public.bo_airspace_plan FOR VALUES FROM (%L) TO (%L)',
                 v_partition_name,
-                v_day_start,
-                v_day_end
+                v_month_start,
+                v_month_end
             );
         END IF;
     END LOOP;
-END;
-$$;
 
-COMMENT ON FUNCTION public.gis_airspace_plan_part(date, integer)
-IS '按日自动创建用空计划分区表';
+    -- 删除没有对应有效空域区块的计划。
+    DELETE FROM public.bo_airspace_plan p
+    WHERE p.use_date >= v_start_date
+      AND p.use_date < v_end_date
+      AND NOT EXISTS (
+          SELECT 1
+          FROM public.bo_airspace_block b
+          WHERE b.id = p.block_id
+            AND b.del_flag = false
+      );
 
--- =============================================================================
--- 用空计划同步电子围栏
--- 说明：
---   1. bo_airspace_plan 是用空计划业务表，不直接参与飞行审核。
---   2. 飞行审核使用 bo_electric_fence，因此将有效用空计划同步为电子围栏管控区。
---   3. 同步到 bo_electric_fence 的数据统一使用 fence_type='2'，表示管控区。
---   4. 同步记录的 id 规则为：airspace_plan_{id}_{YYYYMMDD}，避免和人工电子围栏混淆。
---   5. bo_airspace_plan 不保存 plan_enabled。
---      bo_electric_fence.use_enabled 不由本同步函数维护。
--- 字段同步说明：
---   1. 同步字段：
---      bo_electric_fence.id            <- airspace_plan_{id}_{YYYYMMDD}
---      bo_electric_fence.create_time   <- now()
---      bo_electric_fence.create_user   <- 'airspace_plan'
---      bo_electric_fence.del_flag      <- false
---      bo_electric_fence.remark        <- bo_airspace_plan.remark
---      bo_electric_fence.update_time   <- now()
---      bo_electric_fence.update_user   <- 'airspace_plan'
---      bo_electric_fence.code          <- bo_airspace_block.airspace_code
---      bo_electric_fence.status        <- bo_airspace_plan.plan_status
---      bo_electric_fence.name          <- bo_airspace_block.airspace_name
---      bo_electric_fence.area          <- bo_airspace_block.airspace_area
---      bo_electric_fence.start_time    <- bo_airspace_plan.time_plan 中最早 startTime
---      bo_electric_fence.end_time      <- bo_airspace_plan.time_plan 中最晚 endTime
---      bo_electric_fence.height        <- bo_airspace_block.airspace_height
---      bo_electric_fence.geom          <- bo_airspace_block.geom
---      bo_electric_fence.time_plan     <- bo_airspace_plan.time_plan
---      bo_electric_fence.use_enabled   <- 不同步，由电子围栏业务自行维护
---   2. 固定值字段：
---      bo_electric_fence.project_id    <- NULL
---      bo_electric_fence.type          <- '1'
---      bo_electric_fence.frequency     <- '1'
---      bo_electric_fence.week          <- NULL
---      bo_electric_fence.day           <- NULL
---      bo_electric_fence.draw_method   <- 'airspace_plan'
---      bo_electric_fence.fence_type    <- '2'，表示管控区
---   3. 未同步字段：
---      bo_airspace_block.airspace_height、airspace_type、airspace_radius、
---      airspace_perimeter、is_main、use_enabled、create_time、create_user、update_time、update_user、del_flag；
---      bo_airspace_plan.use_date、bo_airspace_plan.block_id 以及计划审计字段
--- =============================================================================
-CREATE UNIQUE INDEX IF NOT EXISTS uk_bo_electric_fence_id
-    ON public.bo_electric_fence (id);
+    GET DIAGNOSTICS delete_count = ROW_COUNT;
 
-SELECT gis_drop_function('gis_airspace_plan_fence');
-
-CREATE OR REPLACE FUNCTION public.gis_airspace_plan_fence(
-    p_start_date date DEFAULT current_date,
-    p_days integer DEFAULT 32
-)
-RETURNS TABLE (
-    update_count integer,
-    insert_count integer,
-    disable_count integer
-)
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_end_date date;
-BEGIN
-    IF p_days IS NULL OR p_days <= 0 THEN
-        RAISE EXCEPTION 'p_days must be greater than 0';
-    END IF;
-
-    v_end_date := (p_start_date + p_days)::date;
-
-    WITH src AS (
+    -- 根据有效子区域空域区块和日期补齐缺失计划；已有计划不修改。
+    WITH block_days AS (
         SELECT
-            format('airspace_plan_%s_%s', p.id, to_char(p.use_date, 'YYYYMMDD')) AS fence_id,
-            b.airspace_code,
-            b.airspace_name,
-            b.airspace_area,
-            b.airspace_height AS fence_height,
-            b.geom,
-            p.use_date,
-            p.time_plan,
-            p.plan_status,
-            p.remark,
-            time_range.plan_start_time,
-            time_range.plan_end_time
-        FROM public.bo_airspace_plan p
-        JOIN public.bo_airspace_block b ON b.id = p.block_id
-        LEFT JOIN LATERAL (
-            SELECT
-                MIN(NULLIF(item->>'startTime', '')) AS plan_start_time,
-                MAX(NULLIF(item->>'endTime', '')) AS plan_end_time
-            FROM jsonb_array_elements(
-                CASE
-                    WHEN btrim(COALESCE(p.time_plan, '')) ~ '^\s*\['
-                    THEN p.time_plan::jsonb
-                    ELSE '[]'::jsonb
-                END
-            ) AS items(item)
-        ) AS time_range ON true
-        WHERE p.use_date >= p_start_date
-          AND p.use_date < v_end_date
-          AND p.del_flag = false
-          AND b.del_flag = false
-          AND b.geom IS NOT NULL
-    ),
-    upd AS (
-        UPDATE public.bo_electric_fence f
-        SET
-            update_time = now(),
-            update_user = 'airspace_plan',
-            del_flag = false,
-            remark = src.remark,
-            code = src.airspace_code,
-            status = src.plan_status,
-            name = src.airspace_name,
-            type = '1',
-            frequency = '1',
-            area = src.airspace_area::varchar,
-            start_time = src.plan_start_time,
-            end_time = src.plan_end_time,
-            draw_method = 'airspace_plan',
-            height = src.fence_height,
-            fence_type = '2',
-            geom = src.geom,
-            time_plan = src.time_plan
-        FROM src
-        WHERE f.id = src.fence_id
-        RETURNING f.id
+            b.id AS block_id,
+            d::date AS use_date
+        FROM public.bo_airspace_block b
+        CROSS JOIN generate_series(v_start_date, v_end_date - 1, interval '1 day') AS gs(d)
+        WHERE b.del_flag = false
+          AND b.parent_id <> -1
     ),
     ins AS (
-        INSERT INTO public.bo_electric_fence (
-            id,
+        INSERT INTO public.bo_airspace_plan (
+            block_id,
+            use_date,
+            time_plan,
+            plan_status,
+            remark,
             create_time,
             create_user,
-            del_flag,
-            remark,
             update_time,
             update_user,
-            project_id,
-            code,
-            status,
-            name,
-            type,
-            frequency,
-            area,
-            week,
-            day,
-            start_time,
-            end_time,
-            draw_method,
-            height,
-            fence_type,
-            geom,
-            time_plan
+            del_flag
         )
         SELECT
-            src.fence_id,
-            now(),
-            'airspace_plan',
+            bd.block_id,
+            bd.use_date,
+            '[]',
             false,
-            src.remark,
+            '自动生成用空计划',
             now(),
-            'airspace_plan',
-            NULL,
-            src.airspace_code,
-            src.plan_status,
-            src.airspace_name,
-            '1',
-            '1',
-            src.airspace_area::varchar,
-            NULL,
-            NULL,
-            src.plan_start_time,
-            src.plan_end_time,
-            'airspace_plan',
-            src.fence_height,
-            '2',
-            src.geom,
-            src.time_plan
-        FROM src
+            v_user,
+            now(),
+            v_user,
+            false
+        FROM block_days bd
         WHERE NOT EXISTS (
             SELECT 1
-            FROM public.bo_electric_fence f
-            WHERE f.id = src.fence_id
+            FROM public.bo_airspace_plan p
+            WHERE p.block_id = bd.block_id
+              AND p.use_date = bd.use_date
         )
         RETURNING id
-    ),
-    dis AS (
-        UPDATE public.bo_electric_fence f
-        SET
-            update_time = now(),
-            update_user = 'airspace_plan',
-            del_flag = true
-        WHERE f.id LIKE 'airspace_plan_%'
-          AND f.id ~ '^airspace_plan_.*_[0-9]{8}$'
-          AND f.fence_type = '2'
-          AND to_date(substring(f.id FROM '([0-9]{8})$'), 'YYYYMMDD') >= p_start_date
-          AND to_date(substring(f.id FROM '([0-9]{8})$'), 'YYYYMMDD') < v_end_date
-          AND NOT EXISTS (
-              SELECT 1
-              FROM src
-              WHERE src.fence_id = f.id
-          )
-        RETURNING f.id
     )
-    SELECT
-        (SELECT count(*)::integer FROM upd),
-        (SELECT count(*)::integer FROM ins),
-        (SELECT count(*)::integer FROM dis)
-    INTO update_count, insert_count, disable_count;
+    SELECT count(*)::integer
+    INTO insert_count
+    FROM ins;
 
     RETURN NEXT;
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_airspace_plan_fence(date, integer)
-IS '将用空计划同步到电子围栏表，作为管控区参与飞行审核';
+COMMENT ON FUNCTION public.gis_airspace_plan_part(date, integer)
+IS '按月创建用空计划分区，并按有效空域区块和日期补齐缺失计划、删除无对应区块计划';
+
+-- 调用示例：
+-- 默认从今天开始创建未来36个月月分区，并补齐已有空域区块的用空计划。
+-- SELECT * FROM public.gis_airspace_plan_part();
+-- 从指定日期开始创建未来36个月月分区，并补齐用空计划。
+-- SELECT * FROM public.gis_airspace_plan_part(DATE '2026-10-01');
+-- 从指定日期开始创建指定月份数的月分区，并补齐用空计划。
+-- SELECT * FROM public.gis_airspace_plan_part(DATE '2026-10-01', 12);
 
 -- =============================================================================
--- 调用示例
--- =============================================================================
--- SELECT public.gis_airspace_plan_part(current_date, 32);
--- SELECT public.gis_airspace_plan_part(DATE '2026-09-24', 32);
--- SELECT * FROM public.gis_airspace_plan_fence(current_date, 2);
-
--- 新库初始化：创建今天和明天的用空计划分区。
-SELECT public.gis_airspace_plan_part(current_date, 2);
-
--- =============================================================================
--- 三、模拟空域区块函数
+-- 三、空域区块真实数据函数
 -- =============================================================================
 SELECT gis_drop_function('gis_airspace_block_demo');
 
 CREATE OR REPLACE FUNCTION public.gis_airspace_block_demo(
-    p_count integer DEFAULT 100
+    p_geojson jsonb
 )
-RETURNS integer
+RETURNS SETOF public.bo_airspace_block
 LANGUAGE plpgsql
 AS $$
-DECLARE
-    v_count integer;
 BEGIN
-    IF p_count IS NULL OR p_count <= 0 THEN
-        RAISE EXCEPTION 'p_count must be greater than 0';
+    IF p_geojson IS NULL THEN
+        RAISE EXCEPTION 'p_geojson must not be null';
     END IF;
 
-    INSERT INTO public.bo_airspace_block (
-        airspace_code,
-        airspace_name,
-        airspace_height,
-        airspace_type,
-        airspace_radius,
-        airspace_area,
-        airspace_perimeter,
-        is_main,
-        use_enabled,
-        remark,
-        create_time,
-        create_user,
-        update_time,
-        update_user,
-        del_flag,
-        geom
-    )
-    SELECT
-        format('DEMO-AS-%s', lpad(seq::text, 6, '0')),
-        format('模拟空域区块%s', lpad(seq::text, 6, '0')),
-        (120 + (seq % 8) * 30)::double precision,
-        CASE seq % 3
-            WHEN 0 THEN 'POINT'
-            WHEN 1 THEN 'LINE'
-            ELSE 'POLYGON'
-        END,
-        (50 + (seq % 6) * 25)::double precision,
-        round((0.018 + (seq % 7) * 0.006)::numeric, 3)::double precision,
-        round((0.60 + (seq % 5) * 0.12)::numeric, 3)::double precision,
-        false,
-        true,
-        '模拟数据：空域区块',
-        now(),
-        'demo',
-        now(),
-        'demo',
-        false,
-        ST_MakeEnvelope(
-            115.925 + (((seq - 1) % 20) * 0.0030),
-            36.410 + (((seq - 1) / 20) * 0.0025),
-            115.925 + (((seq - 1) % 20) * 0.0030) + 0.0018 + ((seq % 5) * 0.00015),
-            36.410 + (((seq - 1) / 20) * 0.0025) + 0.0015 + ((seq % 4) * 0.00015),
-            4326
+    RETURN QUERY
+    WITH raw_feature AS (
+        SELECT
+            item AS feature,
+            ord::integer AS seq
+        FROM jsonb_array_elements(
+            CASE
+                WHEN p_geojson->>'type' = 'FeatureCollection' THEN p_geojson->'features'
+                WHEN p_geojson->>'type' = 'Feature' THEN jsonb_build_array(p_geojson)
+                ELSE jsonb_build_array(jsonb_build_object('type', 'Feature', 'properties', '{}'::jsonb, 'geometry', p_geojson))
+            END
+        ) WITH ORDINALITY AS features(item, ord)
+    ),
+    parsed AS (
+        SELECT
+            seq,
+            COALESCE(feature->'properties', '{}'::jsonb) AS props,
+            ST_SetSRID(ST_GeomFromGeoJSON((feature->'geometry')::text), 4326) AS raw_geom
+        FROM raw_feature
+        WHERE feature->'geometry' IS NOT NULL
+    ),
+    normalized AS (
+        SELECT
+            seq,
+            props,
+            COALESCE(NULLIF(props->>'airspace_radius', '')::double precision, NULLIF(props->>'radius', '')::double precision, 0) AS radius_m,
+            raw_geom
+        FROM parsed
+        WHERE raw_geom IS NOT NULL
+          AND NOT ST_IsEmpty(raw_geom)
+    ),
+    input_data AS (
+        SELECT
+            seq,
+            COALESCE(NULLIF(props->>'airspace_code', ''), NULLIF(props->>'code', ''), format('AIRSPACE-IMPORT-%s', lpad(seq::text, 6, '0'))) AS airspace_code,
+            COALESCE(NULLIF(props->>'airspace_name', ''), NULLIF(props->>'name', ''), format('导入空域%s', lpad(seq::text, 6, '0'))) AS airspace_name,
+            COALESCE(NULLIF(props->>'airspace_height', '')::double precision, NULLIF(props->>'height', '')::double precision, 0) AS airspace_height,
+            COALESCE(
+                NULLIF(props->>'airspace_type', ''),
+                NULLIF(props->>'type', ''),
+                CASE
+                    WHEN GeometryType(raw_geom) IN ('POINT', 'MULTIPOINT') THEN 'POINT'
+                    WHEN GeometryType(raw_geom) IN ('LINESTRING', 'MULTILINESTRING') THEN 'LINE'
+                    WHEN GeometryType(raw_geom) IN ('POLYGON', 'MULTIPOLYGON') THEN 'POLYGON'
+                    ELSE GeometryType(raw_geom)
+                END
+            ) AS airspace_type,
+            radius_m AS airspace_radius,
+            COALESCE(NULLIF(props->>'parent_id', '')::bigint, -1) AS parent_id,
+            COALESCE(NULLIF(props->>'use_enabled', '')::boolean, true) AS use_enabled,
+            COALESCE(NULLIF(props->>'remark', ''), 'JSON导入空域数据') AS remark,
+            raw_geom AS geom
+        FROM normalized
+    ),
+    delete_plan AS (
+        DELETE FROM public.bo_airspace_plan p
+        USING public.bo_airspace_block b, input_data t
+        WHERE p.block_id = b.id
+          AND b.airspace_code = t.airspace_code
+        RETURNING 1
+    ),
+    delete_block AS (
+        DELETE FROM public.bo_airspace_block b
+        USING input_data t, (SELECT count(*) FROM delete_plan) dp
+        WHERE b.airspace_code = t.airspace_code
+        RETURNING 1
+    ),
+    inserted AS (
+        INSERT INTO public.bo_airspace_block (
+            airspace_code,
+            airspace_name,
+            airspace_height,
+            airspace_type,
+            airspace_radius,
+            parent_id,
+            use_enabled,
+            remark,
+            create_time,
+            create_user,
+            update_time,
+            update_user,
+            del_flag,
+            geom
         )
-    FROM generate_series(1, p_count) AS s(seq)
-    ON CONFLICT (airspace_code) DO UPDATE SET
-        airspace_code = EXCLUDED.airspace_code,
-        airspace_name = EXCLUDED.airspace_name,
-        airspace_height = EXCLUDED.airspace_height,
-        airspace_type = EXCLUDED.airspace_type,
-        airspace_radius = EXCLUDED.airspace_radius,
-        airspace_area = EXCLUDED.airspace_area,
-        airspace_perimeter = EXCLUDED.airspace_perimeter,
-        is_main = EXCLUDED.is_main,
-        use_enabled = EXCLUDED.use_enabled,
-        remark = EXCLUDED.remark,
-        update_time = now(),
-        update_user = 'demo',
-        del_flag = false,
-        geom = EXCLUDED.geom;
-
-    SELECT count(*)::integer
-    INTO v_count
-    FROM public.bo_airspace_block
-    WHERE airspace_code LIKE 'DEMO-AS-%';
-
-    RETURN v_count;
+        SELECT
+            t.airspace_code,
+            t.airspace_name,
+            t.airspace_height,
+            t.airspace_type,
+            t.airspace_radius,
+            t.parent_id,
+            t.use_enabled,
+            t.remark,
+            now(),
+            'airspace_import',
+            now(),
+            'airspace_import',
+            false,
+            t.geom
+        FROM input_data t
+        CROSS JOIN (SELECT count(*) FROM delete_block) db
+        RETURNING *
+    )
+    SELECT *
+    FROM inserted
+    ORDER BY id;
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_airspace_block_demo(integer)
-IS '生成或更新模拟空域区块数据';
+COMMENT ON FUNCTION public.gis_airspace_block_demo(jsonb)
+IS '根据JSON/GeoJSON导入空域区块，parent_id按传入值直接写入，geom保留原始点线面，final_geom由触发器自动生成';
 
+-- =============================================================================
+-- 数据调用示例
+-- =============================================================================
+-- 第一次调用：生成空域16主区域，parent_id=-1。
+-- SELECT * FROM public.gis_airspace_block_demo('{
+--   "type": "FeatureCollection",
+--   "features": [
+--     {
+--       "type": "Feature",
+--       "properties": {
+--         "airspace_code": "AIRSPACE-16-MAIN",
+--         "airspace_name": "空域16主区域",
+--         "airspace_height": 200,
+--         "parent_id": -1,
+--         "use_enabled": true,
+--         "remark": "主区域，十点连线范围内，真高200米（含）以下"
+--       },
+--       "geometry": {
+--         "type": "Polygon",
+--         "coordinates": [[[115.741667,36.717778],[115.708056,36.695833],[115.735833,36.541944],[115.653889,36.432778],[115.705278,36.255833],[116.264167,36.270833],[116.262778,36.558889],[116.055000,36.566389],[115.926111,36.700556],[115.890556,36.724444],[115.741667,36.717778]]]
+--       }
+--     }
+--   ]
+-- }'::jsonb);
+-- 第二次调用：生成空域1-15子区域，parent_id填写空域16主区域真实id。
+-- SELECT * FROM public.gis_airspace_block_demo('{
+--   "type": "FeatureCollection",
+--   "features": [
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-01","airspace_name":"空域1","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[115.951111,36.468056]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-02","airspace_name":"空域2","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[116.039167,36.492778]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-03","airspace_name":"空域3","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[116.050278,36.440833]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-04","airspace_name":"空域4","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[115.989444,36.451667]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-05","airspace_name":"空域5","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[116.001667,36.483333]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-06","airspace_name":"空域6","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[116.016389,36.427222]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-07","airspace_name":"空域7","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[116.040556,36.448056]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-08","airspace_name":"空域8","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[116.054722,36.459167]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-09","airspace_name":"空域9","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[115.930556,36.430556]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-10","airspace_name":"空域10","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[115.967500,36.420000]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-11","airspace_name":"空域11","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[115.943056,36.510556]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-12","airspace_name":"空域12","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[115.940556,36.444167]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-13","airspace_name":"空域13","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[115.731389,36.441389]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-14","airspace_name":"空域14","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[116.013333,36.386667]}},
+--     {"type":"Feature","properties":{"airspace_code":"AIRSPACE-15","airspace_name":"空域15","airspace_height":200,"airspace_radius":5000,"parent_id":1,"use_enabled":true,"remark":"子区域，以中心点为圆心，半径5000米范围内"},"geometry":{"type":"Point","coordinates":[115.999722,36.447222]}}
+--   ]
+-- }'::jsonb);
 -- =============================================================================
 -- 四、模拟用空计划函数
 -- =============================================================================
@@ -494,6 +500,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_count integer;
+    v_months integer;
 BEGIN
     IF p_plans_per_block IS NULL OR p_plans_per_block <= 0 THEN
         RAISE EXCEPTION 'p_plans_per_block must be greater than 0';
@@ -503,13 +510,20 @@ BEGIN
         RAISE EXCEPTION 'p_days must be greater than 0';
     END IF;
 
-    PERFORM public.gis_airspace_plan_part(current_date, p_days);
+    v_months := (
+        date_part(
+            'year',
+            age(date_trunc('month', current_date + (p_days - 1)), date_trunc('month', current_date))
+        )::integer * 12
+        + date_part(
+            'month',
+            age(date_trunc('month', current_date + (p_days - 1)), date_trunc('month', current_date))
+        )::integer
+        + 1
+    );
 
-    DELETE FROM public.bo_airspace_plan p
-    USING public.bo_airspace_block b
-    WHERE p.block_id = b.id
-      AND b.airspace_code LIKE 'DEMO-AS-%'
-      AND p.create_user = 'demo';
+    PERFORM *
+    FROM public.gis_airspace_plan_part(current_date, v_months);
 
     INSERT INTO public.bo_airspace_plan (
         block_id,
@@ -525,13 +539,17 @@ BEGIN
     )
     SELECT
         b.id,
-        current_date + (((block_seq + plan_seq - 2) % p_days)::integer),
-        jsonb_build_array(
-            jsonb_build_object(
-                'startTime', to_char(((8 + plan_seq * 2)::text || ':00:00')::time, 'HH24:MI:SS'),
-                'endTime', to_char(((10 + plan_seq * 2)::text || ':00:00')::time, 'HH24:MI:SS')
-            )
-        )::text,
+        current_date + day_offset,
+        (
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'startTime', to_char(((8 + segment_seq * 2)::text || ':00:00')::time, 'HH24:MI:SS'),
+                    'endTime', to_char(((10 + segment_seq * 2)::text || ':00:00')::time, 'HH24:MI:SS')
+                )
+                ORDER BY segment_seq
+            )::text
+            FROM generate_series(1, p_plans_per_block) AS segment(segment_seq)
+        ),
         false,
         '模拟数据：一个空域区块对应多个用空计划',
         now(),
@@ -544,10 +562,12 @@ BEGIN
             b.*,
             row_number() OVER (ORDER BY b.id) AS block_seq
         FROM public.bo_airspace_block b
-        WHERE b.airspace_code LIKE 'DEMO-AS-%'
+        WHERE b.create_user = 'airspace_import'
           AND b.del_flag = false
+          AND b.parent_id <> -1
     ) b
-    CROSS JOIN generate_series(1, p_plans_per_block) AS p(plan_seq);
+    CROSS JOIN generate_series(0, p_days - 1) AS d(day_offset)
+    ON CONFLICT (block_id, use_date) DO NOTHING;
 
     SELECT count(*)::integer
     INTO v_count
@@ -561,13 +581,9 @@ $$;
 COMMENT ON FUNCTION public.gis_airspace_plan_demo(integer, integer)
 IS '生成或更新模拟用空计划数据';
 
--- =============================================================================
--- 模拟数据调用示例
--- =============================================================================
--- 先生成100个模拟区块，再为每个区块生成3条今天/明天计划。
--- SELECT public.gis_airspace_block_demo(100);
+-- 调用示例：再为子区域生成3段今天/明天计划。
 -- SELECT public.gis_airspace_plan_demo(3, 2);
--- SELECT * FROM public.gis_airspace_plan_fence(current_date, 2);
+
 
 -- =============================================================================
 -- 五、空域区块查询接口及后台SQL
@@ -605,13 +621,15 @@ IS '生成或更新模拟用空计划数据';
 --   airspace_radius number 空域缓冲半径，米
 --   airspace_area  number    空域面积，平方千米
 --   airspace_perimeter number 空域周长，千米
---   is_main   boolean   是否主区域
+--   parent_id      bigint    父级空域区块ID：-1表示主区域；子区域填写主区域id
 --   use_enabled        boolean   启用状态
---   geom           object    GeoJSON Feature
+--   geom           object    原始点/线/面GeoJSON Feature
+--   final_geom     object    生成后的最终范围GeoJSON Feature
 --
 -- 空间字段返回规则：
---   1. geom使用GeoJSON格式，坐标系为WGS84（EPSG:4326）。
---   2. 前端地图建议接收GeoJSON Geometry；如果地图组件要求Feature，
+--   1. geom和final_geom使用GeoJSON格式，坐标系为WGS84（EPSG:4326）。
+--   2. geom用于展示原始点/线/面，final_geom用于空间校验、相交、包含等范围判断。
+--   3. 前端地图建议接收GeoJSON Geometry；如果地图组件要求Feature，
 --      后端再将属性字段组装为GeoJSON Feature。
 --
 --   PostgreSQL语句
@@ -626,13 +644,18 @@ SELECT
     b.airspace_radius,
     b.airspace_area,
     b.airspace_perimeter,
-    b.is_main,
+    b.parent_id,
     b.use_enabled,
     json_build_object(
         'type', 'Feature',
         'properties', '{}'::json,
         'geometry', ST_AsGeoJSON(b.geom)::json
     ) AS geom,
+    json_build_object(
+        'type', 'Feature',
+        'properties', '{}'::json,
+        'geometry', ST_AsGeoJSON(b.final_geom)::json
+    ) AS final_geom,
     b.create_time,
     b.update_time
 FROM public.bo_airspace_block b
@@ -682,9 +705,10 @@ ORDER BY b.airspace_code NULLS LAST, b.id;
 --   airspace_radius number 空域缓冲半径，米
 --   airspace_area  number    空域面积，平方千米
 --   airspace_perimeter number 空域周长，千米
---   is_main   boolean   是否主区域
+--   parent_id      bigint    父级空域区块ID：-1表示主区域；子区域填写主区域id
 --   use_enabled        boolean   启用状态
---   geom           object    GeoJSON Feature
+--   geom           object    原始点/线/面GeoJSON Feature
+--   final_geom     object    生成后的最终范围GeoJSON Feature
 --
 --   PostgreSQL语句
 -- 查询符合条件且在指定日期存在有效用空计划的全部空域区块。
@@ -697,13 +721,18 @@ SELECT
     b.airspace_radius,
     b.airspace_area,
     b.airspace_perimeter,
-    b.is_main,
+    b.parent_id,
     b.use_enabled,
     json_build_object(
         'type', 'Feature',
         'properties', '{}'::json,
         'geometry', ST_AsGeoJSON(b.geom)::json
-    ) AS geom
+    ) AS geom,
+    json_build_object(
+        'type', 'Feature',
+        'properties', '{}'::json,
+        'geometry', ST_AsGeoJSON(b.final_geom)::json
+    ) AS final_geom
 FROM public.bo_airspace_block b
 WHERE b.del_flag = false
   AND EXISTS (
@@ -788,13 +817,14 @@ ORDER BY p.id;
 --   airspace_radius number 空域缓冲半径，米
 --   airspace_area  number    空域面积，平方千米
 --   airspace_perimeter number 空域周长，千米
---   is_main   boolean   是否主区域
+--   parent_id      bigint    父级空域区块ID：-1表示主区域；子区域填写主区域id
 --   use_enabled        boolean   启用状态
 --   id             bigint    当前生效计划主键
 --   use_date       date      使用日期
 --   time_plan      string    时间计划
 --   plan_status    boolean   计划状态：t可用；f不可用
---   geom           object    GeoJSON Feature
+--   geom           object    原始点/线/面GeoJSON Feature
+--   final_geom     object    生成后的最终范围GeoJSON Feature
 --
 -- 4.3 PostgreSQL语句
 -- 当前 SQL 示例日期和时间先写死，后端调用时替换为 :use_date::date
@@ -808,7 +838,7 @@ SELECT
     b.airspace_radius,
     b.airspace_area,
     b.airspace_perimeter,
-    b.is_main,
+    b.parent_id,
     b.use_enabled,
     p.id,
     p.use_date,
@@ -819,7 +849,12 @@ SELECT
         'type', 'Feature',
         'properties', '{}'::json,
         'geometry', ST_AsGeoJSON(b.geom)::json
-    ) AS geom
+    ) AS geom,
+    json_build_object(
+        'type', 'Feature',
+        'properties', '{}'::json,
+        'geometry', ST_AsGeoJSON(b.final_geom)::json
+    ) AS final_geom
 FROM public.bo_airspace_block b
 JOIN public.bo_airspace_plan p
     ON p.block_id = b.id
@@ -867,7 +902,5 @@ WHERE b.del_flag = false
       OR b.use_enabled = :use_enabled::boolean
   )
 ORDER BY b.airspace_code NULLS LAST, b.id, p.id;
-
-
 
 
