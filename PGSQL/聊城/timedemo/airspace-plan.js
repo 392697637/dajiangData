@@ -16,7 +16,10 @@ function planEls() {
     dateText: document.querySelector("#dateText"),
     note: document.querySelector("#timelineNote"),
     segments: document.querySelector("#timelineSegments"),
+    timeline: document.querySelector("#planTimelineWidget"),
     play: document.querySelector("#playBtn"),
+    back: document.querySelector("#backBtn"),
+    forward: document.querySelector("#forwardBtn"),
     popup: document.querySelector(".plan-popup"),
     popupTitle: document.querySelector("#popupTitle"),
     popupContent: document.querySelector("#popupContent"),
@@ -128,6 +131,15 @@ function statusBadge(status) {
   return ({ ACTIVE: "正常", APPLIED: "日常巡检", DISABLED: "取消", NOT_APPLIED: "暂无" })[status] || "正常";
 }
 
+function taskAnalysisHtml() {
+  return `
+    <div><span>当日计划任务</span><strong>10</strong></div>
+    <div><span>可飞任务</span><strong>7</strong></div>
+    <div class="cancel"><span>取消任务</span><strong>3</strong></div>
+    <div class="rate"><span>可放飞率</span><strong>70%</strong></div>
+  `;
+}
+
 window.AirspacePlanPage = {
   viewer: null,
   source: null,
@@ -157,10 +169,12 @@ window.AirspacePlanPage = {
     this.els.date.value = todayText();
     this.seconds = nowSeconds();
     this.els.slider.value = this.seconds;
+    this.updateTimelineMarker();
     this.els.popup.hidden = true;
     this.els.popupTitle.textContent = "用空计划详情";
     this.viewer = AirspaceMap.createViewer();
     this.bindForm();
+    this.bindTimeline();
     this.bindMap();
     this.render();
     this.startPlay();
@@ -172,8 +186,18 @@ window.AirspacePlanPage = {
     this.els.formSave.onclick = () => this.savePlanForm();
   },
 
+  bindTimeline() {
+    if (this.els.slider) this.els.slider.oninput = (event) => this.setSeconds(event.target.value);
+    if (this.els.back) this.els.back.onclick = () => this.setSeconds((this.seconds || 0) - 3600);
+    if (this.els.forward) this.els.forward.onclick = () => this.setSeconds((this.seconds || 0) + 3600);
+    if (this.els.play) this.els.play.onclick = () => this.togglePlay();
+    this.timelineResizeHandler = () => this.updateTimelineMarker();
+    window.addEventListener("resize", this.timelineResizeHandler);
+  },
+
   destroy() {
     if (this.timer) clearInterval(this.timer);
+    if (this.timelineResizeHandler) window.removeEventListener("resize", this.timelineResizeHandler);
     this.timer = null;
     this.playing = false;
     AirspaceMap.destroyViewer(this.viewer);
@@ -213,6 +237,7 @@ window.AirspacePlanPage = {
     this.renderSidePanels(blocks);
     this.draw(blocks);
     this.updatePlaybackState();
+    this.renderTaskAnalysis();
   },
 
   renderList(blocks) {
@@ -250,6 +275,7 @@ window.AirspacePlanPage = {
   },
 
   renderSidePanels(blocks) {
+    if (!this.els.flightTasks || !this.els.involvedAirspaces || !this.els.taskAnalysis) return;
     const tasks = [
       { name: "小潘河A1段日常巡检", mode: "平台飞行", dept: "公安局", status: "正常", statusClass: "ok", time: "8:30-9:00; 14:00-14:30" },
       { name: "小潘河A1段日常巡检", mode: "自动飞行", dept: "环保局", status: "日常巡检", statusClass: "data", time: "8:30-9:00" },
@@ -283,13 +309,12 @@ window.AirspacePlanPage = {
         </div>
       `).join("")}
     `;
+    this.renderTaskAnalysis();
+  },
 
-    this.els.taskAnalysis.innerHTML = `
-      <div><span>当日计划任务</span><strong>10</strong></div>
-      <div><span>可飞任务</span><strong>7</strong></div>
-      <div class="cancel"><span>取消任务</span><strong>3</strong></div>
-      <div class="rate"><span>可放飞率</span><strong>70%</strong></div>
-    `;
+  renderTaskAnalysis() {
+    if (!this.els?.taskAnalysis) return;
+    this.els.taskAnalysis.innerHTML = taskAnalysisHtml();
   },
 
   openPlanForm(blockId) {
@@ -400,7 +425,7 @@ window.AirspacePlanPage = {
         entity.label = new Cesium.LabelGraphics({ text: block.airspace_code, font: "14px Microsoft YaHei", fillColor: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK, outlineWidth: 3, style: Cesium.LabelStyle.FILL_AND_OUTLINE, disableDepthTestDistance: Number.POSITIVE_INFINITY });
         this.entities.set(id, entity);
       });
-      if (source.entities.values.length) this.viewer.zoomTo(source);
+      if (source.entities.values.length) AirspaceMap.flyToBlocksTopDown(this.viewer, [...this.airspaces, ...blocks]);
     });
   },
 
@@ -470,7 +495,19 @@ window.AirspacePlanPage = {
   setSeconds(value) {
     this.seconds = Math.max(0, Math.min(86399, Number(value)));
     this.els.slider.value = this.seconds;
+    const progress = this.seconds / 86399;
+    this.els.timeline?.style.setProperty("--timeline-progress", progress);
+    this.updateTimelineMarker();
     this.updatePlaybackState();
+  },
+
+  updateTimelineMarker() {
+    const timeline = this.els?.timeline;
+    if (!timeline) return;
+    const side = parseFloat(getComputedStyle(timeline).getPropertyValue("--timeline-side")) || 96;
+    const progress = this.seconds / 86399;
+    const marker = ((side + progress * Math.max(0, timeline.clientWidth - side * 2)) / timeline.clientWidth) * 100;
+    timeline.style.setProperty("--timeline-marker", `${marker}%`);
   },
 
   startPlay() {

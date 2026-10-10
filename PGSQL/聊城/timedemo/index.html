@@ -112,18 +112,21 @@
               <label class="legend-item"><input type="checkbox" checked /><i class="monitor-state"></i>有计划</label>
               <label class="legend-item"><input type="checkbox" checked /><i class="alarm-state"></i>无计划</label>
             </div>
-            <div class="timeline">
-              <div class="timeline-top">
-                <button id="playBtn" class="secondary" title="播放时间轴">播放</button>
-                <button id="backBtn" class="secondary" title="后退一小时">-1小时</button>
-                <strong id="timelineTime">00:00:00</strong>
-                <input id="timeSlider" type="range" min="0" max="86399" value="0" step="1" />
-                <button id="forwardBtn" class="secondary" title="前进一小时">+1小时</button>
+            <div id="planTimelineWidget" class="plan-timeline-widget timeline">
+              <div class="timeline-controls">
+                <button id="playBtn" class="timeline-btn play" type="button" title="播放时间轴">播放</button>
+                <button class="timeline-btn pause-ghost" type="button" title="暂停显示">暂停</button>
+                <button id="backBtn" class="timeline-btn prev" type="button" title="后退一小时">后退</button>
+                <strong id="timelineTime" class="timeline-clock">00:00:00</strong>
+                <input id="timeSlider" class="timeline-range" type="range" min="0" max="86399" value="0" step="1" />
+                <button id="forwardBtn" class="timeline-btn next" type="button" title="前进一小时">前进</button>
               </div>
-              <div class="timeline-scale">
-                <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
+              <div class="timeline-track-wrap">
+                <div class="timeline-scale">
+                  <span>06:00</span><span>07:00</span><span>08:00</span><span>09:00</span><span>10:00</span><span>11:00</span><span>12:00</span><span>13:00</span><span>14:00</span>
+                </div>
+                <div id="timelineSegments" class="timeline-segments"></div>
               </div>
-              <div id="timelineSegments" class="timeline-segments"></div>
               <div id="timelineNote" class="timeline-note"></div>
             </div>
           </div>
@@ -138,9 +141,14 @@
             <h2>当日任务涉及空域</h2>
             <div id="involvedAirspaceList" class="involved-airspace-list"></div>
           </section>
-          <section class="plan-side-card">
+          <section class="plan-side-card plan-analysis-card">
             <h2>当日任务分析</h2>
-            <div id="taskAnalysis" class="task-analysis"></div>
+            <div id="taskAnalysis" class="task-analysis">
+              <div><span>当日计划任务</span><strong>10</strong></div>
+              <div><span>可飞任务</span><strong>7</strong></div>
+              <div class="cancel"><span>取消任务</span><strong>3</strong></div>
+              <div class="rate"><span>可放飞率</span><strong>70%</strong></div>
+            </div>
           </section>
         </aside>
       </main>

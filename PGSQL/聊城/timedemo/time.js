@@ -112,7 +112,17 @@ window.AirspaceMap = {
     const sphere = Cesium.BoundingSphere.fromPoints(this.boundary(block));
     viewer.camera.flyToBoundingSphere(sphere, {
       duration: 0.8,
-      offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-80), Math.max(sphere.radius * 3.5, 5000)),
+      offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-90), Math.max(sphere.radius * 3.5, 5000)),
+    });
+  },
+
+  flyToBlocksTopDown(viewer, blocks) {
+    const points = (blocks || []).flatMap((block) => this.boundary(block));
+    if (!points.length) return;
+    const sphere = Cesium.BoundingSphere.fromPoints(points);
+    viewer.camera.flyToBoundingSphere(sphere, {
+      duration: 0.6,
+      offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-90), Math.max(sphere.radius * 2.4, 30000)),
     });
   },
 
@@ -165,10 +175,6 @@ const App = {
       setFlyTime: document.querySelector("#setFlyTimeBtn"),
       publish: document.querySelector("#publishPlanBtn"),
       date: document.querySelector("#useDate"),
-      slider: document.querySelector("#timeSlider"),
-      back: document.querySelector("#backBtn"),
-      forward: document.querySelector("#forwardBtn"),
-      play: document.querySelector("#playBtn"),
     };
     const [airspaceResponse, blockResponse, planResponse] = await Promise.all([
       fetch("airspace.json", { cache: "no-store" }),
@@ -212,10 +218,6 @@ const App = {
       if (typeof this.current?.pageNo === "number") this.current.pageNo = 1;
       this.current?.render();
     });
-    this.els.slider.addEventListener("input", (event) => this.current?.setSeconds?.(event.target.value));
-    this.els.back.addEventListener("click", () => this.current?.setSeconds?.((this.current.seconds || 0) - 3600));
-    this.els.forward.addEventListener("click", () => this.current?.setSeconds?.((this.current.seconds || 0) + 3600));
-    this.els.play.addEventListener("click", () => this.current?.togglePlay?.());
     this.els.popupClose.addEventListener("click", () => {
       this.els.popup.hidden = true;
     });
