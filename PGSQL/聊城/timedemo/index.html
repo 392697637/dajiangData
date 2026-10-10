@@ -14,6 +14,14 @@
           <h1>聊城市低空综合感知服务平台</h1>
           <span>LIAOCHENG CITY LOW-ALTITUDE COMPREHENSIVE PERCEPTION SERVICE PLATFORM</span>
         </div>
+        <nav class="top-nav" aria-label="主导航">
+          <a href="#overview" data-top-nav="overview">综合态势</a>
+          <a href="#airspace" data-top-nav="airspace">空域管理</a>
+          <a href="#flight" data-top-nav="flight">飞行计划</a>
+          <a href="#warning" data-top-nav="warning">预警管理</a>
+          <a href="#task" data-top-nav="task">任务管理</a>
+          <a class="active" href="#system" data-top-nav="system">系统管理</a>
+        </nav>
         <div class="header-time">
           <strong id="clockText">00:00:00</strong>
           <span id="dateText">2026-10-09</span>
@@ -26,6 +34,7 @@
             <strong>空域设置</strong>
             <a href="#block" data-page-link="block">空域区块</a>
             <a class="active" href="#plan" data-page-link="plan">用空计划</a>
+            <a href="#warning">空域预警记录</a>
           </div>
         </aside>
 
@@ -69,6 +78,7 @@
             <div class="filter-actions">
               <button id="searchBtn">查询</button>
               <button id="resetBtn" class="secondary">重置</button>
+              <button id="setFlyTimeBtn" class="secondary page-plan-only" type="button">设置可飞时间</button>
               <button id="publishPlanBtn" class="secondary page-plan-only" type="button">发布用空计划</button>
             </div>
           </section>
@@ -118,6 +128,21 @@
             </div>
           </div>
         </section>
+
+        <aside class="plan-right-panel panel page-plan-only">
+          <section class="plan-side-card">
+            <h2>当日飞行任务</h2>
+            <div id="flightTaskList" class="flight-task-list"></div>
+          </section>
+          <section class="plan-side-card">
+            <h2>当日任务涉及空域</h2>
+            <div id="involvedAirspaceList" class="involved-airspace-list"></div>
+          </section>
+          <section class="plan-side-card">
+            <h2>当日任务分析</h2>
+            <div id="taskAnalysis" class="task-analysis"></div>
+          </section>
+        </aside>
       </main>
 
       <footer>

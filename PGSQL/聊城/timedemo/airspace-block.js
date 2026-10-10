@@ -146,6 +146,9 @@ window.AirspaceBlockPage = {
     this.els.shapePolygon.onchange = () => this.setShapeType("POLYGON");
     this.els.stateEnable.onclick = () => this.setEnabled(true);
     this.els.stateDisable.onclick = () => this.setEnabled(false);
+    this.els.formUnitName.oninput = () => {
+      if (this.draftGeom?.geometry?.type === "Point") this.showDraft();
+    };
   },
 
   bindList() {
@@ -189,14 +192,14 @@ window.AirspaceBlockPage = {
     this.els.formHeight.value = block?.airspace_height ?? 120;
     this.setShapeType(block?.airspace_type === "POLYGON" ? "POLYGON" : "POINT");
     this.setEnabled(block?.use_enabled ?? true);
-    this.els.formUnitName.value = block?.airspace_radius || "";
+    this.els.formUnitName.value = block?.airspace_radius || 5000;
     this.els.formUnitId.value = block?.project_id || DEFAULT_PROJECT_ID;
     this.els.formArea.value = block?.airspace_area || "";
     this.els.formArea.textContent = block?.airspace_area || "0";
     this.els.formPerimeter.value = block?.airspace_perimeter || "";
     this.els.formPerimeter.textContent = block?.airspace_perimeter || "0";
     this.els.formCoords.value = this.coordText(block);
-    this.els.formPolygon.value = this.polygonText(block);
+    this.els.formPolygon.value = block?.airspace_type === "POLYGON" ? this.polygonText(block) : "";
     this.draftGeom = block ? structuredClone(block.geom) : null;
     this.setDrawTip(block ? "可重新绘制，也可直接保存原面" : "点击绘制面后，左键取点，右键结束");
     this.els.modal.hidden = false;
@@ -273,10 +276,19 @@ window.AirspaceBlockPage = {
   },
 
   setShapeType(type) {
+    const previousType = this.els.formType.value;
     this.els.formType.value = type;
     this.els.shapePoint.checked = type === "POINT";
     this.els.shapePolygon.checked = type === "POLYGON";
     this.els.modal?.classList.toggle("is-polygon", type === "POLYGON");
+    if (previousType && previousType !== type) this.clearDraft();
+    if (type === "POINT") {
+      this.els.formPolygon.value = "";
+      if (!Number(this.els.formUnitName.value)) this.els.formUnitName.value = 5000;
+    } else {
+      this.els.formCoords.value = "";
+    }
+    this.setDrawTip("点击绘制面后，左键取点，右键结束");
   },
 
   setEnabled(enabled) {
@@ -303,17 +315,36 @@ window.AirspaceBlockPage = {
     this.stopDraw();
     this.clearDraft();
     this.draftPositions = [];
-    this.setDrawTip("正在绘制：左键取点，右键结束");
+    const shapeType = this.els.formType.value;
+    this.setDrawTip(shapeType === "POINT" ? "正在绘制：左键点击地图生成圆形" : "正在绘制：左键取点，右键结束");
     this.drawHandler = new Cesium.ScreenSpaceEventHandler(this.viewer.scene.canvas);
     this.drawHandler.setInputAction((event) => {
       const coordinate = this.pickLonLat(event.position);
       if (!coordinate) return;
+      if (shapeType === "POINT") {
+        this.draftGeom = {
+          type: "Feature",
+          properties: {},
+          geometry: {
+            type: "Point",
+            coordinates: [coordinate[0], coordinate[1], 0],
+          },
+        };
+        this.els.formCoords.value = coordinate.join(",");
+        if (!Number(this.els.formUnitName.value)) this.els.formUnitName.value = 5000;
+        this.stopDraw();
+        this.showDraft();
+        this.setDrawTip("圆形已生成，可调整半径后保存");
+        return;
+      }
       this.draftPositions.push(coordinate);
       this.showDraft();
       this.setDrawTip(`已取 ${this.draftPositions.length} 个点，至少 3 个点后右键结束`);
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
-    this.drawHandler.setInputAction(() => this.finishDraw(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
-    this.drawHandler.setInputAction(() => this.finishDraw(), Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+    if (shapeType === "POLYGON") {
+      this.drawHandler.setInputAction(() => this.finishDraw(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+      this.drawHandler.setInputAction(() => this.finishDraw(), Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+    }
   },
 
   stopDraw() {
@@ -353,7 +384,7 @@ window.AirspaceBlockPage = {
       this.viewer.entities.remove(this.draftEntity);
       this.draftEntity = null;
     }
-    this.setDrawTip("已清空绘制，可重新绘制");
+    this.setDrawTip("点击绘制面后，左键取点，右键结束");
   },
 
   setDrawTip(text) {

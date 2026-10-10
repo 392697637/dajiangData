@@ -31,6 +31,9 @@ function planEls() {
     formEnd: document.querySelector("#formPlanEnd"),
     formStatus: document.querySelector("#formPlanStatus"),
     formRemark: document.querySelector("#formPlanRemark"),
+    flightTasks: document.querySelector("#flightTaskList"),
+    involvedAirspaces: document.querySelector("#involvedAirspaceList"),
+    taskAnalysis: document.querySelector("#taskAnalysis"),
   };
 }
 
@@ -111,6 +114,18 @@ function planTimeCell(block) {
     .flatMap((plan) => plan.timeSegments);
   if (!segments.length) return "--";
   return segments.map((segment) => `<i>${segment.startTime.slice(0, 5)}-${segment.endTime.slice(0, 5)}</i>`).join("");
+}
+
+function planTimeText(block) {
+  const segments = block.plans
+    .filter((plan) => parsePlanStatus(plan.plan_status))
+    .flatMap((plan) => plan.timeSegments);
+  if (!segments.length) return "--";
+  return segments.map((segment) => `${segment.startTime.slice(0, 5)}-${segment.endTime.slice(0, 5)}`).join(" ");
+}
+
+function statusBadge(status) {
+  return ({ ACTIVE: "正常", APPLIED: "日常巡检", DISABLED: "取消", NOT_APPLIED: "暂无" })[status] || "正常";
 }
 
 window.AirspacePlanPage = {
@@ -195,6 +210,7 @@ window.AirspacePlanPage = {
     this.currentBlocks = blocks;
     this.renderList(blocks);
     this.renderTimeline(blocks);
+    this.renderSidePanels(blocks);
     this.draw(blocks);
     this.updatePlaybackState();
   },
@@ -214,7 +230,7 @@ window.AirspacePlanPage = {
             <label class="plan-check"><input type="checkbox" data-plan-check="${planBlockId(block)}" /></label>
             <span>${planTableCode(block)}</span>
             <span>${block.airspace_name}</span>
-            <span class="plan-time-cell">${planTimeCell(block)}<em>${PLAN_STATUS[this.status(block)]}</em></span>
+            <span class="plan-time-cell">${planTimeCell(block)}</span>
           </div>
         `).join("")}
       </div>
@@ -231,6 +247,49 @@ window.AirspacePlanPage = {
       });
     });
     this.els.pager.innerHTML = "";
+  },
+
+  renderSidePanels(blocks) {
+    const tasks = [
+      { name: "小潘河A1段日常巡检", mode: "平台飞行", dept: "公安局", status: "正常", statusClass: "ok", time: "8:30-9:00; 14:00-14:30" },
+      { name: "小潘河A1段日常巡检", mode: "自动飞行", dept: "环保局", status: "日常巡检", statusClass: "data", time: "8:30-9:00" },
+      { name: "小潘河A1段日常巡检", mode: "自动飞行", dept: "环保局", status: "数据采集", statusClass: "data", time: "8:30-9:00" },
+      { name: "小潘河A1段日常巡检", mode: "平台飞行", dept: "环保局", status: "取消", statusClass: "bad", time: "8:30-9:00" },
+      { name: "小潘河A1段日常巡检", mode: "自动飞行", dept: "环保局", status: "日常巡检", statusClass: "data", time: "8:30-9:00" },
+      { name: "小潘河A1段日常巡检", mode: "平台飞行", dept: "环保局", status: "数据采集", statusClass: "data", time: "8:30-9:00" },
+    ];
+    this.els.flightTasks.innerHTML = tasks.map((task) => {
+      return `
+        <div class="flight-task">
+          <div>
+            <strong>${task.name}</strong>
+            <span>${task.mode}</span>
+          </div>
+          <p>
+            <em class="tag env">${task.dept}</em>
+            <em class="tag ${task.statusClass}">${task.status}</em>
+            <time>${task.time}</time>
+          </p>
+        </div>
+      `;
+    }).join("");
+
+    this.els.involvedAirspaces.innerHTML = `
+      <div class="involved-head"><strong>空域编号</strong><strong>空域名称</strong></div>
+      ${Array.from({ length: 9 }, (_, index) => `
+        <div class="involved-row">
+          <span>${101 + index}</span>
+          <span>${index % 3 === 0 ? "这里是空域名称空域" : "这里是空域名称"}</span>
+        </div>
+      `).join("")}
+    `;
+
+    this.els.taskAnalysis.innerHTML = `
+      <div><span>当日计划任务</span><strong>10</strong></div>
+      <div><span>可飞任务</span><strong>7</strong></div>
+      <div class="cancel"><span>取消任务</span><strong>3</strong></div>
+      <div class="rate"><span>可放飞率</span><strong>70%</strong></div>
+    `;
   },
 
   openPlanForm(blockId) {

@@ -162,6 +162,7 @@ const App = {
       state: document.querySelector("#airspaceState"),
       search: document.querySelector("#searchBtn"),
       reset: document.querySelector("#resetBtn"),
+      setFlyTime: document.querySelector("#setFlyTimeBtn"),
       publish: document.querySelector("#publishPlanBtn"),
       date: document.querySelector("#useDate"),
       slider: document.querySelector("#timeSlider"),
@@ -198,10 +199,6 @@ const App = {
       this.current?.render();
     });
     this.els.reset.addEventListener("click", () => {
-      if (this.page === "plan") {
-        this.current?.openPlanForm?.();
-        return;
-      }
       this.els.type.value = "";
       this.els.code.value = "";
       this.els.name.value = "";
@@ -209,6 +206,7 @@ const App = {
       if (typeof this.current?.pageNo === "number") this.current.pageNo = 1;
       this.current?.render();
     });
+    this.els.setFlyTime.addEventListener("click", () => this.current?.openPlanForm?.());
     this.els.publish.addEventListener("click", () => this.current?.openPlanForm?.());
     this.els.date.addEventListener("change", () => {
       if (typeof this.current?.pageNo === "number") this.current.pageNo = 1;
@@ -231,6 +229,10 @@ const App = {
     document.querySelectorAll("[data-page-link]").forEach((link) => {
       link.classList.toggle("active", link.dataset.pageLink === page);
     });
+    const topPage = page === "plan" ? "flight" : page === "block" ? "airspace" : "system";
+    document.querySelectorAll("[data-top-nav]").forEach((link) => {
+      link.classList.toggle("active", link.dataset.topNav === topPage);
+    });
     this.els.popup.hidden = true;
     if (page === "block") {
       this.els.filterTitle.textContent = "空域区块";
@@ -244,7 +246,7 @@ const App = {
       this.els.filterTitle.textContent = "用空计划";
       this.els.resultTitle.textContent = "";
       this.els.search.textContent = "查询";
-      this.els.reset.textContent = "设置可飞时间";
+      this.els.reset.textContent = "重置";
       this.current = window.AirspacePlanPage;
     }
     this.current.init(this.data.block, this.data.plan, this.data.airspace);
