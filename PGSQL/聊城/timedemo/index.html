@@ -153,8 +153,8 @@
             <label class="circle-field required">圆点坐标<input id="formAirspaceCoords" /><button class="inline-pick" type="button">拾取</button></label>
             <label class="circle-field">圆形半径<input id="formUnitName" type="number" /><span class="field-unit">m</span></label>
             <label class="polygon-field textarea-field">多边形范围<textarea id="formAirspacePolygon" rows="4"></textarea></label>
-            <label class="check-metric"><input type="checkbox" />空域面积<span class="metric-value"><input id="formAirspaceArea" type="number" step="0.1" />km²</span></label>
-            <label class="check-metric"><input type="checkbox" />空域周长<span class="metric-value"><input id="formAirspacePerimeter" type="number" step="0.1" />km</span></label>
+            <label class="check-metric"><input type="checkbox" />空域面积<span class="metric-value"><output id="formAirspaceArea">0</output>km²</span></label>
+            <label class="check-metric"><input type="checkbox" />空域周长<span class="metric-value"><output id="formAirspacePerimeter">0</output>km</span></label>
             <label class="switch-field">
               启用状态
               <span class="switch-buttons">
@@ -170,8 +170,8 @@
           </div>
           <div class="modal-actions">
             <button id="blockFormDelete" class="danger" type="button">删除</button>
-            <button id="blockFormSave" type="button">保存</button>
             <button id="blockFormCancel" class="secondary" type="button">取消</button>
+            <button id="blockFormSave" type="button">保存</button>
           </div>
         </div>
       </section>

@@ -84,6 +84,7 @@ window.AirspaceBlockPage = {
   pageNo: 1,
   pageSize: 6,
   editingId: null,
+  selectedId: null,
 
   init(data, airspaceData) {
     this.blocks = data.data;
@@ -94,6 +95,7 @@ window.AirspaceBlockPage = {
     this.viewer = AirspaceMap.createViewer();
     this.bind();
     this.bindForm();
+    this.bindList();
     this.render();
   },
 
@@ -117,7 +119,10 @@ window.AirspaceBlockPage = {
       if (!Cesium.defined(picked) || !picked.id?.properties?.blockId) return;
       const id = String(picked.id.properties.blockId.getValue());
       const block = this.filtered().find((item) => blockId(item) === id);
-      if (block) this.showPopup(block, event.position);
+      if (block) {
+        this.selectBlock(id);
+        this.showPopup(block, event.position);
+      }
     };
     this.viewer.screenSpaceEventHandler.setInputAction(this.clickHandler, Cesium.ScreenSpaceEventType.LEFT_CLICK);
     this.popupListener = () => this.updatePopupPosition();
@@ -143,6 +148,16 @@ window.AirspaceBlockPage = {
     this.els.stateDisable.onclick = () => this.setEnabled(false);
   },
 
+  bindList() {
+    this.els.list.onclick = (event) => {
+      const row = event.target.closest(".block-grid-row");
+      if (!row || !this.els.list.contains(row)) return;
+      this.selectBlock(row.dataset.id);
+      this.flyTo(row.dataset.id);
+      this.openForm(row.dataset.id);
+    };
+  },
+
   filtered() {
     const els = this.els;
     const code = els.code.value.trim().toLowerCase();
@@ -166,6 +181,7 @@ window.AirspaceBlockPage = {
       ? this.blocks.find((item) => blockId(item) === String(id))
       : null;
     this.editingId = block ? blockId(block) : null;
+    if (block) this.selectBlock(this.editingId);
     this.els.formDelete.hidden = !block;
     this.els.formTitle.textContent = "空域信息";
     this.els.formCode.value = block?.airspace_code || "";
@@ -176,13 +192,16 @@ window.AirspaceBlockPage = {
     this.els.formUnitName.value = block?.airspace_radius || "";
     this.els.formUnitId.value = block?.project_id || DEFAULT_PROJECT_ID;
     this.els.formArea.value = block?.airspace_area || "";
+    this.els.formArea.textContent = block?.airspace_area || "0";
     this.els.formPerimeter.value = block?.airspace_perimeter || "";
+    this.els.formPerimeter.textContent = block?.airspace_perimeter || "0";
     this.els.formCoords.value = this.coordText(block);
     this.els.formPolygon.value = this.polygonText(block);
     this.draftGeom = block ? structuredClone(block.geom) : null;
-    this.showDraft();
     this.setDrawTip(block ? "可重新绘制，也可直接保存原面" : "点击绘制面后，左键取点，右键结束");
     this.els.modal.hidden = false;
+    this.els.modal.removeAttribute("hidden");
+    this.showDraft();
   },
 
   closeForm() {
@@ -209,6 +228,37 @@ window.AirspaceBlockPage = {
     this.render();
   },
 
+  selectBlock(id) {
+    this.selectedId = id ? String(id) : null;
+    this.updateListSelection();
+    this.updateHighlight();
+  },
+
+  updateListSelection() {
+    if (!this.els?.list) return;
+    this.els.list.querySelectorAll(".block-grid-row").forEach((row) => {
+      row.classList.toggle("selected", row.dataset.id === this.selectedId);
+    });
+  },
+
+  updateHighlight() {
+    this.entities.forEach((entity, id) => {
+      if (!entity.polygon) return;
+      const selected = id === this.selectedId;
+      const block = this.blocks.find((item) => blockId(item) === id);
+      const state = block?.use_enabled ? "CONTROL" : "DISABLED";
+      entity.polygon.material = selected
+        ? Cesium.Color.fromCssColorString("rgba(255, 205, 56, 0.68)")
+        : blockColor(state);
+      entity.polygon.outline = true;
+      entity.polygon.outlineColor = selected ? Cesium.Color.YELLOW : Cesium.Color.WHITE;
+      entity.polygon.outlineWidth = selected ? 4 : 1;
+      if (entity.label) {
+        entity.label.fillColor = selected ? Cesium.Color.YELLOW : Cesium.Color.WHITE;
+      }
+    });
+  },
+
   applyForm(block) {
     block.airspace_code = this.els.formCode.value.trim();
     block.airspace_name = this.els.formName.value.trim();
@@ -217,8 +267,8 @@ window.AirspaceBlockPage = {
     block.use_enabled = this.els.formState.value === "true";
     block.airspace_radius = Number(this.els.formUnitName.value || 0);
     block.project_id = this.els.formUnitId.value.trim() || DEFAULT_PROJECT_ID;
-    block.airspace_area = Number(this.els.formArea.value || 0);
-    block.airspace_perimeter = Number(this.els.formPerimeter.value || 0);
+    block.airspace_area = Number(this.els.formArea.value || this.els.formArea.textContent || 0);
+    block.airspace_perimeter = Number(this.els.formPerimeter.value || this.els.formPerimeter.textContent || 0);
     if (this.draftGeom) block.geom = structuredClone(this.draftGeom);
   },
 
@@ -325,7 +375,35 @@ window.AirspaceBlockPage = {
       this.viewer.entities.remove(this.draftEntity);
       this.draftEntity = null;
     }
-    const ring = this.draftGeom?.geometry?.coordinates?.[0] || this.draftPositions;
+    const geometry = this.draftGeom?.geometry;
+    if (geometry?.type === "Point") {
+      const [lon, lat, z = 0] = geometry.coordinates;
+      const radius = Number(this.els?.formUnitName?.value || 0);
+      const circle = AirspaceMap.displayGeometry({
+        geom: this.draftGeom,
+        airspace_radius: radius,
+      });
+      const circlePositions = circle?.coordinates?.[0]
+        ? Cesium.Cartesian3.fromDegreesArray(circle.coordinates[0].flatMap((p) => [p[0], p[1]]))
+        : null;
+      this.draftEntity = this.viewer.entities.add({
+        polygon: circlePositions ? {
+          hierarchy: new Cesium.PolygonHierarchy(circlePositions),
+          material: Cesium.Color.fromCssColorString("rgba(255, 205, 56, 0.24)"),
+          outline: true,
+          outlineColor: Cesium.Color.YELLOW,
+        } : undefined,
+        point: {
+          pixelSize: 9,
+          color: Cesium.Color.YELLOW,
+          outlineColor: Cesium.Color.WHITE,
+          outlineWidth: 2,
+        },
+        position: Cesium.Cartesian3.fromDegrees(lon, lat, z),
+      });
+      return;
+    }
+    const ring = geometry?.coordinates?.[0] || this.draftPositions;
     if (!ring || ring.length === 0) return;
     const positions = Cesium.Cartesian3.fromDegreesArray(ring.flatMap((p) => [p[0], p[1]]));
     const polygon = ring.length >= 3
@@ -391,6 +469,7 @@ window.AirspaceBlockPage = {
 
   deleteBlock(id) {
     this.blocks = this.blocks.filter((item) => blockId(item) !== String(id));
+    if (this.selectedId === String(id)) this.selectedId = null;
     this.popupAnchor = null;
     this.els.popup.hidden = true;
     const entity = this.entities.get(String(id));
@@ -412,17 +491,13 @@ window.AirspaceBlockPage = {
           <strong>启用状态</strong>
         </div>
         ${blocks.map((block) => `
-          <div class="block-grid-row" data-id="${blockId(block)}" role="row">
+          <div class="block-grid-row ${this.selectedId === blockId(block) ? "selected" : ""}" data-id="${blockId(block)}" role="row">
             <span>${String(block.airspace_code || blockId(block)).match(/\d+$/)?.[0] ? 100 + Number(String(block.airspace_code || blockId(block)).match(/\d+$/)[0]) : block.airspace_code}</span>
             <span>${block.airspace_name}</span>
             <span class="${block.use_enabled ? "enabled" : "disabled"}">${block.use_enabled ? "启用" : "停用"}</span>
           </div>
         `).join("")}
       </div>`;
-    this.els.list.querySelectorAll(".block-grid-row").forEach((row) => {
-      row.addEventListener("click", () => this.flyTo(row.dataset.id));
-      row.addEventListener("dblclick", () => this.openForm(row.dataset.id));
-    });
     this.els.pager.innerHTML = "";
   },
 
@@ -479,6 +554,7 @@ window.AirspaceBlockPage = {
         });
         this.entities.set(id, entity);
       });
+      this.updateHighlight();
       if (source.entities.values.length) this.viewer.zoomTo(source);
     });
   },

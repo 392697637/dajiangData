@@ -494,6 +494,12 @@ button.danger {
   background: rgba(7, 73, 147, 0.68);
 }
 
+.block-grid-row.selected {
+  background: linear-gradient(90deg, rgba(255, 205, 56, 0.26), rgba(7, 91, 169, 0.76));
+  box-shadow: inset 3px 0 0 rgba(255, 205, 56, 0.95);
+  color: #ffffff;
+}
+
 .block-grid-row .enabled {
   color: #27d864;
   font-weight: 700;
@@ -1042,9 +1048,9 @@ body[data-page="block"] .modal[hidden] {
 
 body[data-page="block"] .modal-panel {
   position: fixed;
-  top: 52px;
+  top: 44px;
   left: 512px;
-  width: 340px;
+  width: 356px;
   max-height: none;
   overflow: visible;
   pointer-events: auto;
@@ -1054,7 +1060,7 @@ body[data-page="block"] .modal-panel {
 }
 
 body[data-page="block"] .modal-head {
-  height: 27px;
+  height: 31px;
   padding: 0 8px;
   background: linear-gradient(90deg, rgba(19, 137, 211, 0.72), rgba(8, 75, 151, 0.5));
 }
@@ -1080,17 +1086,17 @@ body[data-page="block"] .modal-head strong::before {
 body[data-page="block"] .modal-body {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 5px;
-  padding: 7px 12px 6px;
+  gap: 8px;
+  padding: 8px 12px 8px;
 }
 
 body[data-page="block"] .modal-body label {
   position: relative;
   display: grid;
   grid-template-columns: 1fr;
-  gap: 2px;
+  gap: 4px;
   color: #b9e8ff;
-  font-size: 11px;
+  font-size: 13px;
   min-width: 0;
 }
 
@@ -1108,11 +1114,11 @@ body[data-page="block"] .modal-body input,
 body[data-page="block"] .modal-body select,
 body[data-page="block"] .modal-body textarea {
   width: 100%;
-  min-height: 23px;
-  padding-top: 2px;
-  padding-bottom: 2px;
+  min-height: 31px;
+  padding-top: 4px;
+  padding-bottom: 4px;
   padding-right: 24px;
-  background: rgba(4, 45, 100, 0.82);
+  background: rgba(4, 45, 100, 0.62);
 }
 
 body[data-page="block"] .modal-body label.circle-field,
@@ -1132,9 +1138,9 @@ body[data-page="block"] .modal.is-polygon .polygon-field {
 body[data-page="block"] .inline-pick {
   position: static;
   justify-self: end;
-  margin-top: -25px;
-  min-width: 44px;
-  min-height: 23px;
+  margin-top: -31px;
+  min-width: 38px;
+  min-height: 31px;
   padding: 0 8px;
   border-radius: 0;
   font-size: 12px;
@@ -1145,7 +1151,7 @@ body[data-page="block"] .circle-field input {
 }
 
 body[data-page="block"] .modal-body textarea {
-  min-height: 48px;
+  min-height: 84px;
   resize: vertical;
   color: #dff6ff;
   border: 1px solid rgba(55, 159, 242, 0.58);
@@ -1155,16 +1161,16 @@ body[data-page="block"] .modal-body textarea {
 body[data-page="block"] .field-unit {
   position: absolute;
   right: 8px;
-  bottom: 5px;
+  bottom: 8px;
   color: #9bd6ff;
-  font-size: 11px;
+  font-size: 13px;
   pointer-events: none;
 }
 
 body[data-page="block"] .shape-field {
   display: grid;
   grid-template-columns: auto auto 1fr;
-  gap: 8px;
+  gap: 11px;
   margin: 0;
   padding: 0;
   border: 0;
@@ -1173,7 +1179,7 @@ body[data-page="block"] .shape-field {
 body[data-page="block"] .shape-field legend {
   grid-column: 1 / -1;
   color: #b9e8ff;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 body[data-page="block"] .shape-field label {
@@ -1183,33 +1189,34 @@ body[data-page="block"] .shape-field label {
 }
 
 body[data-page="block"] .shape-field input {
-  width: 13px;
-  min-height: 13px;
+  width: 14px;
+  min-height: 14px;
   padding: 0;
   accent-color: #1fc0ff;
 }
 
 body[data-page="block"] .draw-actions {
-  padding: 6px 8px;
+  padding: 0;
   display: grid;
   grid-template-columns: auto auto 1fr;
-  gap: 8px;
-  border-color: rgba(42, 153, 238, 0.22);
-  background: rgba(1, 35, 83, 0.36);
+  gap: 9px;
+  border: 0;
+  background: transparent;
 }
 
 body[data-page="block"] .draw-actions strong {
   grid-column: 1 / -1;
   color: #b9e8ff;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 400;
 }
 
 body[data-page="block"] .check-metric {
   display: grid;
-  grid-template-columns: auto auto 1fr;
+  grid-template-columns: auto 1fr;
   align-items: center;
   column-gap: 5px;
+  row-gap: 4px;
   color: #b9e8ff;
 }
 
@@ -1225,24 +1232,24 @@ body[data-page="block"] .metric-value {
   align-items: center;
   gap: 4px;
   justify-self: start;
+  grid-column: 1 / -1;
   color: #dff6ff;
 }
 
-body[data-page="block"] .metric-value input {
-  width: 92px;
-  min-height: 22px;
-  padding: 2px 6px;
+body[data-page="block"] .metric-value output {
+  min-width: 38px;
 }
 
 body[data-page="block"] .draw-actions button {
-  min-width: 74px;
-  min-height: 23px;
-  padding: 1px 8px;
+  min-width: 86px;
+  min-height: 28px;
+  padding: 3px 10px;
   font-size: 12px;
 }
 
 body[data-page="block"] .draw-actions span {
   grid-column: 1 / -1;
+  display: none;
 }
 
 body[data-page="block"] .switch-field {
@@ -1255,9 +1262,9 @@ body[data-page="block"] .switch-buttons {
 }
 
 body[data-page="block"] .switch-buttons button {
-  min-width: 52px;
-  min-height: 23px;
-  padding: 1px 10px;
+  min-width: 58px;
+  min-height: 26px;
+  padding: 2px 10px;
   border-color: rgba(55, 159, 242, 0.42);
   background: rgba(4, 45, 100, 0.82);
   box-shadow: none;
@@ -1274,20 +1281,20 @@ body[data-page="block"] .switch-buttons button.active:last-child {
 }
 
 body[data-page="block"] .modal-actions {
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 0 12px 8px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 18px 12px;
 }
 
 body[data-page="block"] .modal-actions button {
-  min-width: 64px;
-  min-height: 23px;
-  padding: 1px 10px;
+  min-width: 88px;
+  min-height: 29px;
+  padding: 3px 12px;
   font-size: 12px;
 }
 
 body[data-page="block"] .modal-actions .danger {
-  margin-right: auto;
+  margin-right: 0;
 }
 
 @media (max-width: 1100px) {
