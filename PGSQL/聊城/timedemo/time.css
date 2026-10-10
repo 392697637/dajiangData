@@ -2026,3 +2026,365 @@ body[data-page="block"] .modal-actions .danger {
     font-size: 10px;
   }
 }
+
+body[data-page="plan"] .plan-right-panel {
+  height: calc(100vh - 78px) !important;
+  display: grid !important;
+  grid-template-rows: minmax(0, 45fr) minmax(0, 37fr) minmax(0, 14fr) !important;
+  gap: 10px !important;
+  align-content: start !important;
+  justify-items: center !important;
+  padding: 10px 9px !important;
+  overflow: hidden !important;
+}
+
+body[data-page="plan"] .plan-right-panel .plan-side-card {
+  position: static !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: min(346px, 100%) !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+body[data-page="plan"] .plan-right-panel .plan-side-card:nth-child(1) {
+  height: 100% !important;
+}
+
+body[data-page="plan"] .plan-right-panel .plan-side-card:nth-child(2) {
+  width: min(346px, 100%) !important;
+  height: 100% !important;
+  border-radius: 4px 4px 0 0 !important;
+  border: 1px solid #0079D2 !important;
+}
+
+body[data-page="plan"] .plan-analysis-card {
+  display: block !important;
+  position: static !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  z-index: 10 !important;
+}
+
+body[data-page="plan"] .task-analysis {
+  height: calc(100% - 32px) !important;
+  grid-template-columns: 1fr 1fr !important;
+  gap: 6px !important;
+  padding: 8px !important;
+}
+
+body[data-page="plan"] .task-analysis div {
+  min-height: 0 !important;
+  padding: 4px 7px !important;
+}
+
+body[data-page="plan"] .flight-task-list,
+body[data-page="plan"] .involved-airspace-list {
+  position: relative;
+  height: calc(100% - 32px);
+  max-height: none !important;
+  overflow: hidden;
+}
+
+body[data-page="plan"] .flight-task-list {
+  display: grid;
+  grid-template-rows: repeat(6, minmax(0, 1fr)) 24px;
+  gap: 5px;
+  padding: 6px;
+}
+
+body[data-page="plan"] .flight-task-list .flight-task {
+  min-height: 0;
+  height: 100%;
+  margin-bottom: 0;
+  display: grid;
+  align-content: center;
+}
+
+body[data-page="plan"] .involved-airspace-list {
+  display: grid;
+  grid-template-rows: 26px repeat(9, minmax(0, 1fr)) 24px;
+  gap: 0;
+  padding: 6px;
+}
+
+body[data-page="plan"] .involved-airspace-list .involved-row {
+  min-height: 0;
+  height: 100%;
+}
+
+body[data-page="plan"] .side-pager {
+  position: static;
+  align-self: end;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #9bd6ff;
+  font-size: 12px;
+  background: rgba(1, 31, 84, 0.78);
+}
+
+body[data-page="plan"] .side-pager button {
+  min-width: 54px;
+  min-height: 22px;
+  padding: 1px 8px;
+  font-size: 12px;
+}
+
+body[data-page="plan"] .side-pager button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Proportional reference layout for the airspace plan screen. */
+body[data-page="plan"] main {
+  grid-template-columns:
+    clamp(220px, 13.958vw, 268px)
+    clamp(320px, 19.271vw, 370px)
+    minmax(0, 1fr)
+    clamp(340px, 19.792vw, 380px) !important;
+}
+
+body[data-page="plan"] .nav-panel {
+  width: auto !important;
+}
+
+body[data-page="plan"] .sidebar {
+  width: auto !important;
+  padding: 8px 10px !important;
+}
+
+body[data-page="plan"] .section-title,
+body[data-page="plan"] .plan-side-card h2 {
+  height: clamp(28px, 2.963vh, 32px) !important;
+}
+
+body[data-page="plan"] .plan-grid-head,
+body[data-page="plan"] .plan-grid-row {
+  min-height: clamp(24px, 2.87vh, 31px) !important;
+}
+
+body[data-page="plan"] .filter-actions {
+  gap: clamp(6px, 0.417vw, 8px) !important;
+}
+
+body[data-page="plan"] .filter-actions button {
+  min-height: clamp(22px, 2.222vh, 24px) !important;
+}
+
+body[data-page="plan"] .flight-task {
+  padding: clamp(4px, 0.463vh, 5px) 7px !important;
+}
+
+body[data-page="plan"] .flight-task strong {
+  font-size: clamp(11px, 0.625vw, 12px) !important;
+}
+
+body[data-page="plan"] .flight-task span,
+body[data-page="plan"] .flight-task time,
+body[data-page="plan"] .involved-head,
+body[data-page="plan"] .involved-row {
+  font-size: clamp(11px, 0.625vw, 12px) !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget {
+  width: 85% !important;
+  height: clamp(50px, 5vh, 54px) !important;
+  bottom: clamp(24px, 3.519vh, 38px) !important;
+}
+
+body[data-page="plan"] .plan-right-panel .plan-side-card,
+body[data-page="plan"] .plan-right-panel .plan-side-card:nth-child(2) {
+  width: calc(100% - 18px) !important;
+}
+
+body[data-page="plan"] .task-analysis {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+body[data-page="plan"] .task-analysis div {
+  font-size: clamp(11px, 0.625vw, 12px) !important;
+}
+
+/* Full proportional pass: header, columns, rows, text, and pagers scale together. */
+body[data-page="plan"] {
+  --plan-header-h: clamp(64px, 7.222vh, 78px);
+  --plan-nav-w: 13.958vw;
+  --plan-list-w: 19.271vw;
+  --plan-right-w: 19.792vw;
+  --plan-gap: clamp(6px, 0.521vw, 10px);
+  --plan-card-title-h: clamp(28px, 2.963vh, 32px);
+  --plan-pager-h: clamp(22px, 2.222vh, 24px);
+  --plan-font-xs: clamp(10px, 0.573vw, 11px);
+  --plan-font-sm: clamp(11px, 0.625vw, 12px);
+  --plan-font-md: clamp(12px, 0.729vw, 14px);
+  --plan-font-lg: clamp(14px, 0.833vw, 16px);
+}
+
+body[data-page="plan"] .app {
+  grid-template-rows: var(--plan-header-h) minmax(0, 1fr) 0 !important;
+}
+
+body[data-page="plan"] .topbar {
+  height: var(--plan-header-h) !important;
+  grid-template-columns: 29.167vw minmax(0, 1fr) 9.375vw !important;
+  padding: 0 1.25vw !important;
+}
+
+body[data-page="plan"] .brand h1 {
+  width: 24.167vw !important;
+  height: calc(var(--plan-header-h) * 0.44) !important;
+  font-size: clamp(24px, 1.771vw, 34px) !important;
+  line-height: 1 !important;
+}
+
+body[data-page="plan"] .brand span,
+body[data-page="plan"] .top-nav a,
+body[data-page="plan"] .header-time span {
+  font-size: var(--plan-font-xs) !important;
+}
+
+body[data-page="plan"] .top-nav a {
+  min-width: clamp(72px, 6.25vw, 120px) !important;
+  padding: 0 clamp(6px, 0.521vw, 10px) !important;
+}
+
+body[data-page="plan"] main {
+  grid-template-columns: var(--plan-nav-w) var(--plan-list-w) minmax(0, 1fr) var(--plan-right-w) !important;
+}
+
+body[data-page="plan"] .nav-panel,
+body[data-page="plan"] .sidebar,
+body[data-page="plan"] .stage,
+body[data-page="plan"] .plan-right-panel {
+  height: calc(100vh - var(--plan-header-h)) !important;
+}
+
+body[data-page="plan"] .nav-section strong,
+body[data-page="plan"] .nav-section a {
+  min-height: 4.074vh !important;
+  line-height: 4.074vh !important;
+  font-size: var(--plan-font-md) !important;
+  padding-left: 3.646vw !important;
+}
+
+body[data-page="plan"] .sidebar {
+  padding: 0.741vh 0.521vw !important;
+}
+
+body[data-page="plan"] label,
+body[data-page="plan"] input,
+body[data-page="plan"] select,
+body[data-page="plan"] button,
+body[data-page="plan"] .plan-grid,
+body[data-page="plan"] .flight-task,
+body[data-page="plan"] .involved-row,
+body[data-page="plan"] .task-analysis div {
+  font-size: var(--plan-font-sm) !important;
+}
+
+body[data-page="plan"] input,
+body[data-page="plan"] select {
+  min-height: 2.5vh !important;
+}
+
+body[data-page="plan"] .section-title {
+  height: var(--plan-card-title-h) !important;
+  margin-bottom: 0.648vh !important;
+}
+
+body[data-page="plan"] .filter-actions {
+  height: 2.778vh !important;
+  margin-top: 0.648vh !important;
+}
+
+body[data-page="plan"] .results {
+  height: calc(100% - 12.5vh) !important;
+}
+
+body[data-page="plan"] #blockList,
+body[data-page="plan"] .plan-grid {
+  height: 100% !important;
+}
+
+body[data-page="plan"] .plan-grid {
+  display: grid !important;
+  grid-template-rows: 3.148vh repeat(10, minmax(0, 1fr)) var(--plan-pager-h) !important;
+}
+
+body[data-page="plan"] .plan-grid-head,
+body[data-page="plan"] .plan-grid-row {
+  min-height: 0 !important;
+  height: 100% !important;
+}
+
+body[data-page="plan"] .plan-right-panel {
+  grid-template-rows: 45fr 37fr 14fr !important;
+  gap: var(--plan-gap) !important;
+  padding: 0.926vh 0.469vw !important;
+}
+
+body[data-page="plan"] .plan-side-card h2 {
+  height: var(--plan-card-title-h) !important;
+  font-size: var(--plan-font-lg) !important;
+  line-height: calc(var(--plan-card-title-h) - 0.741vh) !important;
+}
+
+body[data-page="plan"] .flight-task-list,
+body[data-page="plan"] .involved-airspace-list {
+  height: calc(100% - var(--plan-card-title-h)) !important;
+  padding: 0.556vh 0.313vw !important;
+}
+
+body[data-page="plan"] .flight-task-list {
+  grid-template-rows: repeat(6, minmax(0, 1fr)) var(--plan-pager-h) !important;
+  gap: 0.463vh !important;
+}
+
+body[data-page="plan"] .flight-task {
+  padding: 0.463vh 0.365vw !important;
+}
+
+body[data-page="plan"] .flight-task strong,
+body[data-page="plan"] .flight-task span,
+body[data-page="plan"] .flight-task time {
+  line-height: 1.18 !important;
+}
+
+body[data-page="plan"] .involved-airspace-list {
+  grid-template-rows: 2.407vh repeat(9, minmax(0, 1fr)) var(--plan-pager-h) !important;
+}
+
+body[data-page="plan"] .involved-head,
+body[data-page="plan"] .involved-row {
+  min-height: 0 !important;
+  height: 100% !important;
+  padding: 0 0.521vw !important;
+}
+
+body[data-page="plan"] .task-analysis {
+  height: calc(100% - var(--plan-card-title-h)) !important;
+  gap: 0.556vh 0.417vw !important;
+  padding: 0.741vh 0.521vw !important;
+}
+
+body[data-page="plan"] .side-pager {
+  height: var(--plan-pager-h) !important;
+  font-size: var(--plan-font-sm) !important;
+}
+
+body[data-page="plan"] .side-pager button {
+  min-width: 2.813vw !important;
+  min-height: calc(var(--plan-pager-h) - 2px) !important;
+  padding: 0 0.417vw !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget {
+  width: 85% !important;
+  height: 5vh !important;
+  bottom: 3.519vh !important;
+}
