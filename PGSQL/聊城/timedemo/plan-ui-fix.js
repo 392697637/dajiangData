@@ -7,9 +7,9 @@
   const blockKey = (block) => String(block.id ?? block.block_id);
   const planKey = (plan) => String(plan.id ?? plan.plan_id);
   const usable = (value) => value === false || value === "false" || value === 0 || value === "0" || value === "1";
-  const planPageSize = 10;
-  const taskPageSize = 6;
-  const airspacePageSize = 9;
+  const planPageSize = 9;
+  const taskPageSize = 5;
+  const airspacePageSize = 8;
 
   function setLabelText(label, value) {
     if (!label) return;
