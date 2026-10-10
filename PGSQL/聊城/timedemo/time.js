@@ -57,8 +57,40 @@ window.AirspaceMap = {
     if (viewer && !viewer.isDestroyed()) viewer.destroy();
   },
 
+  displayGeometry(block) {
+    const geometry = block.final_geom?.geometry || block.geom?.geometry || block.geometry;
+    if (!geometry) return null;
+    if (geometry.type === "Point") {
+      const [lon, lat] = geometry.coordinates;
+      const radius = Number(block.airspace_radius || 0);
+      const points = [];
+      const latRadius = radius / 111320;
+      const lonRadius = radius / (111320 * Math.cos(Cesium.Math.toRadians(lat)));
+      for (let i = 0; i <= 64; i += 1) {
+        const angle = (Math.PI * 2 * i) / 64;
+        points.push([lon + Math.cos(angle) * lonRadius, lat + Math.sin(angle) * latRadius, geometry.coordinates[2] || 0]);
+      }
+      return { type: "Polygon", coordinates: [points] };
+    }
+    if (geometry.type === "LineString") {
+      return { type: "LineString", coordinates: geometry.coordinates };
+    }
+    return geometry;
+  },
+
+  ring(block) {
+    const geometry = this.displayGeometry(block);
+    if (!geometry) return [];
+    if (geometry.type === "Polygon") return geometry.coordinates[0] || [];
+    if (geometry.type === "MultiPolygon") return geometry.coordinates[0]?.[0] || [];
+    if (geometry.type === "LineString") return geometry.coordinates || [];
+    if (geometry.type === "Point") return [geometry.coordinates];
+    return [];
+  },
+
   center(block, height = 0) {
-    const ring = block.geom.geometry.coordinates[0];
+    const ring = this.ring(block);
+    if (!ring.length) return Cesium.Cartesian3.fromDegrees(115.985, 36.455, height);
     const bounds = ring.reduce((acc, p) => ({
       west: Math.min(acc.west, p[0]),
       east: Math.max(acc.east, p[0]),
@@ -73,7 +105,7 @@ window.AirspaceMap = {
   },
 
   boundary(block) {
-    return Cesium.Cartesian3.fromDegreesArray(block.geom.geometry.coordinates[0].flatMap((p) => [p[0], p[1]]));
+    return Cesium.Cartesian3.fromDegreesArray(this.ring(block).flatMap((p) => [p[0], p[1]]));
   },
 
   flyToBlock(viewer, block) {
@@ -81,6 +113,34 @@ window.AirspaceMap = {
     viewer.camera.flyToBoundingSphere(sphere, {
       duration: 0.8,
       offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-80), Math.max(sphere.radius * 3.5, 5000)),
+    });
+  },
+
+  airspaceFeatures(airspaces) {
+    return (airspaces || []).map((airspace) => ({
+      type: "Feature",
+      properties: {
+        id: airspace.id,
+        code: airspace.airspace_code,
+        name: airspace.airspace_name,
+        kind: "main_airspace",
+      },
+      geometry: this.displayGeometry(airspace),
+    })).filter((feature) => feature.geometry);
+  },
+
+  styleMainAirspaces(source) {
+    source.entities.values.forEach((entity) => {
+      if (entity.properties?.kind?.getValue() !== "main_airspace") return;
+      if (entity.polygon) {
+        entity.polygon.material = Cesium.Color.fromCssColorString("rgba(30, 214, 255, 0.12)");
+        entity.polygon.outline = true;
+        entity.polygon.outlineColor = Cesium.Color.CYAN;
+      }
+      if (entity.polyline) {
+        entity.polyline.material = Cesium.Color.CYAN;
+        entity.polyline.width = 3;
+      }
     });
   },
 };
@@ -102,19 +162,23 @@ const App = {
       state: document.querySelector("#airspaceState"),
       search: document.querySelector("#searchBtn"),
       reset: document.querySelector("#resetBtn"),
+      publish: document.querySelector("#publishPlanBtn"),
       date: document.querySelector("#useDate"),
       slider: document.querySelector("#timeSlider"),
       back: document.querySelector("#backBtn"),
       forward: document.querySelector("#forwardBtn"),
       play: document.querySelector("#playBtn"),
     };
-    const [blockResponse, planResponse] = await Promise.all([
+    const [airspaceResponse, blockResponse, planResponse] = await Promise.all([
+      fetch("airspace.json", { cache: "no-store" }),
       fetch("airspace-block.json", { cache: "no-store" }),
       fetch("airspace-plan.json", { cache: "no-store" }),
     ]);
+    if (!airspaceResponse.ok) throw new Error("airspace.json 请求失败");
     if (!blockResponse.ok) throw new Error("airspace-block.json 请求失败");
     if (!planResponse.ok) throw new Error("airspace-plan.json 请求失败");
     this.data = {
+      airspace: await airspaceResponse.json(),
       block: await blockResponse.json(),
       plan: await planResponse.json(),
     };
@@ -134,6 +198,10 @@ const App = {
       this.current?.render();
     });
     this.els.reset.addEventListener("click", () => {
+      if (this.page === "plan") {
+        this.current?.openPlanForm?.();
+        return;
+      }
       this.els.type.value = "";
       this.els.code.value = "";
       this.els.name.value = "";
@@ -141,6 +209,7 @@ const App = {
       if (typeof this.current?.pageNo === "number") this.current.pageNo = 1;
       this.current?.render();
     });
+    this.els.publish.addEventListener("click", () => this.current?.openPlanForm?.());
     this.els.date.addEventListener("change", () => {
       if (typeof this.current?.pageNo === "number") this.current.pageNo = 1;
       this.current?.render();
@@ -166,15 +235,19 @@ const App = {
     if (page === "block") {
       this.els.filterTitle.textContent = "空域区块";
       this.els.resultTitle.textContent = "空域区块列表";
+      this.els.search.textContent = "查询";
+      this.els.reset.textContent = "重置";
       this.current = window.AirspaceBlockPage;
-      this.current.init(this.data.block);
+      this.current.init(this.data.block, this.data.airspace);
       return;
     } else {
       this.els.filterTitle.textContent = "用空计划";
-      this.els.resultTitle.textContent = "当天空域区块";
+      this.els.resultTitle.textContent = "";
+      this.els.search.textContent = "查询";
+      this.els.reset.textContent = "设置可飞时间";
       this.current = window.AirspacePlanPage;
     }
-    this.current.init(this.data.block, this.data.plan);
+    this.current.init(this.data.block, this.data.plan, this.data.airspace);
   },
 };
 

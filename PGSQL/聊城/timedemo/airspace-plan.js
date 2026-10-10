@@ -1,6 +1,4 @@
-﻿const PLAN_TYPES = { CONTROL: "管制空域", MONITOR: "监视空域", REPORT: "报告空域" };
-const PLAN_STATES = { CONTROL: "管制状态", MONITOR: "监控状态", REPORT: "报警状态" };
-const PLAN_STATUS = { ACTIVE: "当前生效", APPLIED: "已申请", DISABLED: "不可用", NOT_APPLIED: "未申请" };
+const PLAN_STATUS = { ACTIVE: "生效中", APPLIED: "有计划", DISABLED: "不可用", NOT_APPLIED: "无计划" };
 
 function planEls() {
   return {
@@ -31,93 +29,121 @@ function planEls() {
     formDate: document.querySelector("#formPlanDate"),
     formStart: document.querySelector("#formPlanStart"),
     formEnd: document.querySelector("#formPlanEnd"),
-    formMinHeight: document.querySelector("#formPlanMinHeight"),
-    formMaxHeight: document.querySelector("#formPlanMaxHeight"),
-    formBufferHeight: document.querySelector("#formPlanBufferHeight"),
     formStatus: document.querySelector("#formPlanStatus"),
     formRemark: document.querySelector("#formPlanRemark"),
   };
 }
 
-function planSeconds(value) {
-  const parts = value.split(":").map(Number);
-  return parts[0] * 3600 + parts[1] * 60 + (parts[2] || 0);
+function planBlockId(block) {
+  return String(block.id ?? block.block_id);
 }
-function planTimeText(total) {
-  const seconds = ((total % 86400) + 86400) % 86400;
+
+function planId(plan) {
+  return String(plan.id ?? plan.plan_id);
+}
+
+function parsePlanStatus(value) {
+  return value === false || value === "false" || value === 0 || value === "0" || value === "1";
+}
+
+function normalizeSegments(value) {
+  const raw = typeof value === "string" ? JSON.parse(value || "[]") : value || [];
+  return raw.map((item) => ({
+    startTime: item.startTime || item.start_time || "00:00:00",
+    endTime: item.endTime || item.end_time || "00:00:00",
+  }));
+}
+
+function normalizePlan(plan) {
+  return {
+    ...plan,
+    id: plan.id ?? plan.plan_id,
+    block_id: String(plan.block_id),
+    timeSegments: normalizeSegments(plan.time_plan),
+  };
+}
+
+function secondsOf(value) {
+  const parts = String(value || "00:00:00").split(":").map(Number);
+  return (parts[0] || 0) * 3600 + (parts[1] || 0) * 60 + (parts[2] || 0);
+}
+
+function timeText(total) {
+  const seconds = ((Number(total) % 86400) + 86400) % 86400;
   return `${String(Math.floor(seconds / 3600)).padStart(2, "0")}:${String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
-function planToday() {
+
+function todayText() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
-function planNowSecond() {
+
+function nowSeconds() {
   const now = new Date();
   return now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
 }
+
+function activeSegment(segment, seconds) {
+  const start = secondsOf(segment.startTime);
+  const end = secondsOf(segment.endTime);
+  if (start === end) return true;
+  return end > start ? seconds >= start && seconds < end : seconds >= start || seconds < end;
+}
+
 function planColor(status) {
   const colors = {
     ACTIVE: Cesium.Color.RED.withAlpha(0.55),
     APPLIED: Cesium.Color.GOLD.withAlpha(0.45),
     DISABLED: Cesium.Color.MEDIUMPURPLE.withAlpha(0.45),
     NOT_APPLIED: Cesium.Color.GRAY.withAlpha(0.28),
-    CONTROL: Cesium.Color.fromCssColorString("rgba(24, 169, 255, 0.58)"),
-    MONITOR: Cesium.Color.fromCssColorString("rgba(155, 125, 255, 0.56)"),
-    REPORT: Cesium.Color.fromCssColorString("rgba(255, 86, 168, 0.56)"),
   };
   return colors[status] || Cesium.Color.YELLOW.withAlpha(0.5);
 }
 
-function planHeightRange(block, isActiveSegment) {
-  const usablePlans = block.plans.filter((plan) => plan.plan_status === "1");
-  const activePlan = usablePlans.find((plan) =>
-    plan.time_plan.some((segment) => isActiveSegment(segment)),
-  );
-  if (!activePlan) return null;
-  const minHeight = Number(activePlan.min_height || 0);
-  const maxHeight = Number(activePlan.max_height || 0);
-  const bufferHeight = Number(activePlan.buffer_height || 0);
-  return {
-    minHeight,
-    maxHeight,
-    bufferHeight,
-    fenceHeight: Math.max(maxHeight + bufferHeight, minHeight + 30),
-  };
+function planTableCode(block) {
+  const tail = String(block.airspace_code || planBlockId(block)).match(/\d+$/)?.[0];
+  return tail ? String(100 + Number(tail)) : (block.airspace_code || planBlockId(block));
+}
+
+function planTimeCell(block) {
+  const segments = block.plans
+    .filter((plan) => parsePlanStatus(plan.plan_status))
+    .flatMap((plan) => plan.timeSegments);
+  if (!segments.length) return "--";
+  return segments.map((segment) => `<i>${segment.startTime.slice(0, 5)}-${segment.endTime.slice(0, 5)}</i>`).join("");
 }
 
 window.AirspacePlanPage = {
   viewer: null,
   source: null,
   blocks: [],
+  airspaces: [],
   entities: new Map(),
-  entityStates: new Map(),
   currentBlocks: [],
   seconds: 0,
   timer: null,
   playing: false,
-  pageNo: 1,
-  pageSize: 6,
   editingPlan: null,
 
-  init(blockData, planData) {
-    const planMap = new Map(
-      planData.data.plans.map((item) => [String(item.block_id), item.plans || []]),
-    );
+  init(blockData, planData, airspaceData) {
+    this.airspaces = airspaceData?.data || [];
+    const plans = Array.isArray(planData.data) ? planData.data : (planData.data?.plans || []);
+    const flatPlans = plans.flatMap((item) => item.plans ? item.plans.map((plan) => ({ ...plan, block_id: item.block_id })) : [item]);
+    const planMap = new Map();
+    flatPlans.map(normalizePlan).forEach((plan) => {
+      if (!planMap.has(plan.block_id)) planMap.set(plan.block_id, []);
+      planMap.get(plan.block_id).push(plan);
+    });
     this.blocks = blockData.data.map((block) => ({
       ...block,
-      plans: planMap.get(String(block.block_id)) || [],
+      plans: planMap.get(planBlockId(block)) || [],
     }));
     this.els = planEls();
-    this.els.date.value = planToday();
-    this.seconds = planNowSecond();
+    this.els.date.value = todayText();
+    this.seconds = nowSeconds();
     this.els.slider.value = this.seconds;
     this.els.popup.hidden = true;
     this.els.popupTitle.textContent = "用空计划详情";
-    this.els.popup.style.left = "10px";
-    this.els.popup.style.top = "10px";
-    this.els.popup.style.right = "auto";
-    this.els.popup.style.bottom = "auto";
-    this.els.popup.style.removeProperty("--arrow-left");
     this.viewer = AirspaceMap.createViewer();
     this.bindForm();
     this.bindMap();
@@ -139,141 +165,103 @@ window.AirspacePlanPage = {
     this.viewer = null;
     this.source = null;
     this.entities.clear();
-    this.entityStates.clear();
     this.currentBlocks = [];
-  },
-
-  activeSegment(segment) {
-    const start = planSeconds(segment.start_time);
-    const end = planSeconds(segment.end_time);
-    if (start === end) return true;
-    return end > start ? this.seconds >= start && this.seconds < end : this.seconds >= start || this.seconds < end;
   },
 
   status(block) {
     if (!block.plans.length) return "NOT_APPLIED";
-    let enabled = false;
-    for (const plan of block.plans) {
-      if (plan.plan_status !== "1") continue;
-      enabled = true;
-      if (plan.time_plan.some((segment) => this.activeSegment(segment))) return "ACTIVE";
-    }
-    return enabled ? "APPLIED" : "DISABLED";
+    const usablePlans = block.plans.filter((plan) => parsePlanStatus(plan.plan_status));
+    if (!usablePlans.length) return "DISABLED";
+    return usablePlans.some((plan) => plan.timeSegments.some((segment) => activeSegment(segment, this.seconds)))
+      ? "ACTIVE"
+      : "APPLIED";
   },
 
   filtered() {
-    const els = this.els;
-    const code = els.code.value.trim().toLowerCase();
-    const name = els.name.value.trim().toLowerCase();
-    return this.blocks.map((block) => ({ ...block, plans: block.plans.filter((plan) => plan.use_date === els.date.value) })).filter((block) =>
-      (!code || block.airspace_code.toLowerCase().includes(code)) &&
-      (!name || block.airspace_name.toLowerCase().includes(name)) &&
-      (!els.type.value || block.airspace_type === els.type.value) &&
-      (!els.state.value || block.airspace_state === els.state.value)
-    );
+    const code = this.els.code.value.trim().toLowerCase();
+    const name = this.els.name.value.trim().toLowerCase();
+    return this.blocks
+      .map((block) => ({ ...block, plans: block.plans.filter((plan) => plan.use_date === this.els.date.value) }))
+      .filter((block) =>
+        (!code || block.airspace_code.toLowerCase().includes(code)) &&
+        (!name || block.airspace_name.toLowerCase().includes(name)) &&
+        (!this.els.type.value || block.airspace_type === this.els.type.value) &&
+        (!this.els.state.value || String(block.use_enabled) === this.els.state.value)
+      );
   },
 
   render() {
     const blocks = this.filtered();
-    const totalPages = Math.max(1, Math.ceil(blocks.length / this.pageSize));
-    if (this.pageNo > totalPages) this.pageNo = totalPages;
-    const start = (this.pageNo - 1) * this.pageSize;
-    const pageBlocks = blocks.slice(start, start + this.pageSize);
-    this.els.count.textContent = `${blocks.length} 个区块`;
-    this.els.time.textContent = planTimeText(this.seconds);
-    this.els.clock.textContent = planTimeText(this.seconds);
-    this.els.dateText.textContent = this.els.date.value;
-    const active = blocks.filter((b) => this.status(b) === "ACTIVE").length;
-    const applied = blocks.filter((b) => this.status(b) === "APPLIED").length;
-    const none = blocks.filter((b) => this.status(b) === "NOT_APPLIED").length;
-    this.els.note.textContent = `当前 ${planTimeText(this.seconds)}：${active} 个生效，${applied} 个已申请未生效，${none} 个当天未申请。`;
-    this.els.list.innerHTML = pageBlocks.map((block) => {
-      const state = block.airspace_state;
-      return `<div class="block-row" data-id="${block.block_id}"><i class="status-dot ${state.toLowerCase()}"></i><div><div class="block-title">${block.airspace_code} · ${block.airspace_name}</div><div class="block-meta">${PLAN_TYPES[block.airspace_type]} · ${block.plans.length} 条当天计划</div></div><div class="block-row-actions"><span class="status-label ${state.toLowerCase()}">${PLAN_STATES[state]}</span><button class="secondary" data-action="add-plan" data-id="${block.block_id}" type="button">新增</button></div></div>`;
-    }).join("");
-    this.els.list.querySelectorAll("[data-id]").forEach((row) => row.addEventListener("click", () => this.showBlock(row.dataset.id)));
-    this.bindPlanRowActions();
-    this.renderPager(blocks.length, totalPages);
+    this.currentBlocks = blocks;
+    this.renderList(blocks);
     this.renderTimeline(blocks);
     this.draw(blocks);
+    this.updatePlaybackState();
   },
 
-  renderPager(total, totalPages) {
-    this.els.pager.innerHTML = `
-      <button class="secondary" data-page-action="prev" ${this.pageNo <= 1 ? "disabled" : ""}>上一页</button>
-      <span>${this.pageNo}/${totalPages} 页 · 共 ${total} 条</span>
-      <button class="secondary" data-page-action="next" ${this.pageNo >= totalPages ? "disabled" : ""}>下一页</button>
+  renderList(blocks) {
+    this.els.count.textContent = `${blocks.length} 个空域`;
+    this.els.list.innerHTML = `
+      <div class="plan-grid" role="table">
+        <div class="plan-grid-head" role="row">
+          <label class="plan-check"><input type="checkbox" id="planCheckAll" /></label>
+          <strong>空域编号</strong>
+          <strong>空域名称</strong>
+          <strong>可飞时段</strong>
+        </div>
+        ${blocks.map((block) => `
+          <div class="plan-grid-row ${this.status(block).toLowerCase()}" data-id="${planBlockId(block)}" role="row">
+            <label class="plan-check"><input type="checkbox" data-plan-check="${planBlockId(block)}" /></label>
+            <span>${planTableCode(block)}</span>
+            <span>${block.airspace_name}</span>
+            <span class="plan-time-cell">${planTimeCell(block)}<em>${PLAN_STATUS[this.status(block)]}</em></span>
+          </div>
+        `).join("")}
+      </div>
     `;
-    this.els.pager.querySelector("[data-page-action='prev']").addEventListener("click", () => {
-      if (this.pageNo <= 1) return;
-      this.pageNo -= 1;
-      this.renderListOnly();
+    this.els.list.querySelectorAll(".plan-grid-row").forEach((row) => {
+      row.addEventListener("click", (event) => {
+        if (event.target.matches("input")) return;
+        this.showBlock(row.dataset.id);
+      });
     });
-    this.els.pager.querySelector("[data-page-action='next']").addEventListener("click", () => {
-      if (this.pageNo >= totalPages) return;
-      this.pageNo += 1;
-      this.renderListOnly();
+    this.els.list.querySelector("#planCheckAll")?.addEventListener("change", (event) => {
+      this.els.list.querySelectorAll("[data-plan-check]").forEach((input) => {
+        input.checked = event.target.checked;
+      });
     });
+    this.els.pager.innerHTML = "";
   },
 
-  renderListOnly() {
-    const blocks = this.filtered();
-    const totalPages = Math.max(1, Math.ceil(blocks.length / this.pageSize));
-    if (this.pageNo > totalPages) this.pageNo = totalPages;
-    const start = (this.pageNo - 1) * this.pageSize;
-    const pageBlocks = blocks.slice(start, start + this.pageSize);
-    this.els.list.innerHTML = pageBlocks.map((block) => {
-      const state = block.airspace_state;
-      return `<div class="block-row" data-id="${block.block_id}"><i class="status-dot ${state.toLowerCase()}"></i><div><div class="block-title">${block.airspace_code} · ${block.airspace_name}</div><div class="block-meta">${PLAN_TYPES[block.airspace_type]} · ${block.plans.length} 条当天计划</div></div><div class="block-row-actions"><span class="status-label ${state.toLowerCase()}">${PLAN_STATES[state]}</span><button class="secondary" data-action="add-plan" data-id="${block.block_id}" type="button">新增</button></div></div>`;
-    }).join("");
-    this.els.list.querySelectorAll("[data-id]").forEach((row) => row.addEventListener("click", () => this.showBlock(row.dataset.id)));
-    this.bindPlanRowActions();
-    this.renderPager(blocks.length, totalPages);
-  },
-
-  openPlanForm(blockId, editFirst = false) {
+  openPlanForm(blockId) {
     const block = blockId
-      ? this.blocks.find((item) => String(item.block_id) === String(blockId))
+      ? this.blocks.find((item) => planBlockId(item) === String(blockId))
       : this.filtered()[0] || this.blocks[0];
     if (!block) return;
-    const plan = editFirst
-      ? block.plans.find((item) => item.use_date === this.els.date.value) || null
-      : null;
-    this.editingPlan = plan ? { blockId: block.block_id, planId: plan.plan_id } : null;
-    this.els.formTitle.textContent = plan ? "编辑用空计划" : "新增用空计划";
-    this.els.formBlock.innerHTML = this.blocks
-      .map((item) => `<option value="${item.block_id}">${item.airspace_code} · ${item.airspace_name}</option>`)
-      .join("");
-    this.els.formBlock.value = String(block.block_id);
-    this.els.formDate.value = plan?.use_date || this.els.date.value;
-    this.els.formStart.value = plan?.time_plan?.[0]?.start_time || "09:00:00";
-    this.els.formEnd.value = plan?.time_plan?.[0]?.end_time || "10:00:00";
-    this.els.formMinHeight.value = plan?.min_height ?? 0;
-    this.els.formMaxHeight.value = plan?.max_height ?? 120;
-    this.els.formBufferHeight.value = plan?.buffer_height ?? 10;
-    this.els.formStatus.value = plan?.plan_status || "1";
-    this.els.formRemark.value = plan?.remark || "";
+    this.editingPlan = null;
+    this.els.formTitle.textContent = "新增用空计划";
+    this.els.formBlock.innerHTML = this.blocks.map((item) => `<option value="${planBlockId(item)}">${item.airspace_code} · ${item.airspace_name}</option>`).join("");
+    this.els.formBlock.value = planBlockId(block);
+    this.els.formDate.value = this.els.date.value;
+    this.els.formStart.value = "09:00:00";
+    this.els.formEnd.value = "10:00:00";
+    this.els.formStatus.value = "false";
+    this.els.formRemark.value = "";
     this.els.modal.hidden = false;
   },
 
-  openPlanFormById(blockId, planId) {
-    const block = this.blocks.find((item) => String(item.block_id) === String(blockId));
-    if (!block) return;
-    const plan = block.plans.find((item) => String(item.plan_id) === String(planId));
-    if (!plan) return;
-    this.editingPlan = { blockId: block.block_id, planId: plan.plan_id };
+  openPlanFormById(blockId, id) {
+    const block = this.blocks.find((item) => planBlockId(item) === String(blockId));
+    const plan = block?.plans.find((item) => planId(item) === String(id));
+    if (!block || !plan) return;
+    this.editingPlan = { blockId: planBlockId(block), planId: planId(plan) };
     this.els.formTitle.textContent = "编辑用空计划";
-    this.els.formBlock.innerHTML = this.blocks
-      .map((item) => `<option value="${item.block_id}">${item.airspace_code} · ${item.airspace_name}</option>`)
-      .join("");
-    this.els.formBlock.value = String(block.block_id);
+    this.els.formBlock.innerHTML = this.blocks.map((item) => `<option value="${planBlockId(item)}">${item.airspace_code} · ${item.airspace_name}</option>`).join("");
+    this.els.formBlock.value = planBlockId(block);
     this.els.formDate.value = plan.use_date;
-    this.els.formStart.value = plan.time_plan?.[0]?.start_time || "09:00:00";
-    this.els.formEnd.value = plan.time_plan?.[0]?.end_time || "10:00:00";
-    this.els.formMinHeight.value = plan.min_height ?? 0;
-    this.els.formMaxHeight.value = plan.max_height ?? 120;
-    this.els.formBufferHeight.value = plan.buffer_height ?? 10;
-    this.els.formStatus.value = plan.plan_status || "1";
+    this.els.formStart.value = plan.timeSegments[0]?.startTime || "09:00:00";
+    this.els.formEnd.value = plan.timeSegments[0]?.endTime || "10:00:00";
+    this.els.formStatus.value = String(plan.plan_status);
     this.els.formRemark.value = plan.remark || "";
     this.els.modal.hidden = false;
   },
@@ -284,138 +272,113 @@ window.AirspacePlanPage = {
   },
 
   savePlanForm() {
-    const block = this.blocks.find((item) => String(item.block_id) === String(this.els.formBlock.value));
+    const block = this.blocks.find((item) => planBlockId(item) === String(this.els.formBlock.value));
     if (!block) return;
     let plan = null;
     if (this.editingPlan) {
-      const oldBlock = this.blocks.find((item) => String(item.block_id) === String(this.editingPlan.blockId));
-      plan = oldBlock?.plans.find((item) => String(item.plan_id) === String(this.editingPlan.planId));
+      const oldBlock = this.blocks.find((item) => planBlockId(item) === String(this.editingPlan.blockId));
+      plan = oldBlock?.plans.find((item) => planId(item) === String(this.editingPlan.planId));
       if (oldBlock && oldBlock !== block && plan) {
-        oldBlock.plans = oldBlock.plans.filter((item) => String(item.plan_id) !== String(plan.plan_id));
+        oldBlock.plans = oldBlock.plans.filter((item) => planId(item) !== planId(plan));
         block.plans.push(plan);
       }
     }
     if (!plan) {
-      plan = {
-        plan_id: this.nextPlanId(),
-        plan_outid: `PLAN-DEMO-${Date.now()}`,
-      };
+      plan = { id: this.nextPlanId(), block_id: planBlockId(block), create_user: "system" };
       block.plans.push(plan);
     }
+    plan.block_id = planBlockId(block);
     plan.use_date = this.els.formDate.value;
-    plan.time_plan = [{
-      start_time: this.els.formStart.value,
-      end_time: this.els.formEnd.value,
-    }];
-    plan.min_height = Number(this.els.formMinHeight.value || 0);
-    plan.max_height = Number(this.els.formMaxHeight.value || 0);
-    plan.buffer_height = Number(this.els.formBufferHeight.value || 0);
+    plan.timeSegments = [{ startTime: this.els.formStart.value, endTime: this.els.formEnd.value }];
+    plan.time_plan = JSON.stringify(plan.timeSegments);
     plan.plan_status = this.els.formStatus.value;
     plan.remark = this.els.formRemark.value.trim();
+    plan.update_user = "demo";
+    plan.update_time = new Date().toISOString();
     this.closePlanForm();
-    this.pageNo = 1;
     this.render();
   },
 
   nextPlanId() {
-    return this.blocks.reduce(
-      (max, block) => Math.max(max, ...block.plans.map((plan) => Number(plan.plan_id) || 0)),
-      0,
-    ) + 1;
+    return this.blocks.reduce((max, block) => Math.max(max, ...block.plans.map((plan) => Number(plan.id) || 0)), 0) + 1;
   },
 
-  deletePlan(blockId) {
-    const block = this.blocks.find((item) => String(item.block_id) === String(blockId));
+  deletePlanById(blockId, id) {
+    const block = this.blocks.find((item) => planBlockId(item) === String(blockId));
     if (!block) return;
-    const plan = block.plans.find((item) => item.use_date === this.els.date.value);
-    if (!plan) return;
-    block.plans = block.plans.filter((item) => String(item.plan_id) !== String(plan.plan_id));
-    this.render();
-  },
-
-  deletePlanById(blockId, planId) {
-    const block = this.blocks.find((item) => String(item.block_id) === String(blockId));
-    if (!block) return;
-    block.plans = block.plans.filter((item) => String(item.plan_id) !== String(planId));
+    block.plans = block.plans.filter((item) => planId(item) !== String(id));
     this.els.popup.hidden = true;
     this.render();
   },
 
-  bindPlanRowActions() {
-    this.els.list.querySelectorAll("[data-action='add-plan']").forEach((button) => {
-      button.addEventListener("click", (event) => {
-        event.stopPropagation();
-        this.openPlanForm(button.dataset.id);
-      });
-    });
-  },
-
   draw(blocks) {
-    this.currentBlocks = blocks;
-    const featureCollection = { type: "FeatureCollection", features: blocks.map((block) => ({ type: "Feature", properties: { blockId: block.block_id, code: block.airspace_code, status: block.airspace_state }, geometry: block.geom.geometry })) };
+    const featureCollection = {
+      type: "FeatureCollection",
+      features: [
+        ...AirspaceMap.airspaceFeatures(this.airspaces),
+        ...blocks.map((block) => ({
+          type: "Feature",
+          properties: { blockId: planBlockId(block), code: block.airspace_code, status: this.status(block) },
+          geometry: AirspaceMap.displayGeometry(block),
+        })).filter((feature) => feature.geometry),
+      ],
+    };
     Cesium.GeoJsonDataSource.load(featureCollection, { stroke: Cesium.Color.WHITE, fill: Cesium.Color.YELLOW.withAlpha(0.5), strokeWidth: 4 }).then((source) => {
       if (this.source) this.viewer.dataSources.remove(this.source, true);
       this.source = source;
       this.entities.clear();
-      this.entityStates.clear();
       this.viewer.dataSources.add(source);
+      AirspaceMap.styleMainAirspaces(source);
       source.entities.values.forEach((entity) => {
+        if (entity.properties?.kind?.getValue() === "main_airspace") return;
         const id = String(entity.properties.blockId.getValue());
-        const code = entity.properties.code.getValue();
-        const status = entity.properties.status.getValue();
-        const block = blocks.find((item) => String(item.block_id) === id);
+        const block = blocks.find((item) => planBlockId(item) === id);
+        const status = this.status(block);
         entity.polygon.material = planColor(status);
         entity.polygon.outline = true;
         entity.polygon.outlineColor = Cesium.Color.WHITE;
-        entity.label = new Cesium.LabelGraphics({ text: code, font: "14px Microsoft YaHei", fillColor: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK, outlineWidth: 3, style: Cesium.LabelStyle.FILL_AND_OUTLINE, disableDepthTestDistance: Number.POSITIVE_INFINITY });
+        entity.position = AirspaceMap.center(block, 80);
+        entity.label = new Cesium.LabelGraphics({ text: block.airspace_code, font: "14px Microsoft YaHei", fillColor: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK, outlineWidth: 3, style: Cesium.LabelStyle.FILL_AND_OUTLINE, disableDepthTestDistance: Number.POSITIVE_INFINITY });
         this.entities.set(id, entity);
       });
-      this.updatePlaybackState();
       if (source.entities.values.length) this.viewer.zoomTo(source);
     });
   },
 
   updatePlaybackState() {
     const blocks = this.currentBlocks.length ? this.currentBlocks : this.filtered();
-    const active = blocks.filter((b) => this.status(b) === "ACTIVE").length;
-    const applied = blocks.filter((b) => this.status(b) === "APPLIED").length;
-    const none = blocks.filter((b) => this.status(b) === "NOT_APPLIED").length;
-    this.els.time.textContent = planTimeText(this.seconds);
-    this.els.clock.textContent = planTimeText(this.seconds);
+    const active = blocks.filter((block) => this.status(block) === "ACTIVE").length;
+    const applied = blocks.filter((block) => this.status(block) === "APPLIED").length;
+    const none = blocks.filter((block) => this.status(block) === "NOT_APPLIED").length;
+    this.els.time.textContent = timeText(this.seconds);
+    this.els.clock.textContent = timeText(this.seconds);
     this.els.dateText.textContent = this.els.date.value;
-    this.els.note.textContent = `当前 ${planTimeText(this.seconds)}：${active} 个生效，${applied} 个已申请未生效，${none} 个当天未申请。`;
+    this.els.note.textContent = `当前 ${timeText(this.seconds)}：${active} 个生效，${applied} 个有计划未生效，${none} 个当天无计划。`;
     blocks.forEach((block) => {
-      const entity = this.entities.get(String(block.block_id));
+      const entity = this.entities.get(planBlockId(block));
       if (!entity) return;
-      const heightRange = planHeightRange(block, (segment) => this.activeSegment(segment));
-      const stateKey = heightRange
-        ? `solid:${heightRange.minHeight}:${heightRange.fenceHeight}`
-        : "flat";
-      if (this.entityStates.get(String(block.block_id)) === stateKey) return;
-      this.entityStates.set(String(block.block_id), stateKey);
-      entity.show = true;
-      if (heightRange) {
-        entity.position = AirspaceMap.center(block, heightRange.fenceHeight + 80);
-        entity.polygon.height = heightRange.minHeight;
-        entity.polygon.extrudedHeight = heightRange.fenceHeight;
-        entity.polygon.perPositionHeight = false;
+      entity.polygon.material = planColor(this.status(block));
+      const activePlan = block.plans.find((plan) => parsePlanStatus(plan.plan_status) && plan.timeSegments.some((segment) => activeSegment(segment, this.seconds)));
+      if (activePlan) {
+        entity.polygon.height = 0;
+        entity.polygon.extrudedHeight = Number(block.airspace_height || 200);
+        entity.position = AirspaceMap.center(block, Number(block.airspace_height || 200) + 80);
       } else {
-        entity.position = AirspaceMap.center(block, 80);
         entity.polygon.height = undefined;
         entity.polygon.extrudedHeight = undefined;
-        entity.polygon.perPositionHeight = false;
+        entity.position = AirspaceMap.center(block, 80);
       }
     });
   },
 
   renderTimeline(blocks) {
     const segments = [];
-    blocks.forEach((block) => block.plans.filter((p) => p.plan_status === "1").forEach((plan) => plan.time_plan.forEach((segment) => {
-      const start = planSeconds(segment.start_time);
-      const end = planSeconds(segment.end_time);
+    blocks.forEach((block) => block.plans.filter((plan) => parsePlanStatus(plan.plan_status)).forEach((plan) => plan.timeSegments.forEach((segment) => {
+      const start = secondsOf(segment.startTime);
+      const end = secondsOf(segment.endTime);
       if (end > start) segments.push({ start, end }); else { segments.push({ start, end: 86400 }); segments.push({ start: 0, end }); }
     })));
-    this.els.segments.innerHTML = segments.map((s) => `<i class="segment" style="left:${s.start / 864}%;width:${(s.end - s.start) / 864}%"></i>`).join("");
+    this.els.segments.innerHTML = segments.map((segment) => `<i class="segment" style="left:${segment.start / 864}%;width:${(segment.end - segment.start) / 864}%"></i>`).join("");
   },
 
   bindMap() {
@@ -426,19 +389,14 @@ window.AirspacePlanPage = {
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
   },
 
-  flyTo(block) {
-    AirspaceMap.flyToBlock(this.viewer, block);
-  },
-
   showBlock(id) {
-    const block = this.filtered().find((item) => String(item.block_id) === String(id));
+    const block = this.filtered().find((item) => planBlockId(item) === String(id));
     if (!block) return;
-    this.flyTo(block);
+    AirspaceMap.flyToBlock(this.viewer, block);
     const planHtml = block.plans.length ? block.plans.map((plan) => {
-      const time = plan.time_plan.map((s) => `${s.start_time} - ${s.end_time}`).join("，");
-      const fenceHeight = Number(plan.max_height || 0) + Number(plan.buffer_height || 0);
-      return `<div class="popup-block"><strong>${block.airspace_name}</strong><p>空域编号：${block.airspace_code}</p><p>高度层：${plan.min_height}-${plan.max_height}m</p><p>可用时段：${time}</p><p>状态：${plan.plan_status === "1" ? "可用" : "不可用"}</p><p>缓冲高度：${plan.buffer_height}m</p><p>管控高度：${fenceHeight}m</p><div class="popup-actions"><button class="secondary" data-popup-action="edit-plan" data-block-id="${block.block_id}" data-plan-id="${plan.plan_id}" type="button">编辑</button><button class="secondary" data-popup-action="delete-plan" data-block-id="${block.block_id}" data-plan-id="${plan.plan_id}" type="button">删除</button></div></div>`;
-    }).join("") : `<div class="popup-block"><strong>${block.airspace_name}</strong><p>空域编号：${block.airspace_code}</p><p>用空日期：${this.els.date.value}</p><p>当天未申请飞行计划</p></div>`;
+      const time = plan.timeSegments.map((segment) => `${segment.startTime} - ${segment.endTime}`).join("，");
+      return `<div class="popup-block"><strong>${block.airspace_name}</strong><p>空域编号：${block.airspace_code}</p><p>使用日期：${plan.use_date}</p><p>用空时段：${time}</p><p>计划状态：${parsePlanStatus(plan.plan_status) ? "可用" : "不可用"}</p><p>修改人：${plan.update_user || "-"}</p><p>备注：${plan.remark || "-"}</p><div class="popup-actions"><button class="secondary" data-popup-action="edit-plan" data-block-id="${planBlockId(block)}" data-plan-id="${planId(plan)}" type="button">编辑</button><button class="secondary" data-popup-action="delete-plan" data-block-id="${planBlockId(block)}" data-plan-id="${planId(plan)}" type="button">删除</button></div></div>`;
+    }).join("") : `<div class="popup-block"><strong>${block.airspace_name}</strong><p>空域编号：${block.airspace_code}</p><p>使用日期：${this.els.date.value}</p><p>当天无用空计划</p></div>`;
     this.els.popupTitle.textContent = "用空计划详情";
     this.els.popupContent.innerHTML = planHtml;
     this.els.popupContent.querySelectorAll("[data-popup-action='edit-plan']").forEach((button) => {
@@ -470,4 +428,3 @@ window.AirspacePlanPage = {
     if (this.playing) this.timer = setInterval(() => this.setSeconds(this.seconds + 1 >= 86400 ? 0 : this.seconds + 1), 1000);
   },
 };
-

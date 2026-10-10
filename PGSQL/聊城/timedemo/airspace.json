@@ -1,0 +1,40 @@
+{
+  "code": 0,
+  "message": "操作成功",
+  "data": [
+    {
+      "id": "liaochengzhuchengqu",
+      "project_id": "d10326d5a9894cd6b8b5bd365a103394",
+      "airspace_code": "liaochengzhuchengqu",
+      "airspace_name": "空域16主区域",
+      "airspace_height": 200,
+      "airspace_radius": null,
+      "airspace_area": null,
+      "airspace_perimeter": null,
+      "use_enabled": true,
+      "remark": "主区域，十点连线范围内，真高200米（含）以下",
+      "create_user": "system",
+      "update_user": "system",
+      "geom": {
+        "type": "Feature",
+        "properties": {},
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [[
+            [115.741667, 36.717778, 0],
+            [115.708056, 36.695833, 0],
+            [115.735833, 36.541944, 0],
+            [115.653889, 36.432778, 0],
+            [115.705278, 36.255833, 0],
+            [116.264167, 36.270833, 0],
+            [116.262778, 36.558889, 0],
+            [116.055, 36.566389, 0],
+            [115.926111, 36.700556, 0],
+            [115.890556, 36.724444, 0],
+            [115.741667, 36.717778, 0]
+          ]]
+        }
+      }
+    }
+  ]
+}

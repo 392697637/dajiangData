@@ -1,6 +1,28 @@
 ﻿const AIRSPACE_TYPES = { CONTROL: "管制空域", MONITOR: "监视空域", REPORT: "报告空域" };
 const AIRSPACE_STATES = { CONTROL: "管制状态", MONITOR: "监控状态", REPORT: "报警状态" };
 
+const DEFAULT_PROJECT_ID = "d10326d5a9894cd6b8b5bd365a103394";
+
+function blockId(block) {
+  return String(block.id ?? block.block_id);
+}
+
+function blockFeature(block) {
+  return {
+    type: "Feature",
+    properties: { blockId: blockId(block), code: block.airspace_code, enabled: block.use_enabled },
+    geometry: AirspaceMap.displayGeometry(block),
+  };
+}
+
+function blockTypeText(type) {
+  return ({ POINT: "点", LINE: "线", POLYGON: "面" })[type] || type || "-";
+}
+
+function blockEnabledText(enabled) {
+  return enabled ? "启用" : "停用";
+}
+
 function blockEls() {
   return {
     type: document.querySelector("#airspaceType"),
@@ -15,18 +37,28 @@ function blockEls() {
     popupContent: document.querySelector("#popupContent"),
     popupClose: document.querySelector("#popupClose"),
     add: document.querySelector("#addBlockBtn"),
+    sidebarAdd: document.querySelector("#sidebarAddBlockBtn"),
     modal: document.querySelector("#blockFormModal"),
     formTitle: document.querySelector("#blockFormTitle"),
     formClose: document.querySelector("#blockFormClose"),
     formCancel: document.querySelector("#blockFormCancel"),
+    formDelete: document.querySelector("#blockFormDelete"),
     formSave: document.querySelector("#blockFormSave"),
     formCode: document.querySelector("#formAirspaceCode"),
     formName: document.querySelector("#formAirspaceName"),
+    formHeight: document.querySelector("#formAirspaceHeight"),
     formType: document.querySelector("#formAirspaceType"),
+    shapePoint: document.querySelector("#shapePoint"),
+    shapePolygon: document.querySelector("#shapePolygon"),
     formState: document.querySelector("#formAirspaceState"),
+    stateEnable: document.querySelector("#formStateEnable"),
+    stateDisable: document.querySelector("#formStateDisable"),
     formUnitName: document.querySelector("#formUnitName"),
     formUnitId: document.querySelector("#formUnitId"),
     formArea: document.querySelector("#formAirspaceArea"),
+    formPerimeter: document.querySelector("#formAirspacePerimeter"),
+    formCoords: document.querySelector("#formAirspaceCoords"),
+    formPolygon: document.querySelector("#formAirspacePolygon"),
     draw: document.querySelector("#blockDrawBtn"),
     clearDraw: document.querySelector("#blockClearDrawBtn"),
     drawTip: document.querySelector("#blockDrawTip"),
@@ -41,6 +73,7 @@ window.AirspaceBlockPage = {
   viewer: null,
   source: null,
   blocks: [],
+  airspaces: [],
   entities: new Map(),
   popupAnchor: null,
   popupListener: null,
@@ -52,8 +85,9 @@ window.AirspaceBlockPage = {
   pageSize: 6,
   editingId: null,
 
-  init(data) {
+  init(data, airspaceData) {
     this.blocks = data.data;
+    this.airspaces = airspaceData?.data || [];
     this.els = blockEls();
     this.els.popup.hidden = true;
     this.els.popupTitle.textContent = "空域区块详情";
@@ -82,7 +116,7 @@ window.AirspaceBlockPage = {
       const picked = this.viewer.scene.pick(event.position);
       if (!Cesium.defined(picked) || !picked.id?.properties?.blockId) return;
       const id = String(picked.id.properties.blockId.getValue());
-      const block = this.filtered().find((item) => String(item.block_id) === id);
+      const block = this.filtered().find((item) => blockId(item) === id);
       if (block) this.showPopup(block, event.position);
     };
     this.viewer.screenSpaceEventHandler.setInputAction(this.clickHandler, Cesium.ScreenSpaceEventType.LEFT_CLICK);
@@ -92,11 +126,21 @@ window.AirspaceBlockPage = {
 
   bindForm() {
     this.els.add.onclick = () => this.openForm();
+    this.els.sidebarAdd.onclick = () => this.openForm();
     this.els.formClose.onclick = () => this.closeForm();
     this.els.formCancel.onclick = () => this.closeForm();
     this.els.formSave.onclick = () => this.saveForm();
+    this.els.formDelete.onclick = () => {
+      if (!this.editingId) return;
+      this.deleteBlock(this.editingId);
+      this.closeForm();
+    };
     this.els.draw.onclick = () => this.startDraw();
     this.els.clearDraw.onclick = () => this.clearDraft();
+    this.els.shapePoint.onchange = () => this.setShapeType("POINT");
+    this.els.shapePolygon.onchange = () => this.setShapeType("POLYGON");
+    this.els.stateEnable.onclick = () => this.setEnabled(true);
+    this.els.stateDisable.onclick = () => this.setEnabled(false);
   },
 
   filtered() {
@@ -107,7 +151,7 @@ window.AirspaceBlockPage = {
       (!code || block.airspace_code.toLowerCase().includes(code)) &&
       (!name || block.airspace_name.toLowerCase().includes(name)) &&
       (!els.type.value || block.airspace_type === els.type.value) &&
-      (!els.state.value || block.airspace_state === els.state.value)
+      (!els.state.value || String(block.use_enabled) === els.state.value)
     );
   },
 
@@ -119,17 +163,22 @@ window.AirspaceBlockPage = {
 
   openForm(id) {
     const block = id
-      ? this.blocks.find((item) => String(item.block_id) === String(id))
+      ? this.blocks.find((item) => blockId(item) === String(id))
       : null;
-    this.editingId = block ? block.block_id : null;
-    this.els.formTitle.textContent = block ? "编辑空域区块" : "新增空域区块";
+    this.editingId = block ? blockId(block) : null;
+    this.els.formDelete.hidden = !block;
+    this.els.formTitle.textContent = "空域信息";
     this.els.formCode.value = block?.airspace_code || "";
     this.els.formName.value = block?.airspace_name || "";
-    this.els.formType.value = block?.airspace_type || "CONTROL";
-    this.els.formState.value = block?.airspace_state || "CONTROL";
-    this.els.formUnitName.value = block?.unit_name || "";
-    this.els.formUnitId.value = block?.unit_id || "";
+    this.els.formHeight.value = block?.airspace_height ?? 120;
+    this.setShapeType(block?.airspace_type === "POLYGON" ? "POLYGON" : "POINT");
+    this.setEnabled(block?.use_enabled ?? true);
+    this.els.formUnitName.value = block?.airspace_radius || "";
+    this.els.formUnitId.value = block?.project_id || DEFAULT_PROJECT_ID;
     this.els.formArea.value = block?.airspace_area || "";
+    this.els.formPerimeter.value = block?.airspace_perimeter || "";
+    this.els.formCoords.value = this.coordText(block);
+    this.els.formPolygon.value = this.polygonText(block);
     this.draftGeom = block ? structuredClone(block.geom) : null;
     this.showDraft();
     this.setDrawTip(block ? "可重新绘制，也可直接保存原面" : "点击绘制面后，左键取点，右键结束");
@@ -148,7 +197,7 @@ window.AirspaceBlockPage = {
     const name = this.els.formName.value.trim();
     if (!code || !name) return;
     if (this.editingId) {
-      const block = this.blocks.find((item) => item.block_id === this.editingId);
+      const block = this.blocks.find((item) => blockId(item) === this.editingId);
       if (block) this.applyForm(block);
     } else {
       const block = this.createBlock();
@@ -163,12 +212,41 @@ window.AirspaceBlockPage = {
   applyForm(block) {
     block.airspace_code = this.els.formCode.value.trim();
     block.airspace_name = this.els.formName.value.trim();
+    block.airspace_height = Number(this.els.formHeight.value || 0);
     block.airspace_type = this.els.formType.value;
-    block.airspace_state = this.els.formState.value;
-    block.unit_name = this.els.formUnitName.value.trim();
-    block.unit_id = this.els.formUnitId.value.trim();
+    block.use_enabled = this.els.formState.value === "true";
+    block.airspace_radius = Number(this.els.formUnitName.value || 0);
+    block.project_id = this.els.formUnitId.value.trim() || DEFAULT_PROJECT_ID;
     block.airspace_area = Number(this.els.formArea.value || 0);
+    block.airspace_perimeter = Number(this.els.formPerimeter.value || 0);
     if (this.draftGeom) block.geom = structuredClone(this.draftGeom);
+  },
+
+  setShapeType(type) {
+    this.els.formType.value = type;
+    this.els.shapePoint.checked = type === "POINT";
+    this.els.shapePolygon.checked = type === "POLYGON";
+    this.els.modal?.classList.toggle("is-polygon", type === "POLYGON");
+  },
+
+  setEnabled(enabled) {
+    this.els.formState.value = String(enabled);
+    this.els.stateEnable.classList.toggle("active", enabled);
+    this.els.stateDisable.classList.toggle("active", !enabled);
+  },
+
+  coordText(block) {
+    const coordinates = block?.geom?.geometry?.coordinates;
+    if (!coordinates) return "";
+    if (block.geom.geometry.type === "Point") return coordinates.slice(0, 2).join(",");
+    const first = coordinates?.[0]?.[0];
+    return Array.isArray(first) ? first.slice(0, 2).join(",") : "";
+  },
+
+  polygonText(block) {
+    const ring = block?.geom?.geometry?.coordinates?.[0];
+    if (!Array.isArray(ring)) return "";
+    return ring.map((point) => point.slice(0, 2).join(",")).join("\n");
   },
 
   startDraw() {
@@ -278,18 +356,21 @@ window.AirspaceBlockPage = {
   },
 
   createBlock() {
-    const maxId = this.blocks.reduce((max, item) => Math.max(max, Number(item.block_id)), 0);
+    const maxId = this.blocks.reduce((max, item) => {
+      const value = String(item.id ?? item.block_id ?? "").match(/\d+$/)?.[0];
+      return Math.max(max, Number(value) || 0);
+    }, 0);
     const id = maxId + 1;
     const offset = (id % 8) * 0.015;
     return {
-      block_id: id,
-      outid: `AS-DEMO-${String(id).padStart(3, "0")}`,
-      unit_id: "",
-      unit_name: "",
+      id: `AIRSPACE-${String(id).padStart(2, "0")}`,
+      project_id: DEFAULT_PROJECT_ID,
       airspace_code: "",
       airspace_name: "",
-      airspace_type: "CONTROL",
-      airspace_state: "CONTROL",
+      airspace_height: 200,
+      airspace_type: "POINT",
+      airspace_radius: 5000,
+      use_enabled: true,
       airspace_area: 0,
       geom: {
         type: "Feature",
@@ -309,7 +390,7 @@ window.AirspaceBlockPage = {
   },
 
   deleteBlock(id) {
-    this.blocks = this.blocks.filter((item) => String(item.block_id) !== String(id));
+    this.blocks = this.blocks.filter((item) => blockId(item) !== String(id));
     this.popupAnchor = null;
     this.els.popup.hidden = true;
     const entity = this.entities.get(String(id));
@@ -322,40 +403,27 @@ window.AirspaceBlockPage = {
 
   renderList() {
     const blocks = this.filtered();
-    const totalPages = Math.max(1, Math.ceil(blocks.length / this.pageSize));
-    if (this.pageNo > totalPages) this.pageNo = totalPages;
-    const start = (this.pageNo - 1) * this.pageSize;
-    const pageBlocks = blocks.slice(start, start + this.pageSize);
     this.els.count.textContent = `${blocks.length} 个区块`;
-    this.els.list.innerHTML = pageBlocks.map((block) => `
-      <div class="block-row" data-id="${block.block_id}">
-        <i class="status-dot control"></i>
-        <div>
-          <div class="block-title">${block.airspace_code} · ${block.airspace_name}</div>
-          <div class="block-meta">${block.unit_name || "未设置单位"} · ${block.airspace_area} 平方公里</div>
+    this.els.list.innerHTML = `
+      <div class="block-grid" role="table">
+        <div class="block-grid-head" role="row">
+          <strong>空域编号</strong>
+          <strong>空域名称</strong>
+          <strong>启用状态</strong>
         </div>
-        <div class="block-row-actions">
-          <button class="secondary" data-action="edit" data-id="${block.block_id}" type="button">编辑</button>
-          <button class="secondary" data-action="delete" data-id="${block.block_id}" type="button">删除</button>
-        </div>
-      </div>`).join("");
-    this.els.list.querySelectorAll("[data-id]").forEach((row) => {
-      if (row.dataset.action) return;
+        ${blocks.map((block) => `
+          <div class="block-grid-row" data-id="${blockId(block)}" role="row">
+            <span>${String(block.airspace_code || blockId(block)).match(/\d+$/)?.[0] ? 100 + Number(String(block.airspace_code || blockId(block)).match(/\d+$/)[0]) : block.airspace_code}</span>
+            <span>${block.airspace_name}</span>
+            <span class="${block.use_enabled ? "enabled" : "disabled"}">${block.use_enabled ? "启用" : "停用"}</span>
+          </div>
+        `).join("")}
+      </div>`;
+    this.els.list.querySelectorAll(".block-grid-row").forEach((row) => {
       row.addEventListener("click", () => this.flyTo(row.dataset.id));
+      row.addEventListener("dblclick", () => this.openForm(row.dataset.id));
     });
-    this.els.list.querySelectorAll("[data-action='edit']").forEach((button) => {
-      button.addEventListener("click", (event) => {
-        event.stopPropagation();
-        this.openForm(button.dataset.id);
-      });
-    });
-    this.els.list.querySelectorAll("[data-action='delete']").forEach((button) => {
-      button.addEventListener("click", (event) => {
-        event.stopPropagation();
-        this.deleteBlock(button.dataset.id);
-      });
-    });
-    this.renderPager(blocks.length, totalPages);
+    this.els.pager.innerHTML = "";
   },
 
   renderPager(total, totalPages) {
@@ -379,22 +447,23 @@ window.AirspaceBlockPage = {
   draw(blocks) {
     const featureCollection = {
       type: "FeatureCollection",
-      features: blocks.map((block) => ({
-        type: "Feature",
-        properties: { blockId: block.block_id, code: block.airspace_code, state: block.airspace_state },
-        geometry: block.geom.geometry,
-      })),
+      features: [
+        ...AirspaceMap.airspaceFeatures(this.airspaces),
+        ...blocks.map(blockFeature).filter((feature) => feature.geometry),
+      ],
     };
     Cesium.GeoJsonDataSource.load(featureCollection, { stroke: Cesium.Color.WHITE, fill: Cesium.Color.YELLOW.withAlpha(0.5), strokeWidth: 4 }).then((source) => {
       if (this.source) this.viewer.dataSources.remove(this.source, true);
       this.source = source;
       this.entities.clear();
       this.viewer.dataSources.add(source);
+      AirspaceMap.styleMainAirspaces(source);
       source.entities.values.forEach((entity) => {
+        if (entity.properties?.kind?.getValue() === "main_airspace") return;
         const id = String(entity.properties.blockId.getValue());
         const code = entity.properties.code.getValue();
-        const state = entity.properties.state.getValue();
-        const block = blocks.find((item) => String(item.block_id) === id);
+        const state = entity.properties.enabled.getValue() ? "CONTROL" : "DISABLED";
+        const block = blocks.find((item) => blockId(item) === id);
         entity.position = AirspaceMap.center(block, 80);
         entity.polygon.material = blockColor(state);
         entity.polygon.outline = true;
@@ -415,7 +484,7 @@ window.AirspaceBlockPage = {
   },
 
   flyTo(id) {
-    const block = this.filtered().find((item) => String(item.block_id) === String(id));
+    const block = this.filtered().find((item) => blockId(item) === String(id));
     if (!block) return;
     AirspaceMap.flyToBlock(this.viewer, block);
     this.popupAnchor = null;
@@ -456,18 +525,21 @@ window.AirspaceBlockPage = {
 
   showPopup(block) {
     const geometry = block.geom?.geometry;
-    const pointCount = geometry?.coordinates?.[0]?.length || 0;
+    const pointCount = AirspaceMap.ring(block).length;
     this.els.popupTitle.textContent = "空域区块详情";
     this.els.popupContent.innerHTML = `
       <div class="popup-block">
         <strong>${block.airspace_name}</strong>
-        <p>区块ID：${block.block_id}</p>
-        <p>第三方ID：${block.outid}</p>
+        <p>区块ID：${blockId(block)}</p>
+        <p>项目ID：${block.project_id || "-"}</p>
         <p>空域编号：${block.airspace_code}</p>
         <p>空域名称：${block.airspace_name}</p>
-        <p>所属单位：${block.unit_name}</p>
-        <p>单位ID：${block.unit_id}</p>
-        <p>面积：${block.airspace_area} 平方公里</p>
+        <p>空域类型：${blockTypeText(block.airspace_type)}</p>
+        <p>空域高度：${block.airspace_height || 0} 米</p>
+        <p>缓冲半径：${block.airspace_radius || 0} 米</p>
+        <p>面积：${Number(block.airspace_area || 0).toFixed(2)} 平方千米</p>
+        <p>周长：${Number(block.airspace_perimeter || 0).toFixed(2)} 千米</p>
+        <p>启用状态：${blockEnabledText(block.use_enabled)}</p>
         <p>空间类型：${geometry?.type || "-"}</p>
         <p>坐标点数：${pointCount}</p>
       </div>`;
