@@ -474,7 +474,7 @@ BEGIN
         SELECT
             bd.block_id,
             bd.use_date,
-            '[]',
+            NULL,
             false,
             '自动生成用空计划',
             (bd.use_date - 1 + time '23:55:55')::timestamp,
