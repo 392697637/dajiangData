@@ -2694,3 +2694,180 @@ body[data-page="plan"] .involved-row {
 body[data-page="plan"] .side-pager {
   margin-top: 0.185vh !important;
 }
+
+/* Final center plan panel tuning. */
+body[data-page="plan"] .sidebar {
+  display: grid !important;
+  grid-template-rows: 13.148vh minmax(0, 1fr) !important;
+  gap: 0.741vh !important;
+}
+
+body[data-page="plan"] .filters {
+  min-height: 0 !important;
+  height: 100% !important;
+}
+
+body[data-page="plan"] .filter-grid {
+  height: 3.704vh !important;
+}
+
+body[data-page="plan"] label.page-plan-only {
+  height: 100% !important;
+  grid-template-rows: 1.389vh 2.5vh !important;
+}
+
+body[data-page="plan"] label.page-plan-only input {
+  height: 2.5vh !important;
+  min-height: 0 !important;
+  padding: 0 0.521vw !important;
+}
+
+body[data-page="plan"] .filter-actions {
+  height: 2.778vh !important;
+  display: grid !important;
+  grid-template-columns: 3.125vw 3.125vw 5.208vw 5.208vw !important;
+  gap: 0.313vw !important;
+}
+
+body[data-page="plan"] .filter-actions button,
+body[data-page="plan"] .filter-actions #resetBtn,
+body[data-page="plan"] .filter-actions #publishPlanBtn {
+  width: 100% !important;
+  min-width: 0 !important;
+  height: 2.778vh !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  white-space: nowrap !important;
+}
+
+body[data-page="plan"] .results {
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
+body[data-page="plan"] .plan-grid {
+  grid-template-rows: 2.87vh repeat(9, 2.963vh) var(--d-pager-h) !important;
+  align-content: start !important;
+}
+
+body[data-page="plan"] .plan-grid-head,
+body[data-page="plan"] .plan-grid-row {
+  height: 2.963vh !important;
+  grid-template-columns: 1.458vw 4.063vw 4.271vw minmax(0, 1fr) !important;
+  column-gap: 0.313vw !important;
+  padding: 0 0.625vw !important;
+}
+
+body[data-page="plan"] .plan-grid-head {
+  height: 2.87vh !important;
+}
+
+body[data-page="plan"] .plan-check input {
+  width: 0.729vw !important;
+  height: 0.729vw !important;
+  min-height: 0 !important;
+}
+
+body[data-page="plan"] .plan-time-cell {
+  justify-content: flex-start !important;
+  align-content: center !important;
+  gap: 0.185vh 0.208vw !important;
+  line-height: 1.15 !important;
+}
+
+body[data-page="plan"] .plan-time-cell i {
+  display: inline-block !important;
+  line-height: 1.15 !important;
+  white-space: nowrap !important;
+}
+
+body[data-page="plan"] .plan-grid .side-pager {
+  align-self: center !important;
+}
+
+/* Final timeline tuning. */
+body[data-page="plan"] .plan-timeline-widget {
+  width: 82% !important;
+  max-width: none !important;
+  height: 5.56vh !important;
+  min-height: 54px !important;
+  left: 50% !important;
+  bottom: 4.17vh !important;
+  transform: translateX(-50%) !important;
+  --timeline-side: 6.25vw !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-btn {
+  width: 1.667vw !important;
+  min-width: 30px !important;
+  height: 1.667vw !important;
+  min-height: 30px !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-btn.play {
+  left: 1.667vw !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-btn.pause-ghost {
+  left: 3.75vw !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-btn.prev {
+  right: 3.75vw !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-btn.next {
+  right: 1.667vw !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-btn::before {
+  inset: 0.417vw !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-btn.play::before {
+  inset: 0.417vw 0.469vw 0.417vw 0.573vw !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-btn.pause-ghost::before {
+  inset: 0.417vw 0.521vw !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-clock {
+  top: 0.37vh !important;
+  min-width: 3.125vw !important;
+  min-height: 1.852vh !important;
+  font-size: var(--d-font-10) !important;
+  line-height: 1 !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget::after {
+  top: 2.963vh !important;
+  height: 0.833vh !important;
+  width: 1px !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-range {
+  top: 2.87vh !important;
+  left: var(--timeline-side) !important;
+  right: var(--timeline-side) !important;
+  height: 1.389vh !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-track-wrap {
+  top: 3.056vh !important;
+  left: var(--timeline-side) !important;
+  right: var(--timeline-side) !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-segments {
+  height: 2px !important;
+  margin: 0 !important;
+}
+
+body[data-page="plan"] .plan-timeline-widget .timeline-scale {
+  margin: 0.648vh 0 0 !important;
+  font-size: var(--d-font-10) !important;
+  line-height: 1 !important;
+}

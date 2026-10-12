@@ -10,6 +10,9 @@
   const planPageSize = 9;
   const taskPageSize = 5;
   const airspacePageSize = 8;
+  const timelineStart = 6 * 3600;
+  const timelineEnd = 14 * 3600;
+  const timelineDefault = 10 * 3600 + 37 * 60 + 28;
 
   function setLabelText(label, value) {
     if (!label) return;
@@ -24,6 +27,11 @@
       .flatMap((plan) => plan.timeSegments || []);
     if (!segments.length) return "--";
     return segments.map((segment) => `<i>${segment.startTime.slice(0, 5)}-${segment.endTime.slice(0, 5)}</i>`).join("");
+  }
+
+  function secondsOfTimeline(value) {
+    const parts = String(value || "00:00:00").split(":").map(Number);
+    return (parts[0] || 0) * 3600 + (parts[1] || 0) * 60 + (parts[2] || 0);
   }
 
   function sidePagerHtml(type, current, total) {
@@ -89,6 +97,11 @@
 
     page.init = ((original) => function (...args) {
       original.apply(this, args);
+      if (this.els?.slider) {
+        this.els.slider.min = String(timelineStart);
+        this.els.slider.max = String(timelineEnd);
+      }
+      if (this.seconds < timelineStart || this.seconds > timelineEnd) this.setSeconds(timelineDefault);
       applyStaticCopy();
       if (this.els?.popupTitle) this.els.popupTitle.textContent = zh("\\u7528\\u7a7a\\u8ba1\\u5212\\u8be6\\u60c5");
     })(page.init);
@@ -162,6 +175,53 @@
       bindSidePager(this, "tasks", taskPageCount);
       bindSidePager(this, "airspaces", airspacePageCount);
       this.renderTaskAnalysis();
+    };
+
+    page.renderTimeline = function (blocks) {
+      const segments = [];
+      blocks.forEach((block) => block.plans.filter((plan) => usable(plan.plan_status)).forEach((plan) => {
+        plan.timeSegments.forEach((segment) => {
+          const start = Math.max(timelineStart, secondsOfTimeline(segment.startTime));
+          const end = Math.min(timelineEnd, secondsOfTimeline(segment.endTime));
+          if (end > start) segments.push({ start, end });
+        });
+      }));
+      const span = timelineEnd - timelineStart;
+      this.els.segments.innerHTML = segments.map((segment) => {
+        const left = ((segment.start - timelineStart) / span) * 100;
+        const width = ((segment.end - segment.start) / span) * 100;
+        return `<i class="segment" style="left:${left}%;width:${width}%"></i>`;
+      }).join("");
+    };
+
+    page.setSeconds = function (value) {
+      this.seconds = Math.max(timelineStart, Math.min(timelineEnd, Number(value)));
+      this.els.slider.value = this.seconds;
+      this.updateTimelineMarker();
+      this.updatePlaybackState();
+    };
+
+    page.updateTimelineMarker = function () {
+      const timeline = this.els?.timeline;
+      if (!timeline) return;
+      const side = parseFloat(getComputedStyle(timeline).getPropertyValue("--timeline-side")) || 96;
+      const progress = (this.seconds - timelineStart) / (timelineEnd - timelineStart);
+      const marker = ((side + progress * Math.max(0, timeline.clientWidth - side * 2)) / timeline.clientWidth) * 100;
+      timeline.style.setProperty("--timeline-marker", `${marker}%`);
+    };
+
+    page.startPlay = function () {
+      this.playing = true;
+      this.els.play.textContent = zh("\\u6682\\u505c");
+      if (this.timer) clearInterval(this.timer);
+      this.timer = setInterval(() => this.setSeconds(this.seconds + 1 > timelineEnd ? timelineStart : this.seconds + 1), 1000);
+    };
+
+    page.togglePlay = function () {
+      this.playing = !this.playing;
+      this.els.play.textContent = this.playing ? zh("\\u6682\\u505c") : zh("\\u64ad\\u653e");
+      if (this.timer) clearInterval(this.timer);
+      if (this.playing) this.timer = setInterval(() => this.setSeconds(this.seconds + 1 > timelineEnd ? timelineStart : this.seconds + 1), 1000);
     };
 
     page.renderTaskAnalysis = function () {
