@@ -159,11 +159,21 @@ BEGIN
     FROM ST_DumpPoints(NEW.geom) AS dp
     LIMIT 1;
 
-    -- 点/线且配置了缓冲半径时，按米生成最终面；面或未配置半径时直接使用原始几何。
-    IF GeometryType(NEW.geom) IN ('POINT', 'MULTIPOINT', 'LINESTRING', 'MULTILINESTRING')
+    -- 点且配置了缓冲半径时生成圆形范围；线且配置了缓冲半径时生成平头矩形走廊。
+    IF GeometryType(NEW.geom) IN ('POINT', 'MULTIPOINT')
        AND COALESCE(NEW.airspace_radius, 0) > 0 THEN
         NEW.final_geom := ST_Force3D(
             ST_Buffer(NEW.geom::geography, NEW.airspace_radius)::geometry,
+            v_altitude
+        );
+    ELSIF GeometryType(NEW.geom) IN ('LINESTRING', 'MULTILINESTRING')
+       AND COALESCE(NEW.airspace_radius, 0) > 0 THEN
+        NEW.final_geom := ST_Force3D(
+            ST_Buffer(
+                NEW.geom::geography,
+                NEW.airspace_radius,
+                'endcap=flat join=mitre'
+            )::geometry,
             v_altitude
         );
     ELSE
@@ -263,6 +273,7 @@ CREATE TABLE public.bo_airspace_plan (
     block_id varchar(64) NOT NULL,
     use_date date NOT NULL,
     time_plan varchar(4000),
+    user_duration float8,
     plan_status boolean NOT NULL DEFAULT false,
     remark varchar(1000),
     create_time timestamp(6) without time zone NOT NULL DEFAULT now(),
@@ -285,6 +296,7 @@ COMMENT ON COLUMN public.bo_airspace_plan.id IS '计划主键';
 COMMENT ON COLUMN public.bo_airspace_plan.block_id IS '空域区块ID，关联bo_airspace_block.id';
 COMMENT ON COLUMN public.bo_airspace_plan.use_date IS '使用日期，分区键';
 COMMENT ON COLUMN public.bo_airspace_plan.time_plan IS '时间计划，仅保存时分秒，支持多段时间';
+COMMENT ON COLUMN public.bo_airspace_plan.user_duration IS '使用时长（单位分钟）';
 COMMENT ON COLUMN public.bo_airspace_plan.plan_status IS '计划状态：t可用；f不可用';
 COMMENT ON COLUMN public.bo_airspace_plan.remark IS '计划备注';
 COMMENT ON COLUMN public.bo_airspace_plan.create_time IS '计划创建时间';
@@ -595,3 +607,12 @@ IS '根据空域区块已有用空计划随机生成计划时间，只更新计�
 
 -- 调用示例：将今天/明天已有计划更新为3段随机模拟时间。
 SELECT public.gis_airspace_plan_demo(3, 2);
+
+-- =============================================================================
+-- 已有库增量补字段
+-- =============================================================================
+-- 使用时长，单位分钟。
+ALTER TABLE public.bo_airspace_plan
+    ADD COLUMN IF NOT EXISTS user_duration float8;
+
+COMMENT ON COLUMN public.bo_airspace_plan.user_duration IS '使用时长（单位分钟）';
