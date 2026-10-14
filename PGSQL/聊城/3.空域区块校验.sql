@@ -39,6 +39,24 @@
 --   hit_count     命中的空域区块数量
 --   hit_blockids  命中的空域区块ID数组
 --
+--   （3）任务航线空域范围和高度校验
+--   函数：public.gis_flight_airspace_check
+--   作用：校验任务航线所有航点是否全部在空域区块范围内，并检查航线高度和航点高度是否超过空域高度。
+--   规则：
+--   A、项目ID不能为空，只校验该项目下未删除且final_geom不为空的空域区块。
+--   B、航线GeoJSON不能为空，geometry必须为LineString或MultiLineString，航点坐标必须包含Z值。
+--   C、p_only_enabled=false时不判断发布/启用状态；p_only_enabled=true时只校验已启用/已发布空域。
+--   D、所有航点必须落在空域区块final_geom范围内；任一航点不在范围内时ischeck=false。
+--   E、航线高度p_route_height和航点Z高度均不能超过覆盖航点的空域区块airspace_height。
+--   F、范围和高度全部通过时ischeck=true；否则ischeck=false，调用方应阻断提交。
+--   返回：
+--   code       状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   msg        返回信息，包含校验结果或错误原因
+--   ischeck    是否通过空域范围和高度校验，true=通过，false=不通过
+--   check_type 校验结果类型：ln_within=范围内 height_over=高度超限 ln_outside=范围外
+--   zone_type  区域类型：可飞空域
+--   hit_count  命中的空域区块数量
+--
 -- 依赖说明：
 --   1. PostGIS 空间扩展。
 --   2. public.gis_geojson_to_geom(text) GeoJSON解析函数。
@@ -240,11 +258,8 @@ IS '校验航线是否命中空域区块';
 --   D. plan_status=false表示空域不可用，任务不可执行。
 --   E. plan_status=true表示空域可用，再判断任务用空时间段是否完整落在空域计划时间段内。
 --   F. 任务用空时间段未完整落在空域计划时间段内时任务不可执行。
---   G. 时间段完整在计划时间段内时，判断传入的航线高度参数。
---   H. 传入的航线高度不在空域最低/最高高度范围内时任务不可执行。
---   I. 传入的航线高度在空域最低/最高高度范围内时，判断航点高度是否在空域最低/最高高度范围内。
---   J. 航点高度不在空域最低/最高高度范围内时任务不可执行。
---   K. 航点高度在空域最低/最高高度范围内时，任务可以执行。
+--   G. 空域范围和高度由gis_flight_airspace_check统一校验。
+--   H. 空域范围、高度、计划状态和时间段均通过时，任务可以执行。
 -- 入参说明：
 --   p_project_id       项目ID。
 --   p_task_id          任务ID。
@@ -256,7 +271,7 @@ IS '校验航线是否命中空域区块';
 --   返回code、msg、ischeck、hit_count、hit_blockids。
 -- 注意事项：
 --   1. plan_status=true表示空域可用，plan_status=false表示空域不可用。
---   2. 本函数按空域命中、空域状态、时间段、航线高度、航点高度顺序校验。
+--   2. 本函数先调用gis_flight_airspace_check做空域范围和高度阻断校验，再校验空域状态和时间段。
 -- =============================================================================
 
 -- =============================================================================
@@ -291,17 +306,13 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --   2. 无用空计划：任务{task_id}不可执行：{空域名称}({空域ID})：{yyyy-MM-dd}无用空计划。
 --   3. 空域不可用：任务{task_id}不可执行：{空域名称}({空域ID})：{yyyy-MM-dd}空域不可用。
 --   4. 时间段超出计划：任务{task_id}不可执行：{空域名称}({空域ID})：{yyyy-MM-dd}任务时间段{startTime}-{endTime}超出用空计划时间段。
---   5. 航线高度低于最低高度：任务{task_id}不可执行：{空域名称}({空域ID})：航线高度{p_route_height}米低于空域最低高度{min_height}米。
---   6. 航线高度超过最高高度：任务{task_id}不可执行：{空域名称}({空域ID})：航线高度{p_route_height}米超过空域最高高度{airspace_height}米。
---   7. 航点高度低于最低高度：任务{task_id}不可执行：{空域名称}({空域ID})：航点最低高度{min_z}米低于空域最低高度{min_height}米。
---   8. 航点高度超过最高高度：任务{task_id}不可执行：{空域名称}({空域ID})：航点最高高度{max_z}米超过空域最高高度{airspace_height}米。
---   9. 全部通过：任务{task_id}经过空域区块{hit_count}个，用空计划、航线高度和航点高度校验通过，可执行。
+--   5. 空域/高度不通过：直接返回gis_flight_airspace_check的阻断原因。
+--   6. 全部通过：任务{task_id}经过空域区块{hit_count}个，空域范围、高度、用空计划和时间段校验通过，可执行。
 -- 注意事项：
 --   1. plan_status=true表示空域可用；plan_status=false表示空域不可用。
 --   2. 只有plan_status=true时才继续校验任务时间段。
---   3. 只有任务时间段完整落在计划时间段内时，才继续校验传入的航线高度参数。
---   4. 只有传入的航线高度在空域最低/最高高度范围内时，才继续校验航点高度。
---   5. 航点高度取p_route_geojson中所有航点Z值的最小值和最大值；没有Z值按参数错误处理。
+--   3. 航点高度取p_route_geojson中所有航点Z值；没有Z值按参数错误处理。
+--   4. 可飞空域范围和高度上限由gis_flight_airspace_check统一处理。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_flight_task_airspace(
     p_project_id varchar,
@@ -323,9 +334,9 @@ VOLATILE
 AS $$
 DECLARE
     v_log_sql text;
+    v_airspace_check record;
     v_route_check record;
     v_route_geom geometry;
-    v_route_point_min_height double precision;
     v_route_point_max_height double precision;
     v_use_date date;
     v_task_time_plan jsonb;
@@ -418,8 +429,8 @@ BEGIN
         RETURN;
     END;
 
-    SELECT min(ST_Z((dp).geom)), max(ST_Z((dp).geom))
-    INTO v_route_point_min_height, v_route_point_max_height
+    SELECT max(ST_Z((dp).geom))
+    INTO v_route_point_max_height
     FROM ST_DumpPoints(v_route_geom) AS dp
     WHERE ST_Z((dp).geom) IS NOT NULL;
 
@@ -430,7 +441,24 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 三、空间命中校验。未命中任何空域区块时，不再检查用空计划，任务不可执行。
+    -- 三、空域范围和高度阻断校验。该步骤统一复用第3个空域区块提交前校验函数。
+    SELECT *
+    INTO v_airspace_check
+    FROM public.gis_flight_airspace_check(p_project_id, p_route_geojson, p_route_height::numeric, true)
+    LIMIT 1;
+
+    IF COALESCE(v_airspace_check.code, 500) <> 200
+       OR COALESCE(v_airspace_check.ischeck, false) = false THEN
+        RETURN QUERY SELECT
+            COALESCE(v_airspace_check.code, 500),
+            COALESCE(v_airspace_check.msg, '空域区块提交前校验未通过'),
+            false,
+            COALESCE(v_airspace_check.hit_count, 0)::integer,
+            ARRAY[]::text[];
+        RETURN;
+    END IF;
+
+    -- 四、空间命中区块查询。这里保留区块ID数组，供后续用空计划和时间段校验使用。
     SELECT *
     INTO v_route_check
     FROM public.gis_flight_route_airspace(p_project_id, p_route_geojson)
@@ -455,12 +483,10 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 四、对命中的空域区块按A-K顺序做业务校验：
+    -- 五、对命中的空域区块做用空计划和时间段业务校验：
     -- 1. 用空日期必须存在计划；
     -- 2. plan_status必须为true，false表示空域不可用；
     -- 3. plan_status=true后，每个任务时间段必须完整落在某个计划时间段内，否则不可执行；
-    -- 4. 传入的航线高度必须在空域最低/最高高度范围内，否则不可执行；
-    -- 5. 航点高度必须在空域最低/最高高度范围内，否则不可执行。
     WITH hit_blocks AS (
         SELECT
             b.id,
@@ -592,66 +618,6 @@ BEGIN
                 AND ts.end_ts <= ps.plan_end_ts
           )
 
-        UNION ALL
-
-        SELECT DISTINCT
-            bdp.block_id,
-            bdp.block_name,
-            format('航线高度%s米低于空域最低高度%s米',
-                p_route_height, COALESCE(bdp.min_height, 0)) AS reason
-        FROM block_day_plan bdp
-        JOIN block_time_check btc
-            ON btc.block_id = bdp.block_id
-        WHERE bdp.plan_status = true
-          AND btc.is_time_valid = true
-          AND p_route_height < COALESCE(bdp.min_height, 0)
-
-        UNION ALL
-
-        SELECT DISTINCT
-            bdp.block_id,
-            bdp.block_name,
-            format('航线高度%s米超过空域最高高度%s米',
-                p_route_height, COALESCE(bdp.airspace_height, 0)) AS reason
-        FROM block_day_plan bdp
-        JOIN block_time_check btc
-            ON btc.block_id = bdp.block_id
-        WHERE bdp.plan_status = true
-          AND btc.is_time_valid = true
-          AND p_route_height > COALESCE(bdp.airspace_height, 0)
-
-        UNION ALL
-
-        SELECT DISTINCT
-            bdp.block_id,
-            bdp.block_name,
-            format('航点最低高度%s米低于空域最低高度%s米',
-                v_route_point_min_height, COALESCE(bdp.min_height, 0)) AS reason
-        FROM block_day_plan bdp
-        JOIN block_time_check btc
-            ON btc.block_id = bdp.block_id
-        WHERE bdp.plan_status = true
-          AND btc.is_time_valid = true
-          AND p_route_height >= COALESCE(bdp.min_height, 0)
-          AND p_route_height <= COALESCE(bdp.airspace_height, 0)
-          AND v_route_point_min_height < COALESCE(bdp.min_height, 0)
-
-        UNION ALL
-
-        SELECT DISTINCT
-            bdp.block_id,
-            bdp.block_name,
-            format('航点最高高度%s米超过空域最高高度%s米',
-                v_route_point_max_height, COALESCE(bdp.airspace_height, 0)) AS reason
-        FROM block_day_plan bdp
-        JOIN block_time_check btc
-            ON btc.block_id = bdp.block_id
-        WHERE bdp.plan_status = true
-          AND btc.is_time_valid = true
-          AND p_route_height >= COALESCE(bdp.min_height, 0)
-          AND p_route_height <= COALESCE(bdp.airspace_height, 0)
-          AND v_route_point_min_height >= COALESCE(bdp.min_height, 0)
-          AND v_route_point_max_height > COALESCE(bdp.airspace_height, 0)
     ),
     invalid_blocks AS (
         SELECT
@@ -670,7 +636,7 @@ BEGIN
             p_task_id, array_to_string(v_error_msgs, '；'));
         RETURN QUERY SELECT 200, v_msg, false, hit_count, hit_blockids;
     ELSE
-        v_msg := format('任务%s经过空域区块%s个，用空计划、航线高度和航点高度校验通过，可执行',
+        v_msg := format('任务%s经过空域区块%s个，空域范围、高度、用空计划和时间段校验通过，可执行',
             p_task_id, hit_count);
         RETURN QUERY SELECT 200, v_msg, true, hit_count, hit_blockids;
     END IF;
@@ -697,4 +663,264 @@ IS '校验任务航线用空是否可执行';
 --     120,
 --     '2026-10-12',
 --     '[{"startTime":"15:00:00","endTime":"16:00:00"},{"startTime":"16:00:00","endTime":"17:00:00"}]'
+-- );
+
+-- =============================================================================
+-- 函数名称：3.gis_flight_airspace_check
+-- 函数功能：空域区块提交前校验
+-- 函数描述：
+--   1. 接收项目ID、任务航线GeoJSON和航线高度。
+--   2. 按bo_airspace_block.final_geom判断所有航点是否在可飞空域内。
+--   3. 按bo_airspace_block.airspace_height检查航线高度和航点Z高度是否超高。
+--   4. 任一航点不在空域内，或任一高度超过空域高度，均校验不通过，调用方应阻断提交。
+-- 参数说明：
+--   p_project_id       项目ID；只检查该项目下未删除的空域区块。
+--   p_route_geojson    航线GeoJSON，支持LineString/MultiLineString/Feature。
+--   p_route_height     航线高度，单位米。
+--   p_only_enabled     是否只检查已启用/已发布空域；默认false。
+-- 返回说明：返回code、msg、ischeck、check_type、zone_type、hit_count。
+-- 注意事项：ischeck=true表示通过校验；ischeck=false表示调用方应阻断提交。
+-- =============================================================================
+
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_flight_airspace_check');
+
+-- =============================================================================
+-- 函数介绍：3.gis_flight_airspace_check
+-- 主要作用：校验任务航线所有航点是否均在可飞空域内，且飞行高度不超过空域高度。
+-- 返回说明：
+--   check_type = ln_within       航点全部在可飞空域内且高度通过。
+--   check_type = ln_outside      存在航点不在可飞空域范围内。
+--   check_type = height_over     航线高度或航点高度超过可飞空域高度。
+--   zone_type  = 可飞空域
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.gis_flight_airspace_check(
+    p_project_id text,
+    p_route_geojson text,
+    p_route_height numeric,
+    p_only_enabled boolean DEFAULT false
+)
+RETURNS TABLE (
+    code integer,
+    msg text,
+    ischeck boolean,
+    check_type text,
+    zone_type text,
+    hit_count bigint
+)
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    v_route geometry;
+    v_route_type text;
+    v_scope_count bigint := 0;
+    v_outside_count bigint := 0;
+    v_route_height_over_count bigint := 0;
+    v_point_height_over_count bigint := 0;
+    v_hit_count bigint := 0;
+    v_max_airspace_height numeric;
+    v_max_point_height numeric;
+    v_check_type text := 'ln_outside';
+    v_zone_type text := '可飞空域';
+    v_start_time timestamptz := clock_timestamp();
+    v_log_sql text;
+    v_msg text;
+BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_flight_airspace_check(%L, %L, %s, %L);',
+        p_project_id, p_route_geojson, COALESCE(p_route_height::text, 'NULL'), p_only_enabled);
+
+    IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
+        v_msg := format('参数错误：项目ID不能为空，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, v_check_type, v_zone_type, 0::bigint;
+        RETURN;
+    END IF;
+
+    IF p_route_geojson IS NULL OR btrim(p_route_geojson) = '' THEN
+        v_msg := format('参数错误：航线GeoJSON不能为空，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, v_check_type, v_zone_type, 0::bigint;
+        RETURN;
+    END IF;
+
+    IF p_route_height IS NULL OR p_route_height < 0 THEN
+        v_msg := format('参数错误：航线高度不能为空且不能小于0，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, v_check_type, v_zone_type, 0::bigint;
+        RETURN;
+    END IF;
+
+    IF p_only_enabled IS NULL THEN
+        v_msg := format('参数错误：是否只检查启用空域不能为空，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, v_check_type, v_zone_type, 0::bigint;
+        RETURN;
+    END IF;
+
+    BEGIN
+        v_route := ST_SetSRID(public.gis_geojson_to_geom(p_route_geojson), 4326);
+    EXCEPTION WHEN OTHERS THEN
+        v_msg := format('参数错误：航线GeoJSON解析失败：%s，执行时间 %s 秒',
+            SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, v_check_type, v_zone_type, 0::bigint;
+        RETURN;
+    END;
+
+    IF v_route IS NULL OR ST_IsEmpty(v_route) THEN
+        v_msg := format('参数错误：航线GeoJSON无有效几何，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, v_check_type, v_zone_type, 0::bigint;
+        RETURN;
+    END IF;
+
+    v_route_type := ST_GeometryType(v_route);
+
+    IF v_route_type NOT IN ('ST_LineString', 'ST_MultiLineString') THEN
+        v_msg := format('参数错误：航线GeoJSON仅支持LineString或MultiLineString，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, v_check_type, v_zone_type, 0::bigint;
+        RETURN;
+    END IF;
+
+    SELECT count(*)
+    INTO v_scope_count
+    FROM public.bo_airspace_block b
+    WHERE b.del_flag = false
+      AND b.final_geom IS NOT NULL
+      AND b.project_id = btrim(p_project_id)
+      AND (p_only_enabled = false OR b.use_enabled = true);
+
+    IF v_scope_count = 0 THEN
+        v_msg := format('无数据：项目下无可校验空域区块，执行时间 %s 秒',
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT 400, v_msg, false, v_check_type, v_zone_type, 0::bigint;
+        RETURN;
+    END IF;
+
+    WITH route_points AS (
+        SELECT
+            row_number() OVER () AS point_no,
+            (dp).geom AS geom,
+            ST_Z((dp).geom) AS point_height
+        FROM ST_DumpPoints(v_route) AS dp
+    ),
+    point_airspace AS (
+        SELECT
+            rp.point_no,
+            rp.point_height,
+            max(b.airspace_height)::numeric AS max_airspace_height,
+            count(DISTINCT b.id)::bigint AS block_count
+        FROM route_points rp
+        LEFT JOIN public.bo_airspace_block b
+            ON b.del_flag = false
+           AND b.final_geom IS NOT NULL
+           AND b.project_id = btrim(p_project_id)
+           AND (p_only_enabled = false OR b.use_enabled = true)
+           AND ST_Covers(
+               ST_SetSRID(ST_MakeValid(ST_Force2D(b.final_geom)), 4326),
+               ST_SetSRID(ST_Force2D(rp.geom), 4326)
+           )
+        GROUP BY rp.point_no, rp.point_height
+    ),
+    hit_blocks AS (
+        SELECT DISTINCT b.id
+        FROM route_points rp
+        JOIN public.bo_airspace_block b
+            ON b.del_flag = false
+           AND b.final_geom IS NOT NULL
+           AND b.project_id = btrim(p_project_id)
+           AND (p_only_enabled = false OR b.use_enabled = true)
+           AND ST_Covers(
+               ST_SetSRID(ST_MakeValid(ST_Force2D(b.final_geom)), 4326),
+               ST_SetSRID(ST_Force2D(rp.geom), 4326)
+           )
+    )
+    SELECT
+        count(*) FILTER (WHERE block_count = 0)::bigint,
+        count(*) FILTER (WHERE block_count > 0 AND p_route_height > COALESCE(max_airspace_height, 0))::bigint,
+        count(*) FILTER (
+            WHERE block_count > 0
+              AND point_height IS NOT NULL
+              AND point_height > COALESCE(max_airspace_height, 0)
+        )::bigint,
+        (SELECT count(*)::bigint FROM hit_blocks),
+        max(max_airspace_height),
+        max(point_height)::numeric
+    INTO
+        v_outside_count,
+        v_route_height_over_count,
+        v_point_height_over_count,
+        v_hit_count,
+        v_max_airspace_height,
+        v_max_point_height
+    FROM point_airspace;
+
+    IF v_outside_count > 0 THEN
+        v_check_type := 'ln_outside';
+        v_msg := format('校验不通过：%s个航点不在可飞空域范围内，阻断提交，执行时间 %s 秒',
+            v_outside_count, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT 200, v_msg, false, v_check_type, v_zone_type, v_hit_count;
+        RETURN;
+    END IF;
+
+    IF v_route_height_over_count > 0 THEN
+        v_check_type := 'height_over';
+        v_msg := format('校验不通过：航线高度%s米超过可飞空域高度%s米，阻断提交，执行时间 %s 秒',
+            p_route_height,
+            COALESCE(v_max_airspace_height, 0),
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT 200, v_msg, false, v_check_type, v_zone_type, v_hit_count;
+        RETURN;
+    END IF;
+
+    IF v_point_height_over_count > 0 THEN
+        v_check_type := 'height_over';
+        v_msg := format('校验不通过：航点最大高度%s米超过可飞空域高度%s米，阻断提交，执行时间 %s 秒',
+            COALESCE(v_max_point_height, 0),
+            COALESCE(v_max_airspace_height, 0),
+            ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT 200, v_msg, false, v_check_type, v_zone_type, v_hit_count;
+        RETURN;
+    END IF;
+
+    v_check_type := 'ln_within';
+    RETURN QUERY SELECT
+        200,
+        format('校验通过：航点全部在可飞空域范围内，航线高度和航点高度未超过可飞空域高度，命中空域区块%s个，执行时间 %s 秒',
+            v_hit_count, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3))::text,
+        true,
+        v_check_type,
+        v_zone_type,
+        v_hit_count;
+
+EXCEPTION WHEN OTHERS THEN
+    v_msg := format('执行异常：%s，执行时间 %s 秒',
+        SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    PERFORM public.gis_write_error_log(500, v_msg, v_log_sql);
+    RETURN QUERY SELECT 500, v_msg, false, 'ln_outside'::text, v_zone_type, 0::bigint;
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_flight_airspace_check(text, text, numeric, boolean)
+IS '空域区块提交前校验；航点必须全部在可飞空域内，航线高度和航点高度均不能超过可飞空域高度';
+
+-- =============================================================================
+-- 调用示例
+-- =============================================================================
+-- SELECT code, msg, ischeck, check_type, zone_type, hit_count
+-- FROM public.gis_flight_airspace_check(
+--     'd10326d5a9894cd6b8b5bd365a103394',
+--     '{"type":"Feature","properties":{"name":"聊城测试任务"},"geometry":{"type":"LineString","coordinates":[[116.050595925683,36.4486612526228,24],[116.028829029087,36.4484861336817,23]]}}',
+--     120,
+--     false
 -- );
