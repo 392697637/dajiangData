@@ -1,4 +1,4 @@
-﻿const AIRSPACE_TYPES = { CONTROL: "管制空域", MONITOR: "监视空域", REPORT: "报告空域" };
+const AIRSPACE_TYPES = { CONTROL: "管制空域", MONITOR: "监视空域", REPORT: "报告空域" };
 const AIRSPACE_STATES = { CONTROL: "管制状态", MONITOR: "监控状态", REPORT: "报警状态" };
 
 const DEFAULT_PROJECT_ID = "d10326d5a9894cd6b8b5bd365a103394";
@@ -46,7 +46,8 @@ function blockEls() {
     formSave: document.querySelector("#blockFormSave"),
     formCode: document.querySelector("#formAirspaceCode"),
     formName: document.querySelector("#formAirspaceName"),
-    formHeight: document.querySelector("#formAirspaceHeight"),
+    formMinHeight: document.querySelector("#formMinHeight"),
+    formMaxHeight: document.querySelector("#formAirspaceHeight"),
     formType: document.querySelector("#formAirspaceType"),
     shapePoint: document.querySelector("#shapePoint"),
     shapePolygon: document.querySelector("#shapePolygon"),
@@ -189,7 +190,8 @@ window.AirspaceBlockPage = {
     this.els.formTitle.textContent = "空域信息";
     this.els.formCode.value = block?.airspace_code || "";
     this.els.formName.value = block?.airspace_name || "";
-    this.els.formHeight.value = block?.airspace_height ?? 120;
+    this.els.formMinHeight.value = block?.min_height ?? 0;
+    this.els.formMaxHeight.value = block?.airspace_height ?? 120;
     this.setShapeType(block?.airspace_type === "POLYGON" ? "POLYGON" : "POINT");
     this.setEnabled(block?.use_enabled ?? true);
     this.els.formUnitName.value = block?.airspace_radius || 5000;
@@ -265,7 +267,8 @@ window.AirspaceBlockPage = {
   applyForm(block) {
     block.airspace_code = this.els.formCode.value.trim();
     block.airspace_name = this.els.formName.value.trim();
-    block.airspace_height = Number(this.els.formHeight.value || 0);
+    block.min_height = Number(this.els.formMinHeight.value || 0);
+    block.airspace_height = Number(this.els.formMaxHeight.value || 0);
     block.airspace_type = this.els.formType.value;
     block.use_enabled = this.els.formState.value === "true";
     block.airspace_radius = Number(this.els.formUnitName.value || 0);
@@ -476,6 +479,7 @@ window.AirspaceBlockPage = {
       project_id: DEFAULT_PROJECT_ID,
       airspace_code: "",
       airspace_name: "",
+      min_height: 0,
       airspace_height: 200,
       airspace_type: "POINT",
       airspace_radius: 5000,
@@ -642,7 +646,8 @@ window.AirspaceBlockPage = {
         <p>空域编号：${block.airspace_code}</p>
         <p>空域名称：${block.airspace_name}</p>
         <p>空域类型：${blockTypeText(block.airspace_type)}</p>
-        <p>空域高度：${block.airspace_height || 0} 米</p>
+        <p>最低高度：${block.min_height ?? 0} 米</p>
+        <p>最高高度：${block.airspace_height ?? 0} 米</p>
         <p>缓冲半径：${block.airspace_radius || 0} 米</p>
         <p>面积：${Number(block.airspace_area || 0).toFixed(2)} 平方千米</p>
         <p>周长：${Number(block.airspace_perimeter || 0).toFixed(2)} 千米</p>

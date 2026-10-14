@@ -28,10 +28,10 @@
 --   E、plan_status=true表示空域可用，进入下一步，判断任务用空时间段是否完整落在空域计划时间段内。
 --   F、任务用空时间段未完整落在空域计划时间段内时任务不可执行。
 --   G、任务用空时间段完整在计划时间段内，进入下一步，判断传入的航线高度参数。
---   H、传入的航线高度超过空域区块高度时任务不可执行。
---   I、传入的航线高度不超过空域区块高度时，进入下一步，判断航点高度是否超过空域区块高度。
---   J、航点高度超过空域区块高度时任务不可执行。
---   K、航点高度不超过空域区块高度时，任务可以执行。
+--   H、传入的航线高度不在空域最低/最高高度范围内时任务不可执行。
+--   I、传入的航线高度在空域最低/最高高度范围内时，进入下一步，判断航点高度是否在空域最低/最高高度范围内。
+--   J、航点高度不在空域最低/最高高度范围内时任务不可执行。
+--   K、航点高度在空域最低/最高高度范围内时，任务可以执行。
 --   返回：
 --   code          状态码：200=执行成功 400=参数错误/无数据 500=执行异常
 --   msg           返回信息，包含可执行结果或不可执行原因
@@ -241,10 +241,10 @@ IS '校验航线是否命中空域区块';
 --   E. plan_status=true表示空域可用，再判断任务用空时间段是否完整落在空域计划时间段内。
 --   F. 任务用空时间段未完整落在空域计划时间段内时任务不可执行。
 --   G. 时间段完整在计划时间段内时，判断传入的航线高度参数。
---   H. 传入的航线高度超过空域区块高度时任务不可执行。
---   I. 传入的航线高度不超过空域区块高度时，判断航点高度是否超过空域区块高度。
---   J. 航点高度超过空域区块高度时任务不可执行。
---   K. 航点高度不超过空域区块高度时，任务可以执行。
+--   H. 传入的航线高度不在空域最低/最高高度范围内时任务不可执行。
+--   I. 传入的航线高度在空域最低/最高高度范围内时，判断航点高度是否在空域最低/最高高度范围内。
+--   J. 航点高度不在空域最低/最高高度范围内时任务不可执行。
+--   K. 航点高度在空域最低/最高高度范围内时，任务可以执行。
 -- 入参说明：
 --   p_project_id       项目ID。
 --   p_task_id          任务ID。
@@ -271,7 +271,7 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --   p_project_id       项目ID；varchar；必填；只检查该项目下启用且未删除的空域区块。
 --   p_task_id          任务ID；varchar；必填；用于返回msg中标识当前任务。
 --   p_route_geojson    航线GeoJSON字符串；text；必填；geometry必须为LineString或MultiLineString，航点坐标必须包含Z值。
---   p_route_height     航线高度参数；double precision；必填且不能小于0；单位：米；用于和空域区块airspace_height比较。
+--   p_route_height     航线高度参数；double precision；必填且不能小于0；单位：米；用于和空域区块最低/最高高度比较。
 --   p_use_date         用空日期字符串；varchar；必填；格式yyyy-MM-dd；用于匹配bo_airspace_plan.use_date。
 --   p_task_time_plan   任务用空时间段JSON数组字符串；text；必填；格式如[{"startTime":"15:00:00","endTime":"16:00:00"}]。
 -- 入参校验：
@@ -291,15 +291,17 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --   2. 无用空计划：任务{task_id}不可执行：{空域名称}({空域ID})：{yyyy-MM-dd}无用空计划。
 --   3. 空域不可用：任务{task_id}不可执行：{空域名称}({空域ID})：{yyyy-MM-dd}空域不可用。
 --   4. 时间段超出计划：任务{task_id}不可执行：{空域名称}({空域ID})：{yyyy-MM-dd}任务时间段{startTime}-{endTime}超出用空计划时间段。
---   5. 航线高度超过：任务{task_id}不可执行：{空域名称}({空域ID})：航线高度{p_route_height}米超过空域高度{airspace_height}米。
---   6. 航点高度超过：任务{task_id}不可执行：{空域名称}({空域ID})：航点高度{max_z}米超过空域高度{airspace_height}米。
---   7. 全部通过：任务{task_id}经过空域区块{hit_count}个，用空计划、航线高度和航点高度校验通过，可执行。
+--   5. 航线高度低于最低高度：任务{task_id}不可执行：{空域名称}({空域ID})：航线高度{p_route_height}米低于空域最低高度{min_height}米。
+--   6. 航线高度超过最高高度：任务{task_id}不可执行：{空域名称}({空域ID})：航线高度{p_route_height}米超过空域最高高度{airspace_height}米。
+--   7. 航点高度低于最低高度：任务{task_id}不可执行：{空域名称}({空域ID})：航点最低高度{min_z}米低于空域最低高度{min_height}米。
+--   8. 航点高度超过最高高度：任务{task_id}不可执行：{空域名称}({空域ID})：航点最高高度{max_z}米超过空域最高高度{airspace_height}米。
+--   9. 全部通过：任务{task_id}经过空域区块{hit_count}个，用空计划、航线高度和航点高度校验通过，可执行。
 -- 注意事项：
 --   1. plan_status=true表示空域可用；plan_status=false表示空域不可用。
 --   2. 只有plan_status=true时才继续校验任务时间段。
 --   3. 只有任务时间段完整落在计划时间段内时，才继续校验传入的航线高度参数。
---   4. 只有传入的航线高度不超过空域高度时，才继续校验航点高度。
---   5. 航点高度取p_route_geojson中所有航点Z值的最大值；没有Z值按参数错误处理。
+--   4. 只有传入的航线高度在空域最低/最高高度范围内时，才继续校验航点高度。
+--   5. 航点高度取p_route_geojson中所有航点Z值的最小值和最大值；没有Z值按参数错误处理。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_flight_task_airspace(
     p_project_id varchar,
@@ -323,6 +325,7 @@ DECLARE
     v_log_sql text;
     v_route_check record;
     v_route_geom geometry;
+    v_route_point_min_height double precision;
     v_route_point_max_height double precision;
     v_use_date date;
     v_task_time_plan jsonb;
@@ -415,8 +418,8 @@ BEGIN
         RETURN;
     END;
 
-    SELECT max(ST_Z((dp).geom))
-    INTO v_route_point_max_height
+    SELECT min(ST_Z((dp).geom)), max(ST_Z((dp).geom))
+    INTO v_route_point_min_height, v_route_point_max_height
     FROM ST_DumpPoints(v_route_geom) AS dp
     WHERE ST_Z((dp).geom) IS NOT NULL;
 
@@ -456,12 +459,13 @@ BEGIN
     -- 1. 用空日期必须存在计划；
     -- 2. plan_status必须为true，false表示空域不可用；
     -- 3. plan_status=true后，每个任务时间段必须完整落在某个计划时间段内，否则不可执行；
-    -- 4. 传入的航线高度不能超过空域高度，超过则不可执行；
-    -- 5. 航点高度不能超过空域高度，超过则不可执行。
+    -- 4. 传入的航线高度必须在空域最低/最高高度范围内，否则不可执行；
+    -- 5. 航点高度必须在空域最低/最高高度范围内，否则不可执行。
     WITH hit_blocks AS (
         SELECT
             b.id,
             b.airspace_name,
+            b.min_height,
             b.airspace_height
         FROM public.bo_airspace_block b
         WHERE b.id = ANY(hit_blockids)
@@ -483,6 +487,7 @@ BEGIN
         SELECT
             hb.id AS block_id,
             COALESCE(NULLIF(btrim(hb.airspace_name), ''), hb.id) AS block_name,
+            COALESCE(hb.min_height, 0) AS min_height,
             hb.airspace_height,
             v_use_date AS use_date,
             p.plan_status,
@@ -497,6 +502,7 @@ BEGIN
         SELECT
             bdp.block_id,
             bdp.block_name,
+            bdp.min_height,
             bdp.airspace_height,
             bdp.use_date,
             bdp.plan_status,
@@ -591,7 +597,21 @@ BEGIN
         SELECT DISTINCT
             bdp.block_id,
             bdp.block_name,
-            format('航线高度%s米超过空域高度%s米',
+            format('航线高度%s米低于空域最低高度%s米',
+                p_route_height, COALESCE(bdp.min_height, 0)) AS reason
+        FROM block_day_plan bdp
+        JOIN block_time_check btc
+            ON btc.block_id = bdp.block_id
+        WHERE bdp.plan_status = true
+          AND btc.is_time_valid = true
+          AND p_route_height < COALESCE(bdp.min_height, 0)
+
+        UNION ALL
+
+        SELECT DISTINCT
+            bdp.block_id,
+            bdp.block_name,
+            format('航线高度%s米超过空域最高高度%s米',
                 p_route_height, COALESCE(bdp.airspace_height, 0)) AS reason
         FROM block_day_plan bdp
         JOIN block_time_check btc
@@ -605,14 +625,32 @@ BEGIN
         SELECT DISTINCT
             bdp.block_id,
             bdp.block_name,
-            format('航点高度%s米超过空域高度%s米',
+            format('航点最低高度%s米低于空域最低高度%s米',
+                v_route_point_min_height, COALESCE(bdp.min_height, 0)) AS reason
+        FROM block_day_plan bdp
+        JOIN block_time_check btc
+            ON btc.block_id = bdp.block_id
+        WHERE bdp.plan_status = true
+          AND btc.is_time_valid = true
+          AND p_route_height >= COALESCE(bdp.min_height, 0)
+          AND p_route_height <= COALESCE(bdp.airspace_height, 0)
+          AND v_route_point_min_height < COALESCE(bdp.min_height, 0)
+
+        UNION ALL
+
+        SELECT DISTINCT
+            bdp.block_id,
+            bdp.block_name,
+            format('航点最高高度%s米超过空域最高高度%s米',
                 v_route_point_max_height, COALESCE(bdp.airspace_height, 0)) AS reason
         FROM block_day_plan bdp
         JOIN block_time_check btc
             ON btc.block_id = bdp.block_id
         WHERE bdp.plan_status = true
           AND btc.is_time_valid = true
+          AND p_route_height >= COALESCE(bdp.min_height, 0)
           AND p_route_height <= COALESCE(bdp.airspace_height, 0)
+          AND v_route_point_min_height >= COALESCE(bdp.min_height, 0)
           AND v_route_point_max_height > COALESCE(bdp.airspace_height, 0)
     ),
     invalid_blocks AS (

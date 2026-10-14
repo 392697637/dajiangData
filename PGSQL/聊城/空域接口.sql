@@ -103,7 +103,8 @@ ORDER BY b.airspace_code NULLS LAST, b.id;
 --   id             bigint    区块主键
 --   airspace_code  string    空域编号
 --   airspace_name  string    空域名称
---   airspace_height number   空域高度，米
+--   min_height number   空域最低高度，米
+--   airspace_height number   空域最高高度，米
 --   airspace_type  string    空域类型：POINT点、LINE线、POLYGON面
 --   airspace_radius number 空域缓冲半径，米
 --   airspace_area  number    空域面积，平方千米
@@ -119,6 +120,7 @@ SELECT
     b.id,
     b.airspace_code,
     b.airspace_name,
+    b.min_height,
     b.airspace_height,
     b.airspace_type,
     b.airspace_radius,
@@ -222,7 +224,8 @@ ORDER BY p.id;
 --   block_id       bigint    空域区块主键
 --   airspace_code  string    空域编号
 --   airspace_name  string    空域名称
---   airspace_height number   空域高度，米
+--   min_height number   空域最低高度，米
+--   airspace_height number   空域最高高度，米
 --   airspace_type  string    空域类型：POINT点、LINE线、POLYGON面
 --   airspace_radius number 空域缓冲半径，米
 --   airspace_area  number    空域面积，平方千米
@@ -243,6 +246,7 @@ SELECT
     b.id AS block_id,
     b.airspace_code,
     b.airspace_name,
+    b.min_height,
     b.airspace_height,
     b.airspace_type,
     b.airspace_radius,

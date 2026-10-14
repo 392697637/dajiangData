@@ -445,8 +445,8 @@ window.AirspacePlanPage = {
       const activePlan = block.plans.find((plan) => parsePlanStatus(plan.plan_status) && plan.timeSegments.some((segment) => activeSegment(segment, this.seconds)));
       if (activePlan) {
         entity.polygon.height = 0;
-        entity.polygon.extrudedHeight = Number(block.airspace_height || 200);
-        entity.position = AirspaceMap.center(block, Number(block.airspace_height || 200) + 80);
+        entity.polygon.extrudedHeight = Number(block.airspace_height ?? 200);
+        entity.position = AirspaceMap.center(block, Number(block.airspace_height ?? 200) + 80);
       } else {
         entity.polygon.height = undefined;
         entity.polygon.extrudedHeight = undefined;

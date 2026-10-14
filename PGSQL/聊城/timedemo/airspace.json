@@ -7,6 +7,7 @@
       "project_id": "d10326d5a9894cd6b8b5bd365a103394",
       "airspace_code": "liaochengzhuchengqu",
       "airspace_name": "空域16主区域",
+      "min_height": 0,
       "airspace_height": 200,
       "airspace_radius": null,
       "airspace_area": null,

@@ -1,4 +1,4 @@
-﻿-- =============================================================================
+-- =============================================================================
 -- 2.空域区块.sql
 -- 表说明：
 --   1. 空域区块：第三方同步过来的空域区块基础信息，一条区块只保存一份。
@@ -36,7 +36,8 @@ CREATE TABLE public.bo_airspace (
     id varchar(64) NOT NULL,
     airspace_code varchar(255),
     airspace_name varchar(255),
-    airspace_height double precision,
+    min_height double precision NOT NULL DEFAULT 0,
+    airspace_height double precision NOT NULL,
     airspace_radius double precision,
     airspace_area double precision,
     airspace_perimeter double precision,
@@ -57,7 +58,8 @@ COMMENT ON TABLE public.bo_airspace IS '空域基础信息';
 COMMENT ON COLUMN public.bo_airspace.id IS '主键，字符串，不可重复';
 COMMENT ON COLUMN public.bo_airspace.airspace_code IS '空域编号';
 COMMENT ON COLUMN public.bo_airspace.airspace_name IS '空域名称';
-COMMENT ON COLUMN public.bo_airspace.airspace_height IS '空域高度，单位：米';
+COMMENT ON COLUMN public.bo_airspace.min_height IS '空域最低高度，单位：米，默认0';
+COMMENT ON COLUMN public.bo_airspace.airspace_height IS '空域最高高度，单位：米';
 COMMENT ON COLUMN public.bo_airspace.airspace_radius IS '空域缓冲半径，单位：米';
 COMMENT ON COLUMN public.bo_airspace.airspace_area IS '空域面积，单位：平方千米';
 COMMENT ON COLUMN public.bo_airspace.airspace_perimeter IS '空域周长，单位：千米';
@@ -86,7 +88,8 @@ CREATE TABLE public.bo_airspace_block (
     id varchar(64) NOT NULL,
     airspace_code varchar(255),
     airspace_name varchar(255),
-    airspace_height double precision,
+    min_height double precision NOT NULL DEFAULT 0,
+    airspace_height double precision NOT NULL,
     airspace_type varchar(20),
     airspace_radius double precision,
     airspace_area double precision,
@@ -110,7 +113,8 @@ COMMENT ON TABLE public.bo_airspace_block IS '空域区块区块基础信息';
 COMMENT ON COLUMN public.bo_airspace_block.id IS '主键，字符串，不可重复';
 COMMENT ON COLUMN public.bo_airspace_block.airspace_code IS '空域编号';
 COMMENT ON COLUMN public.bo_airspace_block.airspace_name IS '空域名称';
-COMMENT ON COLUMN public.bo_airspace_block.airspace_height IS '空域高度，单位：米';
+COMMENT ON COLUMN public.bo_airspace_block.min_height IS '空域最低高度，单位：米，默认0';
+COMMENT ON COLUMN public.bo_airspace_block.airspace_height IS '空域最高高度，单位：米';
 COMMENT ON COLUMN public.bo_airspace_block.airspace_type IS '空域类型：POINT点、LINE线、POLYGON面';
 COMMENT ON COLUMN public.bo_airspace_block.airspace_radius IS '空域缓冲半径，单位：米';
 COMMENT ON COLUMN public.bo_airspace_block.airspace_area IS '空域面积，单位：平方千米';
@@ -145,7 +149,7 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    -- geom必须由GeoJSON显式传入XYZ；Z表示海拔高度，不能用airspace_height替代。
+    -- geom必须由GeoJSON显式传入XYZ；Z表示海拔高度，不能用空域最低/最高高度替代。
     IF ST_NDims(NEW.geom) < 3 THEN
         RAISE EXCEPTION 'geom must include XYZ coordinates with altitude';
     END IF;
@@ -311,6 +315,7 @@ INSERT INTO public.bo_airspace (
     project_id,
     airspace_code,
     airspace_name,
+    min_height,
     airspace_height,
     use_enabled,
     remark,
@@ -323,6 +328,7 @@ VALUES (
     'd10326d5a9894cd6b8b5bd365a103394',
     '100000',
     '空域16主区域',
+    0,
     200,
     true,
     '主区域，十点连线范围内，真高200米（含）以下',
@@ -336,6 +342,7 @@ INSERT INTO public.bo_airspace_block (
     project_id,
     airspace_code,
     airspace_name,
+    min_height,
     airspace_height,
     airspace_type,
     airspace_radius,
@@ -346,21 +353,21 @@ INSERT INTO public.bo_airspace_block (
     geom
 )
 VALUES
-    ('AIRSPACE-01', 'd10326d5a9894cd6b8b5bd365a103394', '101', '空域1', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.951111,36.468056,0]}'::text)),
-    ('AIRSPACE-02', 'd10326d5a9894cd6b8b5bd365a103394', '102', '空域2', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.039167,36.492778,0]}'::text)),
-    ('AIRSPACE-03', 'd10326d5a9894cd6b8b5bd365a103394', '103', '空域3', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.050278,36.440833,0]}'::text)),
-    ('AIRSPACE-04', 'd10326d5a9894cd6b8b5bd365a103394', '104', '空域4', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.989444,36.451667,0]}'::text)),
-    ('AIRSPACE-05', 'd10326d5a9894cd6b8b5bd365a103394', '105', '空域5', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.001667,36.483333,0]}'::text)),
-    ('AIRSPACE-06', 'd10326d5a9894cd6b8b5bd365a103394', '106', '空域6', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.016389,36.427222,0]}'::text)),
-    ('AIRSPACE-07', 'd10326d5a9894cd6b8b5bd365a103394', '107', '空域7', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.040556,36.448056,0]}'::text)),
-    ('AIRSPACE-08', 'd10326d5a9894cd6b8b5bd365a103394', '108', '空域8', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.054722,36.459167,0]}'::text)),
-    ('AIRSPACE-09', 'd10326d5a9894cd6b8b5bd365a103394', '109', '空域9', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.930556,36.430556,0]}'::text)),
-    ('AIRSPACE-10', 'd10326d5a9894cd6b8b5bd365a103394', '110', '空域10', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.967500,36.420000,0]}'::text)),
-    ('AIRSPACE-11', 'd10326d5a9894cd6b8b5bd365a103394', '111', '空域11', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.943056,36.510556,0]}'::text)),
-    ('AIRSPACE-12', 'd10326d5a9894cd6b8b5bd365a103394', '112', '空域12', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.940556,36.444167,0]}'::text)),
-    ('AIRSPACE-13', 'd10326d5a9894cd6b8b5bd365a103394', '113', '空域13', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.731389,36.441389,0]}'::text)),
-    ('AIRSPACE-14', 'd10326d5a9894cd6b8b5bd365a103394', '114', '空域14', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.013333,36.386667,0]}'::text)),
-    ('AIRSPACE-15', 'd10326d5a9894cd6b8b5bd365a103394', '115', '空域15', 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.999722,36.447222,0]}'::text));
+    ('AIRSPACE-01', 'd10326d5a9894cd6b8b5bd365a103394', '101', '空域1', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.951111,36.468056,0]}'::text)),
+    ('AIRSPACE-02', 'd10326d5a9894cd6b8b5bd365a103394', '102', '空域2', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.039167,36.492778,0]}'::text)),
+    ('AIRSPACE-03', 'd10326d5a9894cd6b8b5bd365a103394', '103', '空域3', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.050278,36.440833,0]}'::text)),
+    ('AIRSPACE-04', 'd10326d5a9894cd6b8b5bd365a103394', '104', '空域4', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.989444,36.451667,0]}'::text)),
+    ('AIRSPACE-05', 'd10326d5a9894cd6b8b5bd365a103394', '105', '空域5', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.001667,36.483333,0]}'::text)),
+    ('AIRSPACE-06', 'd10326d5a9894cd6b8b5bd365a103394', '106', '空域6', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.016389,36.427222,0]}'::text)),
+    ('AIRSPACE-07', 'd10326d5a9894cd6b8b5bd365a103394', '107', '空域7', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.040556,36.448056,0]}'::text)),
+    ('AIRSPACE-08', 'd10326d5a9894cd6b8b5bd365a103394', '108', '空域8', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.054722,36.459167,0]}'::text)),
+    ('AIRSPACE-09', 'd10326d5a9894cd6b8b5bd365a103394', '109', '空域9', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.930556,36.430556,0]}'::text)),
+    ('AIRSPACE-10', 'd10326d5a9894cd6b8b5bd365a103394', '110', '空域10', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.967500,36.420000,0]}'::text)),
+    ('AIRSPACE-11', 'd10326d5a9894cd6b8b5bd365a103394', '111', '空域11', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.943056,36.510556,0]}'::text)),
+    ('AIRSPACE-12', 'd10326d5a9894cd6b8b5bd365a103394', '112', '空域12', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.940556,36.444167,0]}'::text)),
+    ('AIRSPACE-13', 'd10326d5a9894cd6b8b5bd365a103394', '113', '空域13', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.731389,36.441389,0]}'::text)),
+    ('AIRSPACE-14', 'd10326d5a9894cd6b8b5bd365a103394', '114', '空域14', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[116.013333,36.386667,0]}'::text)),
+    ('AIRSPACE-15', 'd10326d5a9894cd6b8b5bd365a103394', '115', '空域15', 0, 200, 'POINT', 5000, true, '子区域，以中心点为圆心，半径5000米范围内', 'system', 'system', public.gis_geojson_to_geom('{"type":"Point","coordinates":[115.999722,36.447222,0]}'::text));
 
 
 
