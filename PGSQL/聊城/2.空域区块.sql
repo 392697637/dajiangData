@@ -130,6 +130,11 @@ COMMENT ON COLUMN public.bo_airspace_block.del_flag IS '是否删除：t删除�
 COMMENT ON COLUMN public.bo_airspace_block.geom IS '空域原始三维几何，WGS84坐标系：点、线或面，坐标为XYZ';
 COMMENT ON COLUMN public.bo_airspace_block.final_geom IS '空域生成后的三维最终范围，WGS84坐标系：点/线按半径缓冲后的面或原始面，坐标为XYZ';
 
+-- =============================================================================
+-- 删除空域区块最终范围生成函数
+-- =============================================================================
+SELECT gis_drop_function('gis_bo_airspace_block_final_geom');
+
 -- 自动生成最终范围：插入或修改原始几何、缓冲半径时，自动维护final_geom、面积、周长。
 CREATE OR REPLACE FUNCTION public.gis_bo_airspace_block_final_geom()
 RETURNS trigger
@@ -163,7 +168,7 @@ BEGIN
     IF GeometryType(NEW.geom) IN ('POINT', 'MULTIPOINT')
        AND COALESCE(NEW.airspace_radius, 0) > 0 THEN
         NEW.final_geom := ST_Force3D(
-            ST_Buffer(NEW.geom::geography, NEW.airspace_radius)::geometry,
+            ST_Buffer(NEW.geom::geography, NEW.airspace_radius, 16)::geometry,
             v_altitude
         );
     ELSIF GeometryType(NEW.geom) IN ('LINESTRING', 'MULTILINESTRING')

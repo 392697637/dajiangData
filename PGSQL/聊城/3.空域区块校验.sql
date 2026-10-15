@@ -690,11 +690,29 @@ SELECT gis_drop_function('gis_flight_airspace_check');
 -- =============================================================================
 -- 函数介绍：3.gis_flight_airspace_check
 -- 主要作用：校验任务航线所有航点是否均在可飞空域内，且飞行高度不超过空域高度。
+-- 入参说明：
+--   p_project_id       项目ID；text；必填；只检查该项目下未删除且final_geom不为空的空域区块。
+--   p_route_geojson    航线GeoJSON字符串；text；必填；支持Feature/geometry格式，geometry必须为LineString或MultiLineString，航点坐标必须包含Z值。
+--   p_route_height     航线高度；numeric；必填；单位米，不能超过覆盖航点的可飞空域高度。
+--   p_only_enabled     是否只校验启用空域；boolean；选填，默认false；true=只检查启用空域，false=检查未删除空域。
+-- 入参校验：
+--   1. p_project_id不能为空。
+--   2. p_route_geojson不能为空，且必须能通过public.gis_geojson_to_geom解析为有效几何。
+--   3. 解析后的geometry必须为LineString或MultiLineString。
+--   4. 航线坐标必须包含Z值，Z值作为航点高度参与可飞空域高度校验。
+--   5. p_route_height不能为空，且必须大于等于0。
 -- 返回说明：
---   check_type = ln_within       航点全部在可飞空域内且高度通过。
---   check_type = ln_outside      存在航点不在可飞空域范围内。
---   check_type = height_over     航线高度或航点高度超过可飞空域高度。
---   zone_type  = 可飞空域
+--   code             integer；200=执行成功，400=参数错误或无可校验空域区块数据，500=执行异常。
+--   msg              text；返回范围/高度校验结果、参数错误、无数据或异常信息；该函数msg包含执行耗时。
+--   ischeck          boolean；true=航点全部在可飞空域内且高度通过，false=范围不通过、高度超限、参数错误或执行异常。
+--   check_type       text；ln_within=范围和高度通过，ln_outside=存在航点不在可飞空域范围内，height_over=航线高度或航点高度超过可飞空域高度。
+--   zone_type        text；固定返回“可飞空域”；本函数仅校验可飞空域范围和高度，不同于函数1、2中的命中区域类型。
+--   hit_count        bigint；航点命中的可飞空域区块数量；未命中、参数错误或异常时为0。
+-- 注意事项：
+--   1. 本函数只校验可飞空域范围和高度，不校验用空计划、任务时间段或空域计划状态。
+--   2. 范围判断使用二维几何，航点Z值不参与ST_Covers空间判断，只作为航点高度参与高度校验。
+--   3. 任一航点未落入可飞空域，或任一高度超过覆盖该航点的可飞空域高度，ischeck=false，调用方应阻断提交。
+--   4. p_only_enabled=true时只校验启用空域；p_only_enabled=false时校验项目下未删除空域。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_flight_airspace_check(
     p_project_id text,
