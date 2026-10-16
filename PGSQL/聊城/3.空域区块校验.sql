@@ -16,8 +16,23 @@
 --   ischeck       是否命中空域区块，true=命中，false=未命中
 --   hit_count     命中的空域区块数量
 --   hit_blockids  命中的空域区块ID数组
+--   route_length_km 航线二维长度，单位：千米
 --
---   （2）任务航线用空计划校验
+--   （2）点位空域区块命中校验
+--   函数：public.gis_flight_point_airspace
+--   作用：根据项目ID和点位GeoJSON判断点位位于哪些启用、未删除的空域区块。
+--   规则：
+--   A、项目ID不能为空；点位必须为GeoJSON Feature且geometry必须为Point。
+--   B、只判断二维范围，落在空域区块边界上的点视为命中。
+--   C、命中任意空域区块时ischeck=true；未命中时ischeck=false。
+--   返回：
+--   code          状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   msg           返回信息，包含命中结果或错误原因
+--   ischeck       是否命中空域区块
+--   hit_count     命中的空域区块数量
+--   hit_blockids  命中的空域区块ID数组
+--
+--   （3）任务航线用空计划校验
 --   函数：public.gis_flight_task_airspace
 --   作用：校验任务航线是否满足空域区块、用空计划、用空时间和高度限制，返回任务是否可执行。
 --   规则：
@@ -39,7 +54,7 @@
 --   hit_count     命中的空域区块数量
 --   hit_blockids  命中的空域区块ID数组
 --
---   （3）任务航线空域范围和高度校验
+--   （4）任务航线空域范围和高度校验
 --   函数：public.gis_flight_airspace_check
 --   作用：校验任务航线所有航点是否全部在空域区块范围内，并检查航线高度和航点高度是否超过空域高度。
 --   规则：
@@ -79,7 +94,7 @@
 --   p_project_id      项目ID。
 --   p_route_geojson   航线GeoJSON，geometry必须为LineString或MultiLineString。
 -- 返回说明：
---   返回code、msg、ischeck、hit_count、hit_blockids。
+--   返回code、msg、ischeck、hit_count、hit_blockids、route_length_km。
 -- 注意事项：
 --   1. 本函数只判断空间命中，不判断用空计划、时间段或高度。
 --   2. Z值会被ST_Force2D去掉，命中判断只按平面范围执行。
@@ -106,6 +121,7 @@ SELECT gis_drop_function('gis_flight_route_airspace');
 --   ischeck          boolean；true=航线命中至少一个空域区块，false=未命中、参数错误或执行异常。
 --   hit_count        integer；命中的空域区块数量；未命中、参数错误或异常时为0。
 --   hit_blockids     text[]；命中的空域区块ID数组；未命中、参数错误或异常时为空数组。
+--   route_length_km  double precision；航线二维长度，单位：千米；无效航线或异常时为NULL。
 -- 注意事项：
 --   1. 本函数只做空间命中校验，不校验用空计划、任务时间段或高度。
 --   2. 空间命中使用二维几何判断，航线和空域区块的Z值不参与ST_Intersects。
@@ -119,7 +135,8 @@ RETURNS TABLE (
     msg text,
     ischeck boolean,
     hit_count integer,
-    hit_blockids text[]
+    hit_blockids text[],
+    route_length_km double precision
 )
 LANGUAGE plpgsql
 VOLATILE
@@ -140,7 +157,7 @@ BEGIN
         v_msg := format('参数错误：项目ID不能为空，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::double precision;
         RETURN;
     END IF;
 
@@ -148,7 +165,7 @@ BEGIN
         v_msg := format('参数错误：航线GeoJSON不能为空，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::double precision;
         RETURN;
     END IF;
 
@@ -158,7 +175,7 @@ BEGIN
         v_msg := format('参数错误：航线GeoJSON解析失败：%s，执行时间 %s 秒',
             SQLERRM, round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::double precision;
         RETURN;
     END;
 
@@ -166,7 +183,7 @@ BEGIN
         v_msg := format('参数错误：航线GeoJSON无有效几何，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::double precision;
         RETURN;
     END IF;
 
@@ -178,9 +195,11 @@ BEGIN
             COALESCE(v_route_type, 'NULL'),
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::double precision;
         RETURN;
     END IF;
+
+    route_length_km := round((ST_Length(v_route_geom::geography) / 1000.0)::numeric, 6)::double precision;
 
     SELECT count(*)::integer
     INTO v_scope_count
@@ -193,7 +212,7 @@ BEGIN
     IF v_scope_count = 0 THEN
         v_msg := format('无可校验空域区块数据，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], route_length_km;
         RETURN;
     END IF;
 
@@ -230,7 +249,7 @@ EXCEPTION WHEN OTHERS THEN
     v_msg := format('航线空域区块校验执行异常：%s，执行时间 %s 秒',
         SQLERRM, round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     PERFORM public.gis_write_error_log(500, v_msg, v_log_sql);
-    RETURN QUERY SELECT 500, v_msg, false, 0::integer, ARRAY[]::text[];
+    RETURN QUERY SELECT 500, v_msg, false, 0::integer, ARRAY[]::text[], NULL::double precision;
 END;
 $$;
 
@@ -247,7 +266,175 @@ IS '校验航线是否命中空域区块';
 -- );
 
 -- =============================================================================
--- 函数名称：2.gis_flight_task_airspace
+-- 函数名称：2.gis_flight_point_airspace
+-- 函数功能：判断指定项目的点位位于哪些空域区块
+-- 函数描述：
+--   1. 校验项目ID和点位GeoJSON是否为空。
+--   2. 解析点位GeoJSON Feature，并校验geometry必须为非空Point。
+--   3. 将点位和空域区块final_geom转为二维WGS84几何。
+--   4. 查询指定项目下启用、未删除且final_geom不为空的空域区块。
+--   5. 使用ST_Covers判断点位是否落在区块范围内，边界点视为命中。
+--   6. 返回命中状态、命中数量和命中的空域区块ID数组。
+-- 入参说明：
+--   p_project_id     项目ID。
+--   p_point_geojson  点位GeoJSON Feature，geometry必须为Point。
+-- 返回说明：
+--   返回code、msg、ischeck、hit_count、hit_blockids。
+-- 注意事项：
+--   Z值不参与空间命中判断。
+-- =============================================================================
+
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT gis_drop_function('gis_flight_point_airspace');
+
+-- =============================================================================
+-- 函数介绍：2.gis_flight_point_airspace
+-- 主要作用：返回指定项目下点位命中的空域区块ID列表。
+-- 入参说明：
+--   p_project_id     项目ID；varchar；必填；只检查该项目下启用且未删除的空域区块。
+--   p_point_geojson  点位GeoJSON Feature字符串；text；必填，geometry必须为Point。
+-- 入参校验：
+--   1. p_project_id不能为空。
+--   2. p_point_geojson不能为空，必须为GeoJSON Feature，且能通过public.gis_geojson_to_geom解析为有效Point。
+-- 返回说明：
+--   code          integer；200=执行成功，400=参数错误或无可校验空域区块数据，500=执行异常。
+--   msg           text；返回命中结果、参数错误、无数据或异常信息，包含执行耗时。
+--   ischeck       boolean；true=点位命中至少一个空域区块，false=未命中或执行失败。
+--   hit_count     integer；命中的空域区块数量，未命中或执行失败时为0。
+--   hit_blockids  text[]；命中的空域区块ID数组，未命中或执行失败时为空数组。
+-- 注意事项：
+--   1. 空间判断使用二维几何，点位Z值不参与命中判断。
+--   2. 边界点按命中处理；重叠区块返回所有命中的区块ID。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.gis_flight_point_airspace(
+    p_project_id varchar,
+    p_point_geojson text
+)
+RETURNS TABLE (
+    code integer,
+    msg text,
+    ischeck boolean,
+    hit_count integer,
+    hit_blockids text[]
+)
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    v_start_time timestamptz := clock_timestamp();
+    v_point_geom geometry;
+    v_scope_count integer;
+    v_log_sql text;
+    v_msg text;
+BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_flight_point_airspace(%L, %L);',
+        p_project_id, p_point_geojson);
+
+    IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
+        v_msg := format('参数错误：项目ID不能为空，执行时间 %s 秒',
+            round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN;
+    END IF;
+
+    IF p_point_geojson IS NULL OR btrim(p_point_geojson) = '' THEN
+        v_msg := format('参数错误：点位GeoJSON不能为空，执行时间 %s 秒',
+            round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN;
+    END IF;
+
+    BEGIN
+        IF p_point_geojson::jsonb->>'type' IS DISTINCT FROM 'Feature'
+           OR p_point_geojson::jsonb->'geometry'->>'type' IS DISTINCT FROM 'Point' THEN
+            v_msg := format('参数错误：点位GeoJSON必须为Point类型的Feature，执行时间 %s 秒',
+                round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+            PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+            RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+            RETURN;
+        END IF;
+        v_point_geom := public.gis_geojson_to_geom(p_point_geojson);
+    EXCEPTION WHEN OTHERS THEN
+        v_msg := format('参数错误：点位GeoJSON解析失败：%s，执行时间 %s 秒',
+            SQLERRM, round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN;
+    END;
+
+    IF v_point_geom IS NULL OR ST_IsEmpty(v_point_geom) OR GeometryType(v_point_geom) <> 'POINT' THEN
+        v_msg := format('参数错误：点位geometry必须为非空Point，执行时间 %s 秒',
+            round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN;
+    END IF;
+
+    v_point_geom := ST_SetSRID(ST_Force2D(v_point_geom), 4326);
+
+    SELECT count(*)::integer INTO v_scope_count
+    FROM public.bo_airspace_block b
+    WHERE b.del_flag = false
+      AND b.use_enabled = true
+      AND b.final_geom IS NOT NULL
+      AND b.project_id = btrim(p_project_id);
+
+    IF v_scope_count = 0 THEN
+        v_msg := format('无可校验空域区块数据，执行时间 %s 秒',
+            round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN;
+    END IF;
+
+    SELECT count(*)::integer,
+           COALESCE(array_agg(hit.id::text ORDER BY hit.id), ARRAY[]::text[])
+    INTO hit_count, hit_blockids
+    FROM (
+        SELECT DISTINCT b.id
+        FROM public.bo_airspace_block b
+        WHERE b.del_flag = false
+          AND b.use_enabled = true
+          AND b.final_geom IS NOT NULL
+          AND b.project_id = btrim(p_project_id)
+          AND ST_Covers(
+              ST_SetSRID(ST_MakeValid(ST_Force2D(b.final_geom)), 4326),
+              v_point_geom
+          )
+    ) hit;
+
+    ischeck := hit_count > 0;
+    code := 200;
+    IF ischeck THEN
+        msg := format('点位命中空域区块%s个，执行时间 %s 秒', hit_count,
+            round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    ELSE
+        msg := format('点位未命中空域区块，执行时间 %s 秒',
+            round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    END IF;
+    RETURN NEXT;
+
+EXCEPTION WHEN OTHERS THEN
+    v_msg := format('点位空域区块校验执行异常：%s，执行时间 %s 秒',
+        SQLERRM, round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+    PERFORM public.gis_write_error_log(500, v_msg, v_log_sql);
+    RETURN QUERY SELECT 500, v_msg, false, 0::integer, ARRAY[]::text[];
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_flight_point_airspace(varchar, text)
+IS '判断指定项目的点位命中哪些空域区块';
+
+-- SELECT * FROM public.gis_flight_point_airspace(
+--     'd10326d5a9894cd6b8b5bd365a103394',
+--     '{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[116.094985998182,36.4932144812562]}}'
+-- );
+
+-- =============================================================================
+-- 函数名称：3.gis_flight_task_airspace
 -- 函数功能：校验任务航线用空是否可执行
 -- 函数描述：
 --   1. 基础参数校验：项目、任务、航线GeoJSON、航点Z值、航线高度、日期、时间段。
@@ -280,7 +467,7 @@ IS '校验航线是否命中空域区块';
 SELECT gis_drop_function('gis_flight_task_airspace');
 
 -- =============================================================================
--- 函数介绍：2.gis_flight_task_airspace
+-- 函数介绍：3.gis_flight_task_airspace
 -- 主要作用：按空域命中、空域可用状态、用空时间段、航线高度和航点高度判断任务是否可执行。
 -- 入参说明：
 --   p_project_id       项目ID；varchar；必填；只检查该项目下启用且未删除的空域区块。
@@ -441,7 +628,7 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 三、空域范围和高度阻断校验。该步骤统一复用第3个空域区块提交前校验函数。
+    -- 三、空域范围和高度阻断校验。该步骤统一复用第4个空域区块提交前校验函数。
     SELECT *
     INTO v_airspace_check
     FROM public.gis_flight_airspace_check(p_project_id, p_route_geojson, p_route_height::numeric, true)
@@ -666,7 +853,7 @@ IS '校验任务航线用空是否可执行';
 -- );
 
 -- =============================================================================
--- 函数名称：3.gis_flight_airspace_check
+-- 函数名称：4.gis_flight_airspace_check
 -- 函数功能：空域区块提交前校验
 -- 函数描述：
 --   1. 接收项目ID、任务航线GeoJSON和航线高度。
@@ -688,7 +875,7 @@ IS '校验任务航线用空是否可执行';
 SELECT gis_drop_function('gis_flight_airspace_check');
 
 -- =============================================================================
--- 函数介绍：3.gis_flight_airspace_check
+-- 函数介绍：4.gis_flight_airspace_check
 -- 主要作用：校验任务航线所有航点是否均在可飞空域内，且飞行高度不超过空域高度。
 -- 入参说明：
 --   p_project_id       项目ID；text；必填；只检查该项目下未删除且final_geom不为空的空域区块。
