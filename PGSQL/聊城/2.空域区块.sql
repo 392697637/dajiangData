@@ -553,8 +553,12 @@ BEGIN
         RAISE EXCEPTION 'p_plans_per_block must be greater than 0';
     END IF;
 
-    IF p_days IS NULL OR p_days <= 0 THEN
-        RAISE EXCEPTION 'p_days must be greater than 0';
+    IF p_plans_per_block > 14 THEN
+        RAISE EXCEPTION 'p_plans_per_block must not exceed 14';
+    END IF;
+
+    IF p_days IS NULL THEN
+        RAISE EXCEPTION 'p_days must not be null';
     END IF;
 
     WITH random_block AS (
@@ -568,30 +572,51 @@ BEGIN
         SELECT
             p.id,
             p.use_date,
-            (
-                SELECT jsonb_agg(
-                    jsonb_build_object(
-                        'startTime', to_char(t.start_time, 'HH24:MI:SS'),
-                        'endTime', to_char(t.start_time + interval '1 hour', 'HH24:MI:SS')
-                    )
-                    ORDER BY t.start_time
-                )::text
-                FROM (
-                    SELECT
-                        time '08:00:00' + (floor(random() * 10)::integer * interval '1 hour') AS start_time
-                    FROM generate_series(1, p_plans_per_block) AS segment(segment_seq)
-                    WHERE p.id IS NOT NULL
-                ) t
-            ) AS time_plan
+            generated.time_plan,
+            generated.user_duration
         FROM public.bo_airspace_plan p
         JOIN random_block b
             ON b.id = p.block_id
-        WHERE p.use_date >= current_date
-          AND p.use_date < current_date + p_days
+        CROSS JOIN LATERAL (
+            WITH RECURSIVE segments(seq, start_minute, end_minute) AS (
+                SELECT 0, 360, 360
+                WHERE p.id IS NOT NULL
+                UNION ALL
+                SELECT s.seq + 1,
+                       s.end_minute + g.gap_minutes,
+                       s.end_minute + g.gap_minutes + d.duration_minutes
+                FROM segments s
+                CROSS JOIN LATERAL (
+                    -- Use 15-minute steps and reserve one hour for each remaining segment.
+                    SELECT 60 + 15 * floor(random() * (
+                        (least(360, 1200 - s.end_minute - (p_plans_per_block - s.seq - 1) * 60) - 60) / 15 + 1
+                    ))::integer AS duration_minutes
+                ) d
+                CROSS JOIN LATERAL (
+                    SELECT 15 * floor(random() * (
+                        (1200 - s.end_minute - d.duration_minutes
+                        - (p_plans_per_block - s.seq - 1) * 60) / 15 + 1
+                    ))::integer AS gap_minutes
+                ) g
+                WHERE s.seq < p_plans_per_block
+            )
+            SELECT jsonb_agg(
+                       jsonb_build_object(
+                           'startTime', to_char(time '00:00:00' + start_minute * interval '1 minute', 'HH24:MI:SS'),
+                           'endTime', to_char(time '00:00:00' + end_minute * interval '1 minute', 'HH24:MI:SS')
+                       ) ORDER BY seq
+                   )::text AS time_plan,
+                   sum(end_minute - start_minute)::double precision AS user_duration
+            FROM segments
+            WHERE seq > 0
+        ) generated
+        WHERE p.use_date >= current_date + CASE WHEN p_days < 0 THEN p_days + 1 ELSE 0 END
+          AND p.use_date < current_date + CASE WHEN p_days > 0 THEN p_days ELSE 1 END
     ),
     update_plan AS (
         UPDATE public.bo_airspace_plan p
         SET time_plan = t.time_plan,
+            user_duration = t.user_duration,
             update_time = now(),
             update_user = 'demo'
         FROM target_plan t
@@ -608,10 +633,14 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_airspace_plan_demo(integer, integer)
-IS '根据空域区块已有用空计划随机生成计划时间，只更新计划时间、修改人和修改时间';
+IS '随机生成不重叠用空时段并更新使用时长';
 
 -- 调用示例：将今天/明天已有计划更新为3段随机模拟时间。
 SELECT public.gis_airspace_plan_demo(3, 2);
+-- 负数向过去取天数（包含今天）：将昨天/今天已有计划更新为3段随机模拟时间。
+-- SELECT public.gis_airspace_plan_demo(3, -2);
+-- 0仅更新当天已有计划。
+-- SELECT public.gis_airspace_plan_demo(3, 0);
 
 -- =============================================================================
 -- 已有库增量补字段
