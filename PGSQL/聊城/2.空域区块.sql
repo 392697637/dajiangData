@@ -688,14 +688,24 @@ SELECT
 FROM public.bo_airspace
 WHERE id = 'liaochengzhuchengqu';
 
-//只是边界展示，可以做简化
-ALTER TABLE public.bo_airspace
-ADD COLUMN IF NOT EXISTS display_geom geometry(Polygon, 4326);
--- 0.00001 度 ≈ 1 米
--- 相邻边界点偏差小于约 1 米的点可能被删除
--- 轮廓整体形状尽量保持
--- 尽量避免生成自相交、破面等拓扑错误
--- 原始边界点很多时，点数和地图渲染压力会下降
--- 边界会有轻微变化，不适合精确空间校验
+-- //只是边界展示，可以做简化
+-- ALTER TABLE public.bo_airspace
+-- ADD COLUMN IF NOT EXISTS display_geom geometry(Polygon, 4326);
+-- -- 0.00001 度 ≈ 1 米
+-- -- 相邻边界点偏差小于约 1 米的点可能被删除
+-- -- 轮廓整体形状尽量保持
+-- -- 尽量避免生成自相交、破面等拓扑错误
+-- -- 原始边界点很多时，点数和地图渲染压力会下降
+-- -- 边界会有轻微变化，不适合精确空间校验
+-- UPDATE public.bo_airspace
+-- SET display_geom = ST_SimplifyPreserveTopology(geom, 0.00001);  
+
+
+-- 简化全表 geom 边界，减少顶点数量、几何数据量及后续空间计算开销。
+-- 容差使用坐标系单位：EPSG:4326 下 0.005 为度，在聊城附近约为数百米。
+-- 保持输入有效几何自身的拓扑有效性，但边界位置会变化，可能影响空间校验结果。
+-- 直接覆盖原始 geom，丢失的边界细节无法通过重复执行恢复，执行前应保留原始数据。
+-- 没有 WHERE 条件，将更新 bo_airspace 表的所有记录。
 UPDATE public.bo_airspace
-SET display_geom = ST_SimplifyPreserveTopology(geom, 0.00001);  
+SET geom = ST_SimplifyPreserveTopology(geom, 0.005);
+
