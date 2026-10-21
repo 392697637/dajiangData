@@ -1104,6 +1104,7 @@ BEGIN
                             2 AS priority
                         FROM bo_electric_fence f
                         WHERE f.fence_type IN (''1'',''2'')
+                          AND f.project_id = $4
                           AND f.del_flag = false
                           AND f.status = ''1''
                           AND f.use_enabled = true
@@ -1180,6 +1181,7 @@ BEGIN
                         ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                     FROM bo_electric_fence f
                     WHERE f.fence_type IN (''1'',''2'')
+                      AND f.project_id = $4
                       AND f.del_flag = false
                       AND f.status = ''1''
                       AND f.use_enabled = true
@@ -1253,6 +1255,7 @@ BEGIN
                     ST_AsGeoJSON(ST_SetSRID(f.geom, 4326))::json AS geom_geojson
                 FROM bo_electric_fence f
                 WHERE f.fence_type IN (''1'',''2'')
+                  AND f.project_id = $4
                   AND f.del_flag = false
                   AND f.status = ''1''
                   AND f.use_enabled = true
@@ -1289,7 +1292,7 @@ BEGIN
             ORDER BY il.path';
     END IF;
 
-    RETURN QUERY EXECUTE v_sql USING v_line, v_start_time, p_is_3d;
+    RETURN QUERY EXECUTE v_sql USING v_line, v_start_time, p_is_3d, NULLIF(btrim(p_project_id), '');
 
     -- 5. 无碰撞时返回空结果状00
     IF NOT FOUND THEN
