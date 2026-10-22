@@ -257,7 +257,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_flight_route_airspace(varchar, text)
-IS '校验航线是否命中空域区块';
+IS '校验航线是否命中项目内启用的空域区块并返回结果';
 
 -- =============================================================================
 -- 调用示例
@@ -432,7 +432,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_flight_point_airspace(varchar, text)
-IS '判断指定项目的点位命中哪些空域区块';
+IS '判断项目点位命中的空域区块并返回命中明细结果';
 
 -- SELECT * FROM public.gis_flight_point_airspace(
 --     'd10326d5a9894cd6b8b5bd365a103394',
@@ -845,7 +845,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_flight_task_airspace(varchar, varchar, text, double precision, varchar, text)
-IS '校验任务航线用空是否可执行';
+IS '校验任务航线用空计划时间高度及空域可执行状态';
 
 -- =============================================================================
 -- 调用示例
@@ -1129,7 +1129,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_flight_airspace_check(text, text, numeric, boolean)
-IS '空域区块提交前校验；航点必须全部在可飞空域内，航线高度和航点高度均不能超过可飞空域高度';
+IS '校验航线范围及航线航点高度是否符合空域限制';
 
 -- =============================================================================
 -- 调用示例
@@ -1409,7 +1409,7 @@ EXCEPTION
 END;
 $$;
 COMMENT ON FUNCTION public.gis_uav_flight_deviation_check(varchar, jsonb, integer[])
-IS '实时安全校验飞行任务偏差校验';
+IS '实时校验飞行任务偏航超高和管制空域入侵情况';
 
 -- =============================================================================
 -- 入参与返回结果说明
@@ -1637,7 +1637,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_flight_task_route_check(varchar, varchar, varchar, double precision)
-IS '任务航线冲突校验；按缓冲半径判断时间段内其他任务航线是否与本任务航线相交';
+IS '按时间段和缓冲半径校验任务航线之间的空间冲突';
 
 -- =============================================================================
 -- 调用示例
