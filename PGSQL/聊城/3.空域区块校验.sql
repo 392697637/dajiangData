@@ -153,6 +153,9 @@ BEGIN
     v_log_sql := format('SELECT * FROM public.gis_flight_route_airspace(%L, %L);',
         p_project_id, p_route_geojson);
 
+    -- 记录函数调用日志：入参和函数名称写入gis_error_log
+    PERFORM public.gis_write_error_log(600, 'gis_flight_route_airspace', v_log_sql);
+
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         v_msg := format('参数错误：项目ID不能为空，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
@@ -331,6 +334,9 @@ DECLARE
 BEGIN
     v_log_sql := format('SELECT * FROM public.gis_flight_point_airspace(%L, %L);',
         p_project_id, p_point_geojson);
+
+    -- 记录函数调用日志：入参和函数名称写入gis_error_log
+    PERFORM public.gis_write_error_log(600, 'gis_flight_point_airspace', v_log_sql);
 
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         v_msg := format('参数错误：项目ID不能为空，执行时间 %s 秒',
@@ -532,6 +538,9 @@ DECLARE
 BEGIN
     v_log_sql := format('SELECT * FROM public.gis_flight_task_airspace(%L, %L, %L, %L, %L, %L);',
         p_project_id, p_task_id, p_route_geojson, p_route_height, p_use_date, p_task_time_plan);
+
+    -- 记录函数调用日志：入参和函数名称写入gis_error_log
+    PERFORM public.gis_write_error_log(600, 'gis_flight_task_airspace', v_log_sql);
 
     -- 一、基础参数校验。
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
@@ -937,6 +946,9 @@ BEGIN
     v_log_sql := format('SELECT * FROM public.gis_flight_airspace_check(%L, %L, %s, %L);',
         p_project_id, p_route_geojson, COALESCE(p_route_height::text, 'NULL'), p_only_enabled);
 
+    -- 记录函数调用日志：入参和函数名称写入gis_error_log
+    PERFORM public.gis_write_error_log(600, 'gis_flight_airspace_check', v_log_sql);
+
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         v_msg := format('参数错误：项目ID不能为空，执行时间 %s 秒',
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
@@ -1226,8 +1238,8 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   code         integer；200=校验完成，400=参数或数据错误，500=执行异常。
 --   msg          text；校验结果或错误原因；成功时包含当前违规项数。
 --   ischeck      boolean；true=本次所选规则全部正常，false=有违规或执行失败。
---   active_rule  integer[]；固定三位0/1，与入参规则位置一一对应；1=该规则违规，0=正常或未执行。
---                全部正常返回[0,0,0]；执行失败也返回[0,0,0]，必须先检查code。
+--   active_rule  jsonb数组；固定三位0/1，与入参规则位置一一对应；1=该规则正常，0=该规则违规或未执行，返回格式为[1,0,1]。
+--                全部正常返回[1,1,1]；执行失败也返回[1,1,1]，必须先检查code。
 --   datajson     jsonb；包含project_id、task_id、telemetry的JSON对象。
 --                project_id、task_id为去除首尾空白后的项目ID、任务ID；telemetry为原始遥测JSON。
 -- 注意事项：
@@ -1237,7 +1249,7 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   4. 规划航线按任务ID从bo_flight_job.plan_route_gemo读取，项目ID由bo_flight_job.project_id取得。
 --   5. 经过空域数组用于记录规划航线关联关系；实时管制校验仍检查当前位置所在的全部项目空域，避免偏航进入其他空域时漏检。
 --   6. 未选择的规则不参与结果汇总，不能将未返回的规则认定为已恢复。
---   7. code=400或500时ischeck=false、active_rule=[0,0,0]，不能据此判断正常或恢复。
+--   7. code=400或500时ischeck=false、active_rule=[1,1,1]，不能据此判断正常或恢复。
 --   8. 规则3由每次遥测调用触发，不包含空域时段结束后的后台定时检查。
 --   9. ARRAY[1,0,1]仅执行规则1和3；ARRAY[0,1,0]仅执行规则2；ARRAY[0,0,0]不执行安全规则，基础参数及任务航线仍须有效。
 -- 依赖说明：PostGIS、bo_flight_job、bo_airspace_block、bo_airspace_plan、gis_flight_route_zone_check及其围栏表。
@@ -1251,7 +1263,7 @@ RETURNS TABLE (
     code integer,
     msg text,
     ischeck boolean,
-    active_rule integer[],
+    active_rule jsonb,
     datajson jsonb
 )
 LANGUAGE plpgsql
@@ -1273,13 +1285,19 @@ DECLARE
     v_rule integer;
     v_violation_count integer := 0;
     v_rules integer[];
+    v_active_rule integer[] := ARRAY[1,1,1];
     v_bad boolean;
     v_intrusion boolean := false;
     v_control record;
     v_control_hit boolean := false;
+    v_log_sql text;
 
 BEGIN
-    active_rule := ARRAY[0,0,0];
+    v_log_sql := format('SELECT * FROM public.gis_uav_flight_deviation_check(%L, %L, %L);',
+        p_task_id, p_telemetry::text, p_rules::text);
+
+    -- 记录函数调用日志：入参和函数名称写入gis_error_log
+    PERFORM public.gis_write_error_log(600, 'gis_uav_flight_deviation_check', v_log_sql);
     -- 完成所有入参校验和规则计算后，统一返回本次结果。
     IF COALESCE(v_task_id, '') = ''
        OR jsonb_typeof(p_telemetry) IS DISTINCT FROM 'object' THEN
@@ -1372,21 +1390,21 @@ BEGIN
     FOREACH v_rule IN ARRAY v_rules LOOP
         v_bad := CASE v_rule WHEN 1 THEN v_distance > 50 WHEN 2 THEN v_height > 120 ELSE v_intrusion END;
         IF v_bad THEN
-            active_rule[v_rule] := 1;
+            v_active_rule[v_rule] := 0;
             v_violation_count := v_violation_count + 1;
         END IF;
     END LOOP;
     RETURN QUERY SELECT 200, format('校验完成，当前异常%s项', v_violation_count),
-        v_violation_count = 0, active_rule,
+        v_violation_count = 0, to_jsonb(v_active_rule),
         jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
 EXCEPTION
     WHEN data_exception THEN
-        RETURN QUERY SELECT 400, SQLERRM::text, false, ARRAY[0,0,0],
+        RETURN QUERY SELECT 400, SQLERRM::text, false, '[1,1,1]'::jsonb,
             jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
     WHEN OTHERS THEN
         -- 执行失败时不返回部分校验结果。
         RETURN QUERY SELECT 500, ('实时安全告警校验异常：' || SQLERRM)::text,
-            false, ARRAY[0,0,0],
+            false, '[1,1,1]'::jsonb,
             jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
 END;
 $$;
@@ -1406,16 +1424,16 @@ IS '实时安全校验飞行任务偏差校验';
 --   code         integer；200=校验完成，400=参数或数据错误，500=执行异常。
 --   msg          text；校验结果或错误原因。
 --   ischeck      boolean；true=本次所选规则全部正常，false=有违规或执行失败。
---   active_rule  integer[]；固定三位0/1，位置依次对应偏航、超高、闯入管制空域。
---                1=该规则违规，0=正常或未执行；例如[0,1,0]表示仅检测到超高违规。
+--   active_rule  jsonb数组；固定三位0/1，位置依次对应偏航、超高、闯入管制空域，返回格式为[1,0,1]。
+--                1=该规则正常，0=该规则违规或未执行；例如[1,0,1]表示仅检测到超高违规。
 --   datajson     jsonb；项目ID、任务ID及原始遥测信息组成的JSON对象。
 -- datajson字段：
 --   project_id   项目ID，去除首尾空白。
 --   task_id     任务ID，去除首尾空白。
 --   telemetry    原样返回传入的遥测JSON。
--- 注意：code=400/500时active_rule=[0,0,0]，不表示正常，调用方须先检查code。
+-- 注意：code=400/500时active_rule=[1,1,1]，不表示正常，调用方须先检查code。
 -- 返回示例（返回行表示为JSON）：
--- {"code":200,"msg":"校验完成，当前异常1项","ischeck":false,"active_rule":[0,1,0],
+-- {"code":200,"msg":"校验完成，当前异常1项","ischeck":false,"active_rule":[0,1,1],
 --  "datajson":{"project_id":"项目ID","task_id":"任务ID",
 --  "telemetry":{"longitude":116.09,"latitude":36.48,
 --               "altitude":160,"height":125,"timeStamp":"2026-10-22 15:30:00"}}}
@@ -1440,8 +1458,8 @@ IS '实时安全校验飞行任务偏差校验';
 --       "altitude":160,"height":125,"timeStamp":"2026-10-22 15:30:00"}'::jsonb,
 --     ARRAY[1,0,1]
 -- );
--- 仅校验超高时最后一个参数传ARRAY[0,1,0]；正常时active_rule返回[0,0,0]。
--- 入参ARRAY[1,0,1]：仅执行偏航、管制校验；若仅偏航违规则active_rule=[1,0,0]。
+-- 仅校验超高时最后一个参数传ARRAY[0,1,0]；正常时active_rule返回[1,1,1]。
+-- 入参ARRAY[1,0,1]：仅执行偏航、管制校验；若仅偏航违规则active_rule=[0,1,1]。
 
 -- =============================================================================
 -- 删除函数
@@ -1499,6 +1517,9 @@ DECLARE
 BEGIN
     v_log_sql := format('SELECT * FROM public.gis_flight_task_route_check(%L, %L, %L, %L);',
         p_task_id, p_start_time, p_end_time, p_buffer_radius);
+
+    -- 记录函数调用日志：入参和函数名称写入gis_error_log
+    PERFORM public.gis_write_error_log(600, 'gis_flight_task_route_check', v_log_sql);
 
     -- 一、基础参数校验。
     v_task_id := btrim(p_task_id);
