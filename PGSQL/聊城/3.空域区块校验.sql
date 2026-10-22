@@ -1142,9 +1142,8 @@ IS '空域区块提交前校验；航点必须全部在可飞空域内，航线�
 --      无人机飞入管制范围，以及原可飞时段结束后仍停留在空域内，均判为违规。
 --   6. 汇总本次所选规则的违规类型；全部正常时通过校验，任一规则违规时不通过。
 -- 参数说明：
---   p_project_id  项目ID，用于限定航线、空域区块及项目围栏范围。
---   p_task_id    任务ID，用于定位待对比的规划航线。
---   p_telemetry   无人机实时遥测，包括无人机ID、经纬度、海拔高度、距地高度和遥测时间。
+--   p_task_id    任务ID，用于定位任务、规划航线、项目空域及项目围栏范围。
+--   p_telemetry   无人机实时遥测，包括经纬度、海拔高度、距地高度和遥测时间。
 --   p_rules       三位整数校验开关数组，按偏航、超高、闯入管制空域排列；1执行，0跳过，默认ARRAY[1,1,1]。
 -- 返回说明：
 --   返回code、msg、ischeck、active_rule、datajson。
@@ -1156,7 +1155,7 @@ IS '空域区块提交前校验；航点必须全部在可飞空域内，航线�
 -- =============================================================================
 -- 航线规划来源：使用现有public.bo_flight_job表
 -- =============================================================================
--- 任务ID使用bo_flight_job.id，规划航线使用plan_route_gemo，规划空域使用plan_airspace_block_id。
+-- 任务ID使用bo_flight_job.out_id，规划航线使用plan_route_gemo，规划空域使用plan_airspace_block_id。
 
 -- =============================================================================
 -- =============================================================================
@@ -1209,18 +1208,16 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 -- 函数介绍：5.gis_uav_flight_deviation_check
 -- 主要作用：读取指定项目任务的规划航线，执行偏航、超高和闯入管制空域校验，返回校验结果及遥测信息。
 -- 入参说明：
---   p_project_id  项目ID；varchar；必填；与bo_flight_job.project_id匹配。
---   p_task_id    任务ID；varchar；必填；与bo_flight_job.id匹配，且del_flag=false。
+--   p_task_id    任务ID；varchar；必填；与bo_flight_job.out_id匹配，且del_flag=false；项目ID由任务记录取得。
 --   p_telemetry   遥测信息；jsonb；必填；必须为JSON对象，包含下列全部遥测字段。
 --   p_rules       校验开关；integer[]；选填，默认ARRAY[1,1,1]；固定三位0/1，位置依次对应规则1、2、3。
 -- 遥测字段说明：
---   terminalId          无人机ID；字符串；必填，不能为空白。
 --   longitude/latitude  WGS84经纬度；数值；必填；范围分别为[-180,180]、[-90,90]。
 --   altitude            海拔高度；数值；必填；单位米，必须为有限值，用于围栏高度判断。
 --   height              距地高度；数值；必填；单位米，必须为非负有限值，用于超高校验。
---   timeStamp           遥测时间；数值；必填；Unix毫秒时间戳，用于可飞时段判断。
+--   timeStamp           遥测时间；字符串；必填；格式yyyy-MM-dd HH:mm:ss，按北京时间用于可飞时段判断。
 -- 入参校验：
---   1. 项目ID、任务ID及无人机ID不能为空，遥测必须为JSON对象。
+--   1. 项目ID、任务ID不能为空，遥测必须为JSON对象。
 --   2. 规则参数必须为长度3的一维整数数组，各元素只能为0或1，不能为NULL。
 --   3. 经纬度、海拔高度、距地高度及时间戳必须有效。
 --   4. 指定项目下必须存在未删除的规划航线，否则返回400。
@@ -1237,7 +1234,7 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   1. 偏航距离等于50米、距地高度等于120米时均正常。
 --   2. 用空计划按遥测时间转换为北京时间，采用[开始,结束)，支持跨午夜计划。
 --   3. 持续异常去重、恢复及乱序过滤由调用方维护；只有code=200才表示校验完成。
---   4. 规划航线按项目ID和任务ID从bo_flight_job.plan_route_gemo读取，不再从遥测JSON传入。
+--   4. 规划航线按任务ID从bo_flight_job.plan_route_gemo读取，项目ID由bo_flight_job.project_id取得。
 --   5. 经过空域数组用于记录规划航线关联关系；实时管制校验仍检查当前位置所在的全部项目空域，避免偏航进入其他空域时漏检。
 --   6. 未选择的规则不参与结果汇总，不能将未返回的规则认定为已恢复。
 --   7. code=400或500时ischeck=false、active_rule=[0,0,0]，不能据此判断正常或恢复。
@@ -1246,7 +1243,6 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 -- 依赖说明：PostGIS、bo_flight_job、bo_airspace_block、bo_airspace_plan、gis_flight_route_zone_check及其围栏表。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_uav_flight_deviation_check(
-    p_project_id varchar,
     p_task_id varchar,
     p_telemetry jsonb,
     p_rules integer[] DEFAULT ARRAY[1,1,1]
@@ -1262,9 +1258,8 @@ LANGUAGE plpgsql
 VOLATILE
 AS $$
 DECLARE
-    v_project varchar := btrim(p_project_id);
     v_task_id varchar := btrim(p_task_id);
-    v_terminal varchar := btrim(p_telemetry->>'terminalId');
+    v_project varchar;
     v_lon double precision;
     v_lat double precision;
     v_alt double precision;
@@ -1286,10 +1281,9 @@ DECLARE
 BEGIN
     active_rule := ARRAY[0,0,0];
     -- 完成所有入参校验和规则计算后，统一返回本次结果。
-    IF COALESCE(v_project, '') = '' OR COALESCE(v_task_id, '') = ''
-       OR COALESCE(v_terminal, '') = ''
+    IF COALESCE(v_task_id, '') = ''
        OR jsonb_typeof(p_telemetry) IS DISTINCT FROM 'object' THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '项目ID、任务ID、遥测对象及terminalId不能为空';
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '任务ID和遥测对象不能为空';
     END IF;
     IF p_rules IS NULL OR cardinality(p_rules) <> 3
        OR array_ndims(p_rules) IS DISTINCT FROM 1 OR EXISTS (
@@ -1313,20 +1307,25 @@ BEGIN
     IF v_height IS NULL OR v_height < 0 OR v_height::text IN ('NaN', 'Infinity', '-Infinity') THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '遥测height距地高度不能为空且必须为非负有限值（米）';
     END IF;
-    IF p_telemetry->>'timeStamp' IS NULL THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '遥测时间timeStamp不能为空（Unix毫秒时间戳）';
+    IF p_telemetry->>'timeStamp' IS NULL OR btrim(p_telemetry->>'timeStamp') = '' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '遥测时间timeStamp不能为空（格式yyyy-MM-dd HH:mm:ss）';
     END IF;
-    v_time := to_timestamp((p_telemetry->>'timeStamp')::double precision / 1000.0);
+    BEGIN
+        v_time := (btrim(p_telemetry->>'timeStamp')::timestamp without time zone)
+            AT TIME ZONE 'Asia/Shanghai';
+    EXCEPTION WHEN OTHERS THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'timeStamp格式错误，应为yyyy-MM-dd HH:mm:ss';
+    END;
     IF NOT isfinite(v_time) THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'timeStamp必须为有效毫秒时间戳';
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'timeStamp必须为有效时间';
     END IF;
     v_local := v_time AT TIME ZONE 'Asia/Shanghai';
     v_point := ST_SetSRID(ST_MakePoint(v_lon, v_lat, v_alt), 4326);
-    SELECT r.plan_route_gemo INTO v_route
+    SELECT r.project_id, r.plan_route_gemo INTO v_project, v_route
     FROM public.bo_flight_job r
-    WHERE r.id = v_task_id AND r.project_id = v_project AND r.del_flag = false;
+    WHERE r.out_id = v_task_id AND r.del_flag = false;
     IF NOT FOUND THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '指定项目下不存在该线路规划或航线已删除';
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '指定任务out_id不存在或任务已删除';
     END IF;
     IF 1 = ANY(v_rules) THEN
         IF v_route IS NULL OR ST_IsEmpty(v_route)
@@ -1391,19 +1390,18 @@ EXCEPTION
             jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
 END;
 $$;
-COMMENT ON FUNCTION public.gis_uav_flight_deviation_check(varchar, varchar, jsonb, integer[])
-IS '实时安全校验：1偏航超过50米，2距地高度超过120米，3闯入管制空域；仅返回本次校验结果，告警去重和恢复由调用方处理';
+COMMENT ON FUNCTION public.gis_uav_flight_deviation_check(varchar, jsonb, integer[])
+IS '实时安全校验飞行任务偏差校验';
 
 -- =============================================================================
 -- 入参与返回结果说明
 -- =============================================================================
 -- 遥测信息字段：
---   terminalId  无人机ID；字符串，必填。
 --   longitude   WGS84经度；数值，必填，范围[-180,180]。
 --   latitude    WGS84纬度；数值，必填，范围[-90,90]。
 --   altitude    海拔高度；数值，必填，单位米。
 --   height      距地高度；数值，必填，单位米，非负有限值。
---   timeStamp   遥测时间；必填，Unix毫秒时间戳。
+--   timeStamp   遥测时间；必填，字符串格式yyyy-MM-dd HH:mm:ss，按北京时间解析。
 -- 返回字段：
 --   code         integer；200=校验完成，400=参数或数据错误，500=执行异常。
 --   msg          text；校验结果或错误原因。
@@ -1419,8 +1417,8 @@ IS '实时安全校验：1偏航超过50米，2距地高度超过120米，3闯�
 -- 返回示例（返回行表示为JSON）：
 -- {"code":200,"msg":"校验完成，当前异常1项","ischeck":false,"active_rule":[0,1,0],
 --  "datajson":{"project_id":"项目ID","task_id":"任务ID",
---  "telemetry":{"terminalId":"UAV-001","longitude":116.09,"latitude":36.48,
---               "altitude":160,"height":125,"timeStamp":1792555200000}}}
+--  "telemetry":{"longitude":116.09,"latitude":36.48,
+--               "altitude":160,"height":125,"timeStamp":"2026-10-22 15:30:00"}}}
 
 -- =============================================================================
 -- 调用示例
@@ -1435,12 +1433,11 @@ IS '实时安全校验：1偏航超过50米，2距地高度超过120米，3闯�
 --              ORDER BY b.id)
 -- FROM (SELECT ST_GeomFromText('LINESTRING Z(116.08 36.47 100,116.10 36.49 100)', 4326) AS geom) route;
 --
--- 2. 按项目ID、任务ID、遥测信息和规则开关进行实时校验；下例只执行偏航和管制校验。
+-- 2. 按任务ID、遥测信息和规则开关进行实时校验；项目ID由任务记录自动取得。
 -- SELECT * FROM public.gis_uav_flight_deviation_check(
---     'project-001',
 --     'task-001',
---     '{"terminalId":"UAV-001","longitude":116.09,"latitude":36.48,
---       "altitude":160,"height":125,"timeStamp":1792555200000}'::jsonb,
+--     '{"longitude":116.09,"latitude":36.48,
+--       "altitude":160,"height":125,"timeStamp":"2026-10-22 15:30:00"}'::jsonb,
 --     ARRAY[1,0,1]
 -- );
 -- 仅校验超高时最后一个参数传ARRAY[0,1,0]；正常时active_rule返回[0,0,0]。
