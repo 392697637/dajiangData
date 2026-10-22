@@ -1442,3 +1442,189 @@ IS '实时安全校验飞行任务偏差校验';
 -- );
 -- 仅校验超高时最后一个参数传ARRAY[0,1,0]；正常时active_rule返回[0,0,0]。
 -- 入参ARRAY[1,0,1]：仅执行偏航、管制校验；若仅偏航违规则active_rule=[1,0,0]。
+
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+SELECT public.gis_drop_function('gis_flight_task_route_check');
+
+-- =============================================================================
+-- 函数名称：6.gis_flight_task_route_check
+-- 函数功能：任务航线冲突校验
+-- 函数描述：
+--   1. 根据任务ID从bo_flight_job读取未删除任务的规划航线plan_route_gemo。
+--   2. 按开始时间和结束时间查询bo_flight_job中计划时间与该时间段重叠的未删除任务。
+--   3. 将当前任务航线按缓冲半径生成缓冲区，与查询出的其他任务航线做相交校验。
+--   4. 返回与当前任务航线相交的任务ID，支持单个或多个，多个按逗号分隔；不相交时为空字符串。
+-- 入参说明：
+--   p_task_id        任务ID；varchar；必填；与bo_flight_job.out_id匹配，且del_flag=false。
+--   p_start_time     开始时间；varchar；必填；格式yyyy-MM-dd或yyyy-MM-dd HH:mm:ss。
+--   p_end_time       结束时间；varchar；必填；格式yyyy-MM-dd或yyyy-MM-dd HH:mm:ss；不能早于开始时间。
+--   p_buffer_radius  缓冲半径；double precision；必填；单位米；必须为非负有限值。
+-- 返回说明：
+--   code         integer；200=校验完成，400=参数或数据错误，500=执行异常。
+--   msg          text；校验结果或错误原因；成功时包含当前相交任务数。
+--   ischeck      boolean；true=无相交任务，false=存在相交任务或执行失败。
+--   task_ids     text；相交任务ID，多个以逗号分隔；无相交任务、参数错误或执行失败时为空字符串。
+-- 注意事项：
+--   1. 时间段重叠按bo_flight_job.plan_start_time、plan_end_time的日期判断，采用闭区间。
+--   2. 当前任务自身不参与相交校验。
+--   3. 缓冲半径按WGS84地理坐标计算，缓冲半径为0时直接使用原航线做相交校验。
+--   4. 规划航线必须为有效、非空且坐标合法的LineString或MultiLineString。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.gis_flight_task_route_check(
+    p_task_id varchar,
+    p_start_time varchar,
+    p_end_time varchar,
+    p_buffer_radius double precision
+)
+RETURNS TABLE (
+    code integer,
+    msg text,
+    ischeck boolean,
+    task_ids text
+)
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    v_log_sql text;
+    v_task_id varchar;
+    v_start_time timestamp;
+    v_end_time timestamp;
+    v_route geometry;
+    v_buffer geometry;
+    v_hit_ids text[];
+    v_msg text;
+BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_flight_task_route_check(%L, %L, %L, %L);',
+        p_task_id, p_start_time, p_end_time, p_buffer_radius);
+
+    -- 一、基础参数校验。
+    v_task_id := btrim(p_task_id);
+    IF v_task_id IS NULL OR v_task_id = '' THEN
+        v_msg := '参数错误：任务ID不能为空';
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, ''::text;
+        RETURN;
+    END IF;
+
+    IF p_start_time IS NULL OR btrim(p_start_time) = '' THEN
+        v_msg := '参数错误：开始时间不能为空';
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, ''::text;
+        RETURN;
+    END IF;
+
+    IF p_end_time IS NULL OR btrim(p_end_time) = '' THEN
+        v_msg := '参数错误：结束时间不能为空';
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, ''::text;
+        RETURN;
+    END IF;
+
+    IF p_buffer_radius IS NULL OR p_buffer_radius < 0
+       OR p_buffer_radius::text IN ('NaN', 'Infinity', '-Infinity') THEN
+        v_msg := '参数错误：缓冲半径不能为空且必须为非负有限值（米）';
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, ''::text;
+        RETURN;
+    END IF;
+
+    -- 二、时间参数解析。
+    BEGIN
+        v_start_time := btrim(p_start_time)::timestamp;
+        v_end_time := btrim(p_end_time)::timestamp;
+    EXCEPTION WHEN OTHERS THEN
+        v_msg := '参数错误：开始时间或结束时间格式错误，应为yyyy-MM-dd或yyyy-MM-dd HH:mm:ss';
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, ''::text;
+        RETURN;
+    END;
+
+    IF v_start_time > v_end_time THEN
+        v_msg := '参数错误：开始时间不能晚于结束时间';
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, ''::text;
+        RETURN;
+    END IF;
+
+    -- 三、读取当前任务规划航线。
+    SELECT g.plan_route_gemo INTO v_route
+    FROM public.bo_flight_job g
+    WHERE g.out_id = v_task_id AND g.del_flag = false
+    ORDER BY g.create_time DESC
+    LIMIT 1;
+
+    IF NOT FOUND THEN
+        v_msg := format('参数错误：任务%s不存在或任务已删除', v_task_id);
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, ''::text;
+        RETURN;
+    END IF;
+
+    IF v_route IS NULL OR ST_IsEmpty(v_route)
+       OR GeometryType(v_route) NOT IN ('LINESTRING', 'MULTILINESTRING')
+       OR NOT ST_IsValid(v_route) THEN
+        v_msg := format('参数错误：任务%s的规划航线必须为有效且非空的LineString或MultiLineString', v_task_id);
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
+        RETURN QUERY SELECT 400, v_msg, false, ''::text;
+        RETURN;
+    END IF;
+
+    v_route := ST_SetSRID(ST_Force2D(v_route), 4326);
+
+    -- 四、按缓冲半径生成缓冲区，半径为0时直接使用原航线。
+    IF p_buffer_radius > 0 THEN
+        v_buffer := ST_Buffer(v_route::geography, p_buffer_radius)::geometry;
+    ELSE
+        v_buffer := v_route;
+    END IF;
+
+    -- 五、查询时间段内其他任务航线，与缓冲区做相交校验。
+    SELECT array_agg(DISTINCT g.out_id ORDER BY g.out_id)
+    INTO v_hit_ids
+    FROM public.bo_flight_job g
+    WHERE g.del_flag = false
+      AND g.out_id IS NOT NULL AND btrim(g.out_id) <> ''
+      AND g.out_id <> v_task_id
+      AND g.plan_route_gemo IS NOT NULL AND NOT ST_IsEmpty(g.plan_route_gemo)
+      AND g.plan_start_time::date <= v_end_time::date
+      AND g.plan_end_time::date >= v_start_time::date
+      AND ST_Intersects(v_buffer, ST_SetSRID(ST_Force2D(g.plan_route_gemo), 4326));
+
+    v_hit_ids := COALESCE(v_hit_ids, ARRAY[]::text[]);
+
+    IF COALESCE(array_length(v_hit_ids, 1), 0) = 0 THEN
+        v_msg := format('校验完成，当前相交任务0个：任务%s在%s至%s时间段内无相交航线',
+            v_task_id, v_start_time, v_end_time);
+        RETURN QUERY SELECT 200, v_msg, true, ''::text;
+    ELSE
+        v_msg := format('校验完成，当前相交任务%s个：%s',
+            array_length(v_hit_ids, 1), array_to_string(v_hit_ids, ','));
+        RETURN QUERY SELECT 200, v_msg, false, array_to_string(v_hit_ids, ',');
+    END IF;
+
+EXCEPTION
+    WHEN data_exception THEN
+        PERFORM public.gis_write_error_log(400, SQLERRM::text, v_log_sql);
+        RETURN QUERY SELECT 400, SQLERRM::text, false, ''::text;
+    WHEN OTHERS THEN
+        PERFORM public.gis_write_error_log(500, ('任务航线冲突校验异常：' || SQLERRM)::text, v_log_sql);
+        RETURN QUERY SELECT 500, ('任务航线冲突校验异常：' || SQLERRM)::text, false, ''::text;
+END;
+$$;
+
+COMMENT ON FUNCTION public.gis_flight_task_route_check(varchar, varchar, varchar, double precision)
+IS '任务航线冲突校验；按缓冲半径判断时间段内其他任务航线是否与本任务航线相交';
+
+-- =============================================================================
+-- 调用示例
+-- =============================================================================
+-- SELECT code, msg, ischeck, task_ids
+-- FROM public.gis_flight_task_route_check(
+--     'task-001',
+--     '2026-10-22',
+--     '2026-10-23 18:00:00',
+--     50
+-- );
