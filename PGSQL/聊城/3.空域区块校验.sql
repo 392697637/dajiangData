@@ -1474,14 +1474,14 @@ SELECT public.gis_drop_function('gis_flight_task_route_check');
 -- 函数功能：任务航线冲突校验
 -- 函数描述：
 --   1. 根据任务ID从bo_flight_job读取未删除任务的规划航线plan_route_gemo。
---   2. 按开始时间和结束时间查询bo_flight_job中计划时间与该时间段重叠的未删除任务。
+--   2. 按开始时间和飞行时长计算结束时间，查询计划时间重叠的未删除任务。
 --   3. 将当前任务航线按缓冲半径生成缓冲区，与查询出的其他任务航线做相交校验。
 --   4. 返回与当前任务航线相交的任务ID，支持单个或多个，多个按逗号分隔；不相交时为空字符串。
 -- 入参说明：
 --   p_task_id        任务ID；varchar；必填；与bo_flight_job.out_id匹配，且del_flag=false。
 --   p_start_time     开始时间；varchar；必填；格式yyyy-MM-dd或yyyy-MM-dd HH:mm:ss。
---   p_end_time       结束时间；varchar；必填；格式yyyy-MM-dd或yyyy-MM-dd HH:mm:ss；不能早于开始时间。
---   p_buffer_radius  缓冲半径；double precision；必填；单位米；必须为非负有限值。
+--   p_flight_minutes 飞行时长；double precision；默认30分钟；必须大于0。
+--   p_buffer_radius  航线缓冲；double precision；默认10米；必须为非负有限值。
 -- 返回说明：
 --   code         integer；200=校验完成，400=参数或数据错误，500=执行异常。
 --   msg          text；校验结果或错误原因；成功时包含当前相交任务数。
@@ -1496,8 +1496,8 @@ SELECT public.gis_drop_function('gis_flight_task_route_check');
 CREATE OR REPLACE FUNCTION public.gis_flight_task_route_check(
     p_task_id varchar,
     p_start_time varchar,
-    p_end_time varchar,
-    p_buffer_radius double precision
+    p_flight_minutes double precision DEFAULT 30,
+    p_buffer_radius double precision DEFAULT 10
 )
 RETURNS TABLE (
     code integer,
@@ -1519,7 +1519,7 @@ DECLARE
     v_msg text;
 BEGIN
     v_log_sql := format('SELECT * FROM public.gis_flight_task_route_check(%L, %L, %L, %L);',
-        p_task_id, p_start_time, p_end_time, p_buffer_radius);
+        p_task_id, p_start_time, p_flight_minutes, p_buffer_radius);
 
     -- 记录函数调用日志：入参和函数名称写入gis_error_log
     PERFORM public.gis_write_error_log(600, 'gis_flight_task_route_check', v_log_sql);
@@ -1540,8 +1540,9 @@ BEGIN
         RETURN;
     END IF;
 
-    IF p_end_time IS NULL OR btrim(p_end_time) = '' THEN
-        v_msg := '参数错误：结束时间不能为空';
+    IF p_flight_minutes IS NULL OR p_flight_minutes <= 0
+       OR p_flight_minutes::text IN ('NaN', 'Infinity', '-Infinity') THEN
+        v_msg := '参数错误：飞行时长必须大于0分钟';
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
         RETURN QUERY SELECT 400, v_msg, false, ''::text;
         RETURN;
@@ -1558,20 +1559,13 @@ BEGIN
     -- 二、时间参数解析。
     BEGIN
         v_start_time := btrim(p_start_time)::timestamp;
-        v_end_time := btrim(p_end_time)::timestamp;
+        v_end_time := v_start_time + make_interval(secs => p_flight_minutes * 60);
     EXCEPTION WHEN OTHERS THEN
-        v_msg := '参数错误：开始时间或结束时间格式错误，应为yyyy-MM-dd或yyyy-MM-dd HH:mm:ss';
+        v_msg := '参数错误：开始时间格式错误，应为yyyy-MM-dd HH:mm:ss';
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
         RETURN QUERY SELECT 400, v_msg, false, ''::text;
         RETURN;
     END;
-
-    IF v_start_time > v_end_time THEN
-        v_msg := '参数错误：开始时间不能晚于结束时间';
-        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, ''::text;
-        RETURN;
-    END IF;
 
     -- 三、读取当前任务规划航线。
     SELECT g.plan_route_gemo INTO v_route
@@ -1639,8 +1633,8 @@ EXCEPTION
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_flight_task_route_check(varchar, varchar, varchar, double precision)
-IS '按时间段和缓冲半径校验任务航线之间的空间冲突';
+COMMENT ON FUNCTION public.gis_flight_task_route_check(varchar, varchar, double precision, double precision)
+IS '按飞行时长和缓冲校验任务航线冲突';
 
 -- =============================================================================
 -- 调用示例
@@ -1648,9 +1642,10 @@ IS '按时间段和缓冲半径校验任务航线之间的空间冲突';
 -- SELECT code, msg, ischeck, task_ids
 -- FROM public.gis_flight_task_route_check(
 --     'task-001',
---     '2026-10-22',
---     '2026-10-23 18:00:00',
---     50
+--     '2026-10-23 14:00:00',
+--     30,
+--     10
 -- );
+
 
 
