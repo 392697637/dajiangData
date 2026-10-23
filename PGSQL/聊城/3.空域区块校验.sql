@@ -320,7 +320,8 @@ RETURNS TABLE (
     msg text,
     ischeck boolean,
     hit_count integer,
-    hit_blockids text[]
+    hit_blockids text[],
+    task_id varchar
 )
 LANGUAGE plpgsql
 VOLATILE
@@ -520,7 +521,8 @@ RETURNS TABLE (
     msg text,
     ischeck boolean,
     hit_count integer,
-    hit_blockids text[]
+    hit_blockids text[],
+    task_id varchar
 )
 LANGUAGE plpgsql
 VOLATILE
@@ -546,35 +548,35 @@ BEGIN
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         v_msg := '参数错误：项目ID不能为空';
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id;
         RETURN;
     END IF;
 
     IF p_task_id IS NULL OR btrim(p_task_id) = '' THEN
         v_msg := '参数错误：任务ID不能为空';
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id;
         RETURN;
     END IF;
 
     IF p_route_height IS NULL OR p_route_height < 0 THEN
         v_msg := '参数错误：航线高度不能为空且不能小于0';
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id;
         RETURN;
     END IF;
 
     IF p_use_date IS NULL OR btrim(p_use_date) = '' THEN
         v_msg := '参数错误：用空日期不能为空';
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id;
         RETURN;
     END IF;
 
     IF p_task_time_plan IS NULL OR btrim(p_task_time_plan) = '' THEN
         v_msg := '参数错误：任务用空时间段不能为空';
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id;
         RETURN;
     END IF;
 
@@ -584,7 +586,7 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
         v_msg := '参数错误：用空日期格式错误，应为yyyy-MM-dd';
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id;
         RETURN;
     END;
 
@@ -612,7 +614,7 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
         v_msg := '参数错误：任务用空时间段格式错误，应为[{startTime,endTime}]数组';
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id;
         RETURN;
     END;
 
@@ -621,7 +623,7 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN
         v_msg := format('参数错误：任务航线GeoJSON解析失败：%s', SQLERRM);
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id;
         RETURN;
     END;
 
@@ -633,7 +635,7 @@ BEGIN
     IF v_route_point_max_height IS NULL THEN
         v_msg := '参数错误：任务航线GeoJSON必须包含航点高度Z值';
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id;
         RETURN;
     END IF;
 
@@ -650,7 +652,7 @@ BEGIN
             COALESCE(v_airspace_check.msg, '空域区块提交前校验未通过'),
             false,
             COALESCE(v_airspace_check.hit_count, 0)::integer,
-            ARRAY[]::text[];
+            ARRAY[]::text[], p_task_id;
         RETURN;
     END IF;
 
@@ -666,7 +668,8 @@ BEGIN
             v_route_check.msg,
             false,
             COALESCE(v_route_check.hit_count, 0),
-            COALESCE(v_route_check.hit_blockids, ARRAY[]::text[]);
+            COALESCE(v_route_check.hit_blockids, ARRAY[]::text[]),
+            p_task_id;
         RETURN;
     END IF;
 
@@ -675,7 +678,7 @@ BEGIN
 
     IF hit_count = 0 THEN
         v_msg := format('任务%s未经过空域区块，不可执行', p_task_id);
-        RETURN QUERY SELECT 200, v_msg, false, hit_count, hit_blockids;
+        RETURN QUERY SELECT 200, v_msg, false, hit_count, hit_blockids, p_task_id;
         RETURN;
     END IF;
 
@@ -830,17 +833,17 @@ BEGIN
     IF COALESCE(array_length(v_error_msgs, 1), 0) > 0 THEN
         v_msg := format('任务%s不可执行：%s',
             p_task_id, array_to_string(v_error_msgs, '；'));
-        RETURN QUERY SELECT 200, v_msg, false, hit_count, hit_blockids;
+        RETURN QUERY SELECT 200, v_msg, false, hit_count, hit_blockids, p_task_id;
     ELSE
         v_msg := format('任务%s经过空域区块%s个，空域范围、高度、用空计划和时间段校验通过，可执行',
             p_task_id, hit_count);
-        RETURN QUERY SELECT 200, v_msg, true, hit_count, hit_blockids;
+        RETURN QUERY SELECT 200, v_msg, true, hit_count, hit_blockids, p_task_id;
     END IF;
 
 EXCEPTION WHEN OTHERS THEN
     v_msg := format('任务航线用空校验执行异常：%s', SQLERRM);
     PERFORM public.gis_write_error_log(500, v_msg, v_log_sql);
-    RETURN QUERY SELECT 500, v_msg, false, 0::integer, ARRAY[]::text[];
+    RETURN QUERY SELECT 500, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id;
 END;
 $$;
 
@@ -1649,3 +1652,5 @@ IS '按时间段和缓冲半径校验任务航线之间的空间冲突';
 --     '2026-10-23 18:00:00',
 --     50
 -- );
+
+
