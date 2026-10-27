@@ -1544,6 +1544,7 @@ CREATE OR REPLACE FUNCTION public.gis_flight_task_route_check(
 RETURNS TABLE (code integer, msg text, ischeck boolean, task_ids text)
 LANGUAGE plpgsql VOLATILE AS $$
 DECLARE v_route geometry; v_buffer geometry; v_hit_ids text[];
+    v_route_min_z double precision; v_route_max_z double precision;
 BEGIN
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '项目ID不能为空');
@@ -1581,7 +1582,12 @@ BEGIN
         RETURN QUERY SELECT 400, ('参数错误：航线GeoJSON解析失败：' || SQLERRM), false, '';
         RETURN;
     END;
-    v_route:=ST_SetSRID(ST_Force2D(ST_MakeValid(v_route)),4326);
+    v_route:=ST_SetSRID(ST_MakeValid(v_route),4326);
+    SELECT min(ST_Z((d).geom)), max(ST_Z((d).geom)) INTO v_route_min_z, v_route_max_z FROM ST_DumpPoints(v_route) AS d;
+    IF v_route_min_z IS NULL OR v_route_max_z IS NULL THEN
+        RETURN QUERY SELECT 400, 'route Z height is required'::text, false, ''::text;
+        RETURN;
+    END IF;
     IF v_route IS NULL OR ST_IsEmpty(v_route)
        OR ST_GeometryType(v_route) NOT IN ('ST_LineString','ST_MultiLineString')
        OR NOT ST_IsValid(v_route) THEN
@@ -1594,7 +1600,11 @@ BEGIN
         PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '航线缓冲区生成失败：' || SQLERRM);
         RETURN QUERY SELECT 400,('参数错误：航线缓冲区生成失败：'||SQLERRM)::text,false,''::text; RETURN;
     END;
-    SELECT array_agg(DISTINCT g.out_id::text ORDER BY g.out_id::text) INTO v_hit_ids FROM public.bo_flight_job g WHERE COALESCE(g.del_flag,false)=false AND g.project_id=btrim(p_project_id) AND g.out_id::text=ANY(p_task_ids::text[]) AND g.plan_route_gemo IS NOT NULL AND NOT ST_IsEmpty(g.plan_route_gemo) AND ST_IsValid(g.plan_route_gemo) AND ST_Intersects(v_buffer,ST_SetSRID(ST_Force2D(g.plan_route_gemo),4326));
+    SELECT array_agg(DISTINCT g.out_id::text ORDER BY g.out_id::text) INTO v_hit_ids FROM public.bo_flight_job g WHERE COALESCE(g.del_flag,false)=false AND g.project_id=btrim(p_project_id) AND g.out_id::text=ANY(p_task_ids::text[]) AND g.plan_route_gemo IS NOT NULL AND NOT ST_IsEmpty(g.plan_route_gemo) AND ST_IsValid(g.plan_route_gemo) AND ST_Intersects(v_buffer,ST_SetSRID(ST_Force2D(g.plan_route_gemo),4326))
+    AND ST_ZMin(Box3D(g.plan_route_gemo)) IS NOT NULL
+    AND ST_ZMax(Box3D(g.plan_route_gemo)) IS NOT NULL
+    AND v_route_min_z <= ST_ZMax(Box3D(g.plan_route_gemo))
+    AND v_route_max_z >= ST_ZMin(Box3D(g.plan_route_gemo));
     v_hit_ids:=COALESCE(v_hit_ids,ARRAY[]::text[]);
     IF cardinality(v_hit_ids)=0 THEN RETURN QUERY SELECT 200,'校验完成，未发现相交航线'::text,true,''::text; ELSE RETURN QUERY SELECT 200,format('校验完成，发现%s条相交航线：%s',cardinality(v_hit_ids),array_to_string(v_hit_ids,',')),false,array_to_string(v_hit_ids,','); END IF;
 EXCEPTION WHEN OTHERS THEN
