@@ -215,6 +215,7 @@ BEGIN
     IF v_scope_count = 0 THEN
         v_msg := format('无可校验空域区块数据，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
         RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], route_length_km;
         RETURN;
     END IF;
@@ -393,6 +394,7 @@ BEGIN
     IF v_scope_count = 0 THEN
         v_msg := format('无可校验空域区块数据，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
         RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
         RETURN;
     END IF;
@@ -1023,6 +1025,7 @@ BEGIN
     IF v_scope_count = 0 THEN
         v_msg := format('无数据：项目下无可校验空域区块，执行时间 %s 秒',
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
+        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
         RETURN QUERY SELECT 400, v_msg, false, v_check_type, v_zone_type, 0::bigint;
         RETURN;
     END IF;
@@ -1402,9 +1405,11 @@ BEGIN
         jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
 EXCEPTION
     WHEN data_exception THEN
+        PERFORM public.gis_write_error_log(400, 'gis_uav_flight_deviation_check', SQLERRM::text);
         RETURN QUERY SELECT 400, SQLERRM::text, false, '[1,1,1]'::jsonb,
             jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
     WHEN OTHERS THEN
+        PERFORM public.gis_write_error_log(500, 'gis_uav_flight_deviation_check', SQLERRM::text);
         -- 执行失败时不返回部分校验结果。
         RETURN QUERY SELECT 500, ('实时安全告警校验异常：' || SQLERRM)::text,
             false, '[1,1,1]'::jsonb,
@@ -1467,30 +1472,68 @@ IS '实时校验飞行任务偏航超高和管制空域入侵情况';
  
 
 -- =============================================================================
--- 函数介绍：6.gis_flight_task_route_check
--- 主要作用：根据项目ID、航线GeoJSON和任务ID数组校验任务航线冲突。
--- 入参说明：项目ID、航线GeoJSON、任务ID数组、缓冲半径（默认50米）。
--- 入参校验：项目ID、航线GeoJSON和任务ID数组不能为空；航线必须为LineString或MultiLineString；缓冲半径必须为非负有限值。
--- 返回说明：返回code、msg、ischeck和task_ids。
--- 注意事项：仅校验指定项目和任务ID数组中的未删除任务，按二维WGS84几何判断相交。
+-- 函数名称：6.gis_flight_task_route_check
+-- 函数功能：校验输入航线与指定项目下指定任务的规划航线是否存在空间冲突。
+-- 函数描述：
+--   1. 校验项目 ID、航线 GeoJSON、任务 ID 数组和缓冲半径。
+--   2. 通过 public.gis_geojson_to_geom 解析航线，统一转为二维 WGS84（SRID=4326）。
+--   3. 仅接受有效的 LineString 或 MultiLineString；Z/M 高程和测量维度不参与判断。
+--   4. 按缓冲半径（米）生成输入航线缓冲区；半径为 0 时直接使用原始航线。
+--   5. 从 public.bo_flight_job 查询未删除、项目匹配、任务 ID 匹配且规划航线有效的任务。
+--   6. 使用 ST_Intersects 判断输入航线缓冲区与任务规划航线是否相交。
+-- 入参说明：
+--   p_project_id：项目 ID，varchar，必填； 
+--   p_route_geojson：待校验航线 GeoJSON，text，必填； 
+--   p_task_ids：待校验任务 ID 数组； 
+--   p_buffer_radius：缓冲半径 ；
+-- 返回说明：
+--   返回code、msg、ischeck、task_ids
 -- =============================================================================
-
 
 -- =============================================================================
 -- 删除函数
 SELECT public.gis_drop_function('gis_flight_task_route_check');
 -- =============================================================================
--- =============================================================================
 -- 函数介绍：6.gis_flight_task_route_check
--- 主要作用：根据项目ID、航线GeoJSON和任务ID数组校验任务航线冲突。
+-- 主要作用：根据项目、待校验航线和任务 ID 集合，判断任务规划航线是否与待校验
+--           航线发生空间冲突，并返回冲突任务清单。
+--
 -- 入参说明：
---   p_project_id：项目ID，varchar，必填。
---   p_route_geojson：航线GeoJSON，text，必填。
---   p_task_ids：任务ID数组，varchar[]，必填。
---   p_buffer_radius：缓冲半径，double precision，默认50米。
--- 入参校验：项目ID、航线GeoJSON和任务ID数组不能为空；航线必须为LineString或MultiLineString；缓冲半径必须为非负有限值。
--- 返回说明：返回code、msg、ischeck和task_ids。
--- 注意事项：仅校验指定项目和任务数组中的未删除任务，按二维几何判断相交。
+--   p_project_id：项目 ID，varchar，必填。函数会去除首尾空白，并仅查询该项目
+--                 下的任务；NULL 或空字符串直接返回 400。
+--   p_route_geojson：待校验航线 GeoJSON，text，必填。由
+--                     public.gis_geojson_to_geom 统一解析，可传 Geometry、Feature
+--                     或 FeatureCollection；NULL、空字符串或解析失败返回 400。
+--   p_task_ids：任务 ID 数组，varchar[]，必填。函数会去除每个元素首尾空白并去重；
+--               NULL、空数组、空字符串或包含 NULL 元素时返回 400。
+--   p_buffer_radius：航线缓冲半径，double precision，单位为米，默认 50。取值必须
+--                    为大于等于 0 的有限数；NaN、Infinity 和 -Infinity 返回 400。
+--
+-- 入参及空间校验：
+--   1. 解析后的航线统一转换为二维 WGS84 几何（SRID=4326），Z/M 维度不参与判断。
+--   2. 航线必须为有效且非空的 LineString 或 MultiLineString。
+--   3. 缓冲半径为 0 时使用原始航线；大于 0 时使用 geography 生成米制缓冲区。
+--   4. 缓冲区生成失败、几何修复失败或其他空间计算异常返回 500/400 结果。
+--
+-- 数据筛选规则：
+--   仅检查 public.bo_flight_job 中 del_flag=false（NULL 按未删除处理）、project_id
+--   匹配 p_project_id、out_id 位于 p_task_ids 且 plan_route_gemo 不为空、非空并有效
+--   的任务。任务规划航线统一按二维 SRID=4326 几何参与相交判断。
+--
+-- 冲突判定：
+--   使用 ST_Intersects 判断待校验航线缓冲区与任务规划航线是否相交；边界接触也视为
+--   相交。命中的任务 ID 会去重并按字典序排序。
+--
+-- 返回说明（固定返回一行）：
+--   code：200 表示校验完成；400 表示参数、GeoJSON 或航线几何不合法；500 表示执行
+--         过程发生未预期异常。
+--   msg：校验结果或错误详情；发现冲突时包含冲突数量及任务 ID。
+--   ischeck：true 表示未发现冲突；false 表示发现至少一条冲突或校验失败。
+--   task_ids：冲突任务 ID，以英文逗号分隔；无冲突、参数错误或系统异常时返回空字符串。
+--
+-- 注意事项：
+--   本函数只做二维平面空间相交判断，不比较飞行高度、时间、速度或其他任务属性；
+--   p_buffer_radius 的单位为米，输入 GeoJSON 坐标必须使用 WGS84 经纬度坐标。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_flight_task_route_check(
     p_project_id varchar,
@@ -1502,21 +1545,61 @@ RETURNS TABLE (code integer, msg text, ischeck boolean, task_ids text)
 LANGUAGE plpgsql VOLATILE AS $$
 DECLARE v_route geometry; v_buffer geometry; v_hit_ids text[];
 BEGIN
-    IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN RETURN QUERY SELECT 400,'参数错误：项目ID不能为空'::text,false,''::text; RETURN; END IF;
-    IF p_route_geojson IS NULL OR btrim(p_route_geojson) = '' THEN RETURN QUERY SELECT 400,'参数错误：航线GeoJSON不能为空'::text,false,''::text; RETURN; END IF;
+    IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
+        PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '项目ID不能为空');
+        RETURN QUERY SELECT 400, '参数错误：项目ID不能为空', false, '';
+        RETURN;
+    END IF;
+    IF p_route_geojson IS NULL OR btrim(p_route_geojson) = '' THEN
+        PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '航线GeoJSON不能为空');
+        RETURN QUERY SELECT 400, '参数错误：航线GeoJSON不能为空', false, '';
+        RETURN;
+    END IF;
     IF p_task_ids IS NULL OR cardinality(p_task_ids) = 0 THEN
+        PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '任务ID数组不能为空');
         RETURN QUERY SELECT 400, '参数错误：任务ID数组不能为空'::text, false, ''::text;
         RETURN;
     END IF;
-    IF p_buffer_radius IS NULL OR p_buffer_radius < 0 OR p_buffer_radius::text IN ('NaN','Infinity','-Infinity') THEN RETURN QUERY SELECT 400,'参数错误：缓冲半径必须为非负有限值（米）'::text,false,''::text; RETURN; END IF;
-    BEGIN v_route:=public.gis_geojson_to_geom(p_route_geojson); EXCEPTION WHEN OTHERS THEN RETURN QUERY SELECT 400,('参数错误：航线GeoJSON解析失败：'||SQLERRM)::text,false,''::text; RETURN; END;
-    IF v_route IS NULL OR ST_IsEmpty(v_route) OR GeometryType(v_route) NOT IN ('LINESTRING','MULTILINESTRING') THEN RETURN QUERY SELECT 400,'参数错误：航线geometry必须为LineString或MultiLineString'::text,false,''::text; RETURN; END IF;
+    -- 清洗任务 ID，避免空字符串参与 ANY 比较，并去重。
+    SELECT array_agg(DISTINCT NULLIF(btrim(v), '') ORDER BY NULLIF(btrim(v), ''))
+      INTO p_task_ids
+      FROM unnest(p_task_ids) AS x(v);
+    IF p_task_ids IS NULL OR cardinality(p_task_ids) = 0
+       OR EXISTS (SELECT 1 FROM unnest(p_task_ids) AS x(v) WHERE v IS NULL) THEN
+        PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '任务ID数组不能包含空值');
+        RETURN QUERY SELECT 400,'参数错误：任务ID数组不能包含空值'::text,false,''::text; RETURN;
+    END IF;
+    IF p_buffer_radius IS NULL OR p_buffer_radius < 0
+       OR p_buffer_radius IN ('NaN'::double precision,'Infinity'::double precision,'-Infinity'::double precision) THEN
+        PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '缓冲半径必须为非负有限值（米）');
+        RETURN QUERY SELECT 400,'参数错误：缓冲半径必须为非负有限值（米）'::text,false,''::text; RETURN;
+    END IF;
+    BEGIN
+        v_route := public.gis_geojson_to_geom(p_route_geojson);
+    EXCEPTION WHEN OTHERS THEN
+        PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '航线GeoJSON解析失败：' || SQLERRM);
+        RETURN QUERY SELECT 400, ('参数错误：航线GeoJSON解析失败：' || SQLERRM), false, '';
+        RETURN;
+    END;
     v_route:=ST_SetSRID(ST_Force2D(ST_MakeValid(v_route)),4326);
-    v_buffer:=CASE WHEN p_buffer_radius=0 THEN v_route ELSE ST_Buffer(v_route::geography,p_buffer_radius)::geometry END;
-    SELECT array_agg(DISTINCT g.out_id ORDER BY g.out_id) INTO v_hit_ids FROM public.bo_flight_job g WHERE g.del_flag=false AND g.project_id=btrim(p_project_id) AND g.out_id=ANY(p_task_ids) AND g.plan_route_gemo IS NOT NULL AND NOT ST_IsEmpty(g.plan_route_gemo) AND ST_Intersects(v_buffer,ST_SetSRID(ST_Force2D(g.plan_route_gemo),4326));
+    IF v_route IS NULL OR ST_IsEmpty(v_route)
+       OR ST_GeometryType(v_route) NOT IN ('ST_LineString','ST_MultiLineString')
+       OR NOT ST_IsValid(v_route) THEN
+        PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '航线geometry必须为有效的LineString或MultiLineString');
+        RETURN QUERY SELECT 400,'参数错误：航线geometry必须为有效的LineString或MultiLineString'::text,false,''::text; RETURN;
+    END IF;
+    BEGIN
+        v_buffer:=CASE WHEN p_buffer_radius=0 THEN v_route ELSE ST_Buffer(v_route::geography,p_buffer_radius)::geometry END;
+    EXCEPTION WHEN OTHERS THEN
+        PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '航线缓冲区生成失败：' || SQLERRM);
+        RETURN QUERY SELECT 400,('参数错误：航线缓冲区生成失败：'||SQLERRM)::text,false,''::text; RETURN;
+    END;
+    SELECT array_agg(DISTINCT g.out_id::text ORDER BY g.out_id::text) INTO v_hit_ids FROM public.bo_flight_job g WHERE COALESCE(g.del_flag,false)=false AND g.project_id=btrim(p_project_id) AND g.out_id::text=ANY(p_task_ids::text[]) AND g.plan_route_gemo IS NOT NULL AND NOT ST_IsEmpty(g.plan_route_gemo) AND ST_IsValid(g.plan_route_gemo) AND ST_Intersects(v_buffer,ST_SetSRID(ST_Force2D(g.plan_route_gemo),4326));
     v_hit_ids:=COALESCE(v_hit_ids,ARRAY[]::text[]);
     IF cardinality(v_hit_ids)=0 THEN RETURN QUERY SELECT 200,'校验完成，未发现相交航线'::text,true,''::text; ELSE RETURN QUERY SELECT 200,format('校验完成，发现%s条相交航线：%s',cardinality(v_hit_ids),array_to_string(v_hit_ids,',')),false,array_to_string(v_hit_ids,','); END IF;
-EXCEPTION WHEN OTHERS THEN RETURN QUERY SELECT 500,('任务航线冲突校验异常：'||SQLERRM)::text,false,''::text;
+EXCEPTION WHEN OTHERS THEN
+    PERFORM public.gis_write_error_log(500, 'gis_flight_task_route_check', '任务航线冲突校验异常：' || SQLERRM);
+    RETURN QUERY SELECT 500,('任务航线冲突校验异常：'||SQLERRM)::text,false,''::text;
 END; $$;
 
 
@@ -1528,4 +1611,9 @@ IS '按项目、航线GeoJSON和任务ID数组校验任务航线冲突，缓冲�
 -- 调用示例
 -- =============================================================================
 -- SELECT code, msg, ischeck, task_ids
--- FROM public.gis_flight_task_route_check('project-001', '{""type"":""LineString"",""coordinates"": [[116.1,36.4],[116.2,36.5]]}', ARRAY['task-001','task-002']::varchar[], 50);
+-- FROM public.gis_flight_task_route_check(
+-- 'project-001', 
+-- '{""type"":""LineString"",""coordinates"": [[116.1,36.4],[116.2,36.5]]}', 
+-- ARRAY['task-001','task-002']::varchar[],
+--  50
+--  );
