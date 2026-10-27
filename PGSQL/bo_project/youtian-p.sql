@@ -23,59 +23,59 @@
 -- ----------------------------
 DROP TABLE IF EXISTS "bo_project";
 CREATE TABLE "bo_project"  (
-  "id" char(32) NOT NULL
-  "create_time" timestamp NOT NULL
-  "create_user" varchar(32) NULL DEFAULT NULL
-  "del_flag" boolean NOT NULL
-  "remark" varchar(1024) NULL DEFAULT NULL
-  "update_time" timestamp NOT NULL
-  "update_user" varchar(32) NULL DEFAULT NULL
-  "begin_time" timestamp NULL DEFAULT NULL
-  "city_code" varchar(16) NULL DEFAULT NULL
-  "city_name" varchar(16) NULL DEFAULT NULL
-  "contacts" varchar(64) NULL DEFAULT NULL
-  "contacts_tel" varchar(16) NULL DEFAULT NULL
-  "county_code" varchar(16) NULL DEFAULT NULL
-  "county_name" varchar(16) NULL DEFAULT NULL
-  "customer_org_id" char(255) NULL DEFAULT NULL
-  "customer_org_name" varchar(64) NULL DEFAULT NULL
-  "display_type" char(1) NULL DEFAULT NULL
-  "end_time" timestamp NULL DEFAULT NULL
-  "map_type" varchar(16) NULL DEFAULT NULL
-  "op_contacts" varchar(64) NULL DEFAULT NULL
-  "op_contacts_tel" varchar(16) NULL DEFAULT NULL
-  "org_id" char(255) NULL DEFAULT NULL
-  "org_name" varchar(64) NULL DEFAULT NULL
-  "ops_id" char(32) NULL DEFAULT NULL
-  "ops_name" varchar(64) NULL DEFAULT NULL
-  "project_name" varchar(64) NULL DEFAULT NULL
-  "project_no" varchar(32) NULL DEFAULT NULL
-  "early_warnings" varchar(1024) NULL DEFAULT NULL
-  "province_code" varchar(16) NULL DEFAULT NULL
-  "province_name" varchar(16) NULL DEFAULT NULL
-  "region_shape" geometry NULL
-  "service_coordinate" geometry NULL
-  "status" char(2) NULL DEFAULT NULL
-  "township_code" varchar(16) NULL DEFAULT NULL
-  "township_name" varchar(16) NULL DEFAULT NULL
-  "center_point" varchar(255) NULL DEFAULT NULL
-  "envelope" varchar(1024) NULL DEFAULT NULL
-  "project_config" varchar(255) NULL DEFAULT NULL
-  "logo_url" varchar(1024) NULL DEFAULT NULL
-  "is_ar" boolean NULL DEFAULT NULL
-  "is_line" boolean NULL DEFAULT NULL
-  "is_capture" boolean NULL DEFAULT NULL
-  "is_ar_history" boolean NULL DEFAULT NULL
-  "ai_pallet_code" varchar(50) NULL DEFAULT '800001'
-  "ai_pallet_name" varchar(50) NULL DEFAULT '共达地平台'
-  "storage_size" varchar(10) NULL DEFAULT NULL
-  "net_band_width" varchar(10) NULL DEFAULT NULL
-  "uav_count" varchar(10) NULL DEFAULT NULL
-  "uav_site_count" varchar(10) NULL DEFAULT NULL
-  "warning_model_count" varchar(10) NULL DEFAULT NULL
-  "warning_model" varchar(200) NULL DEFAULT NULL
-  "build_url" varchar(512) NULL DEFAULT NULL
-  "visual_angle" varchar(255) NULL DEFAULT NULL
+  "id" char(32) NOT NULL,
+  "create_time" timestamp NOT NULL,
+  "create_user" varchar(32) NULL DEFAULT NULL,
+  "del_flag" boolean NOT NULL,
+  "remark" varchar(1024) NULL DEFAULT NULL,
+  "update_time" timestamp NOT NULL,
+  "update_user" varchar(32) NULL DEFAULT NULL,
+  "begin_time" timestamp NULL DEFAULT NULL,
+  "city_code" varchar(16) NULL DEFAULT NULL,
+  "city_name" varchar(16) NULL DEFAULT NULL,
+  "contacts" varchar(64) NULL DEFAULT NULL,
+  "contacts_tel" varchar(16) NULL DEFAULT NULL,
+  "county_code" varchar(16) NULL DEFAULT NULL,
+  "county_name" varchar(16) NULL DEFAULT NULL,
+  "customer_org_id" char(255) NULL DEFAULT NULL,
+  "customer_org_name" varchar(64) NULL DEFAULT NULL,
+  "display_type" char(1) NULL DEFAULT NULL,
+  "end_time" timestamp NULL DEFAULT NULL,
+  "map_type" varchar(16) NULL DEFAULT NULL,
+  "op_contacts" varchar(64) NULL DEFAULT NULL,
+  "op_contacts_tel" varchar(16) NULL DEFAULT NULL,
+  "org_id" char(255) NULL DEFAULT NULL,
+  "org_name" varchar(64) NULL DEFAULT NULL,
+  "ops_id" char(32) NULL DEFAULT NULL,
+  "ops_name" varchar(64) NULL DEFAULT NULL,
+  "project_name" varchar(64) NULL DEFAULT NULL,
+  "project_no" varchar(32) NULL DEFAULT NULL,
+  "early_warnings" varchar(1024) NULL DEFAULT NULL,
+  "province_code" varchar(16) NULL DEFAULT NULL,
+  "province_name" varchar(16) NULL DEFAULT NULL,
+  "region_shape" geometry NULL,
+  "service_coordinate" geometry NULL,
+  "status" char(2) NULL DEFAULT NULL,
+  "township_code" varchar(16) NULL DEFAULT NULL,
+  "township_name" varchar(16) NULL DEFAULT NULL,
+  "center_point" varchar(255) NULL DEFAULT NULL,
+  "envelope" varchar(1024) NULL DEFAULT NULL,
+  "project_config" varchar(255) NULL DEFAULT NULL,
+  "logo_url" varchar(1024) NULL DEFAULT NULL,
+  "is_ar" boolean NULL DEFAULT NULL,
+  "is_line" boolean NULL DEFAULT NULL,
+  "is_capture" boolean NULL DEFAULT NULL,
+  "is_ar_history" boolean NULL DEFAULT NULL,
+  "ai_pallet_code" varchar(50) NULL DEFAULT '800001',
+  "ai_pallet_name" varchar(50) NULL DEFAULT '共达地平台',
+  "storage_size" varchar(10) NULL DEFAULT NULL,
+  "net_band_width" varchar(10) NULL DEFAULT NULL,
+  "uav_count" varchar(10) NULL DEFAULT NULL,
+  "uav_site_count" varchar(10) NULL DEFAULT NULL,
+  "warning_model_count" varchar(10) NULL DEFAULT NULL,
+  "warning_model" varchar(200) NULL DEFAULT NULL,
+  "build_url" varchar(512) NULL DEFAULT NULL,
+  "visual_angle" varchar(255) NULL DEFAULT NULL,
   PRIMARY KEY ("id")
 
 );
