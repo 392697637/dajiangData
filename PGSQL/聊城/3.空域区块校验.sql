@@ -506,17 +506,16 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --   6. 全部通过：任务{task_id}经过空域区块{hit_count}个，空域范围、高度、用空计划和时间段校验通过，可执行。
 --   check_type       text；校验结果分类ID（数字字符串）：
 --     200：校验通过，ischeck=true，可以执行任务。
---     201：航线超出空域范围（复用gis_flight_airspace_check的201）。
+--     201：航线超出空域范围，或当前项目下没有符合校验条件的空域区块。
 --     202：航线高度或航点高度超限（复用底层202）。
 --     203：范围和高度均超限（复用底层203）。
 --     204：用空计划或时间不满足。
 --     400：参数错误。
---     401：无可校验空域数据。
 --     500：校验执行异常。
 --     除200外，其余分类均为ischeck=false，不可执行任务。
 --   check_msg        text；对应分类的详细原因、判断规则和处理建议：
 --     200：空域范围、高度、用空计划和任务时间段均满足要求，可以执行任务。
---     201：直接复用底层check_msg，区分航点不在可飞空域内、航线未经过任何空域区块两种情况。
+--     201：航点不在可飞空域内或航线未经过任何空域区块时，复用底层check_msg；无可校验空域时，提示配置符合校验条件的空域区块。
 --     202：直接复用底层check_msg，说明航线高度超限、航点高度超限或两者均超限的实际高度与对应空域上限。
 --     203：直接复用底层check_msg，说明范围超限及上述三种高度超限情况。
 --     204：用空计划或时间不满足，包含以下情况：
@@ -526,7 +525,6 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --       4. 用空计划或时间不满足；任务时间段超出计划；当天计划可用，但未配置有效的用空时间段。
 --       5. 用空计划或时间不满足；同时存在多个问题时，逐项列出各空域的无用空计划、空域不可用或任务时间段超出计划的具体原因。
 --     400：必填参数缺失、参数格式错误、航线缺少Z值等；说明具体错误参数。
---     401：当前项目下没有符合校验条件的空域区块；提示配置有效空域。
 --     500：校验过程中发生数据库或函数执行异常；说明异常原因及处理建议。
 -- 注意事项：
 --   1. plan_status=true表示空域可用；plan_status=false表示空域不可用。
@@ -672,7 +670,7 @@ BEGIN
             ARRAY[]::text[], p_task_id,
             CASE
                 WHEN COALESCE(v_airspace_check.code, 500) = 500 THEN '500'
-                WHEN v_airspace_check.code = 400 AND v_airspace_check.msg LIKE '无数据：%' THEN '401'
+                WHEN v_airspace_check.code = 400 AND v_airspace_check.msg LIKE '无数据：%' THEN '201'
                 WHEN v_airspace_check.code = 400 THEN '400'
                 ELSE v_airspace_check.check_type
             END::text,
