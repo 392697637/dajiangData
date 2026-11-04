@@ -942,22 +942,18 @@ SELECT gis_drop_function('gis_flight_airspace_check');
 --     500：校验执行异常，code=500，ischeck=false。
 --   check_msg        text；对应check_type分类ID的说明，
 --     200：航线范围和高度均通过；航点均在空域内，航线及航点高度均未超限。
---     201：航线超出空域范围，包含以下两种情况：
---       1. 航线经过空域但有航点在空域外：航线超出空域范围；航点不在可飞空域内；
---       2. 航线未命中任何空域区块：航线超出空域范围；航线未经过任何空域区块；
---     202：高度超出限制，check_msg按实际超限情况说明，包含以下三种情况：
---       1. 仅航线高度超限：航线高度超出限制200米；航线高度300米超过对应空域高度200米上限。
---       2. 仅航点高度超限：航线高度超出限制200米；航点高度250米超过对应空域高度200米上限。
---       3. 两者同时超限：航线高度超出限制200米；航线高度300米超过对应空域高度200米上限。航点高度250米超过对应空域高度200米上限。
---       以上数值仅为示例，实际返回对应空域高度上限及超限高度，只列出超限项。
+--     201：航线超出空域范围：
+--       1. 航线超出空域范围；航点不在可飞空域内；（说明：航线经过空域但有航点在空域外）
+--       2. 航线超出空域范围；航线未经过任何空域区块；（说明：航线未命中任何空域区块）
+--     202：航线高度超出限制：
+--       1. 航线高度超出限制；航线高度300米超过对应空域高度200米上限。（说明：仅航线高度超限）
+--       2. 航线高度超出限制；航点高度250米超过对应空域高度200米上限。（说明：仅航点高度超限）
+--       3. 航线高度超出限制；航线高度300米超过对应空域高度200米上限；航点高度250米超过对应空域高度200米上限。（说明：航线高度和航点高度同时超限）
 --     203：航线超出空域范围并且高度超出限制：
---       航线经过空域但有航点在空域外：航点不在可飞空域内；
---       航线未命中任何空域区块：航线未经过任何空域区块；
---       当前高度仅针对空域内航点判断，因此未经过任何空域区块时不触发203，返回201。
---       高度说明仍包含以下三种情况：
---       1. 范围超限且仅航线高度超限：航线超出空域范围并且高度超出限制200米；同时存在空域外航点和航线高度300米超过对应空域高度200米上限。
---       2. 范围超限且仅航点高度超限：航线超出空域范围并且高度超出限制200米；同时存在空域外航点和航点高度250米超过对应空域高度200米上限。
---       3. 范围超限且两种高度均超限：航线超出空域范围并且高度超出限制200米；同时存在空域外航点和航线高度300米超过对应空域高度200米上限。航点高度250米超过对应空域高度200米上限。
+--       1. 航线超出空域范围并且高度超出限制；航点不在可飞空域内；航线高度300米超过对应空域高度200米上限。（说明：范围超限且仅航线高度超限）
+--       2. 航线超出空域范围并且高度超出限制；航点不在可飞空域内；航点高度250米超过对应空域高度200米上限。（说明：范围超限且仅航点高度超限）
+--       3. 航线超出空域范围并且高度超出限制；航点不在可飞空域内；航线高度300米超过对应空域高度200米上限；航点高度250米超过对应空域高度200米上限。（说明：范围超限且两种高度均超限）
+--       以上数值仅为示例，实际返回对应空域高度上限及超限高度，只列出超限项。
 --     400：参数错误；请查看参数。
 --     500：校验执行异常；数据库或函数执行异常。
 --   hit_count        bigint；航点命中的可飞空域区块数量；未命中、参数错误或异常时为0。
@@ -993,7 +989,6 @@ DECLARE
     v_outside_count bigint := 0;
     v_route_height_over_count bigint := 0;
     v_point_height_over_count bigint := 0;
-    v_height_limits text;
     v_route_height_details text;
     v_point_height_details text;
     v_height_msg text;
@@ -1175,27 +1170,23 @@ BEGIN
             WHERE block_count > 0 AND point_height > COALESCE(max_airspace_height, 0)
         )::bigint,
         (SELECT count(*)::bigint FROM hit_blocks),
-        string_agg(DISTINCT COALESCE(max_airspace_height, 0)::text, '、') FILTER (
-            WHERE block_count > 0 AND (p_route_height > COALESCE(max_airspace_height, 0)
-                OR point_height > COALESCE(max_airspace_height, 0))),
-        string_agg(DISTINCT format('航线高度%s米超过对应空域高度%s米上限。',
-            p_route_height, COALESCE(max_airspace_height, 0)), '') FILTER (
+        string_agg(DISTINCT format('航线高度%s米超过对应空域高度%s米上限',
+            p_route_height, COALESCE(max_airspace_height, 0)), '；') FILTER (
             WHERE block_count > 0 AND p_route_height > COALESCE(max_airspace_height, 0)),
-        string_agg(DISTINCT format('航点高度%s米超过对应空域高度%s米上限。',
-            point_height, COALESCE(max_airspace_height, 0)), '') FILTER (
+        string_agg(DISTINCT format('航点高度%s米超过对应空域高度%s米上限',
+            point_height, COALESCE(max_airspace_height, 0)), '；') FILTER (
             WHERE block_count > 0 AND point_height > COALESCE(max_airspace_height, 0))
     INTO
         v_outside_count,
         v_route_height_over_count,
         v_point_height_over_count,
         v_hit_count,
-        v_height_limits,
         v_route_height_details,
         v_point_height_details
     FROM point_airspace;
 
-    v_height_msg := CASE WHEN v_height_limits IS NULL THEN '航点高度校验不通过；' ELSE format('航线高度超出限制%s米；', v_height_limits) END
-        || COALESCE(v_route_height_details, '') || COALESCE(v_point_height_details, '');
+    v_height_msg := '航线高度超出限制；'
+        || concat_ws('；', v_route_height_details, v_point_height_details) || '。';
 
     IF v_outside_count > 0 THEN
         -- 航点全部在空域外时，航线仍可能穿过空域，必须按整条航线判断是否经过区块。
@@ -1228,8 +1219,8 @@ BEGIN
             CASE v_check_type
                 WHEN '201' THEN CASE WHEN v_route_hits_airspace THEN '航线超出空域范围；航点不在可飞空域内；' ELSE '航线超出空域范围；航线未经过任何空域区块；' END
                 WHEN '202' THEN v_height_msg
-                WHEN '203' THEN format('航线超出空域范围并且高度超出限制%s米；%s%s%s', v_height_limits, CASE WHEN v_route_hits_airspace THEN '航点不在可飞空域内；' ELSE '航线未经过任何空域区块；' END, COALESCE(v_route_height_details, ''), COALESCE(v_point_height_details, ''))
-            END::text || CASE WHEN v_check_type = '202' THEN '' ELSE v_msg END, v_hit_count;
+                WHEN '203' THEN '航线超出空域范围并且高度超出限制；航点不在可飞空域内；' || concat_ws('；', v_route_height_details, v_point_height_details) || '。'
+            END::text, v_hit_count;
         RETURN;
     END IF;
 
@@ -1241,8 +1232,8 @@ BEGIN
             CASE v_check_type
                 WHEN '201' THEN CASE WHEN v_route_hits_airspace THEN '航线超出空域范围；航点不在可飞空域内；' ELSE '航线超出空域范围；航线未经过任何空域区块；' END
                 WHEN '202' THEN v_height_msg
-                WHEN '203' THEN format('航线超出空域范围并且高度超出限制%s米；%s%s%s', v_height_limits, CASE WHEN v_route_hits_airspace THEN '航点不在可飞空域内；' ELSE '航线未经过任何空域区块；' END, COALESCE(v_route_height_details, ''), COALESCE(v_point_height_details, ''))
-            END::text || CASE WHEN v_check_type = '202' THEN '' ELSE v_msg END, v_hit_count;
+                WHEN '203' THEN '航线超出空域范围并且高度超出限制；航点不在可飞空域内；' || concat_ws('；', v_route_height_details, v_point_height_details) || '。'
+            END::text, v_hit_count;
         RETURN;
     END IF;
 
