@@ -515,9 +515,9 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --     除200外，其余分类均为ischeck=false，不可执行任务。
 --   check_msg        text；对应分类的详细原因、判断规则和处理建议：
 --     200：空域范围、高度、用空计划和任务时间段均满足要求，可以执行任务。
---     201：航点不在可飞空域内或航线未经过任何空域区块时，复用底层check_msg；无可校验空域时，提示配置符合校验条件的空域区块。
---     202：直接复用底层check_msg，说明航线高度超限、航点高度超限或两者均超限的实际高度与对应空域上限。
---     203：直接复用底层check_msg，说明范围超限及上述三种高度超限情况。
+--     201：航线范围校验不通过时，直接复用gis_flight_airspace_check的check_msg。
+--     202：直接复用gis_flight_airspace_check的check_msg，说明高度超限原因。
+--     203：直接复用gis_flight_airspace_check的check_msg，说明范围和高度同时不通过的原因。
 --     204：用空计划或时间不满足，包含以下情况：
 --       1. 用空计划或时间不满足；无用空计划；该空域在指定日期未配置用空计划。
 --       2. 用空计划或时间不满足；空域不可用；该空域当天的用空计划已设为不可用（plan_status=false）。
@@ -670,13 +670,10 @@ BEGIN
             ARRAY[]::text[], p_task_id,
             CASE
                 WHEN COALESCE(v_airspace_check.code, 500) = 500 THEN '500'
-                WHEN v_airspace_check.code = 400 AND v_airspace_check.msg LIKE '无数据：%' THEN '201'
                 WHEN v_airspace_check.code = 400 THEN '400'
                 ELSE v_airspace_check.check_type
             END::text,
             CASE
-                WHEN v_airspace_check.code = 400 AND v_airspace_check.msg LIKE '无数据：%'
-                    THEN '无可校验空域数据；当前项目下没有已启用、未删除且几何有效的空域区块。任务不可执行：请配置符合校验条件的空域区块后重新校验。'
                 WHEN v_airspace_check.code = 400
                     THEN COALESCE(v_airspace_check.msg, '参数错误') || '。任务不可执行：请按上述提示补全或修正输入参数后重新校验。'
                 ELSE COALESCE(v_airspace_check.check_msg, v_airspace_check.msg, '空域范围和高度校验未通过')
@@ -930,7 +927,7 @@ SELECT gis_drop_function('gis_flight_airspace_check');
 --   4. 航点Z高度缺失或无效时返回400参数错误；有效高度按对应空域上限判断是否超限。
 --   5. p_route_height不能为空，且必须大于等于0。
 -- 返回说明：
---   code             integer；200=执行成功，400=参数错误或无可校验空域区块数据，500=执行异常。
+--   code             integer；200=执行成功（包括无可校验空域时的范围校验不通过），400=参数错误，500=执行异常。
 --   msg              text；返回范围/高度校验结果、参数错误、无数据或异常信息；该函数msg包含执行耗时。
 --   ischeck          boolean；true=航点全部在可飞空域内且高度通过，false=范围不通过、高度超限、参数错误或执行异常。
 --   check_type       text；校验结果分类ID：
@@ -945,6 +942,7 @@ SELECT gis_drop_function('gis_flight_airspace_check');
 --     201：航线超出空域范围：
 --       1. 航线超出空域范围；航点不在可飞空域内；（说明：航线经过空域但有航点在空域外）
 --       2. 航线超出空域范围；航线未经过任何空域区块；（说明：航线未命中任何空域区块）
+--       3. 航线超出空域范围；当前项目下无可校验空域；（说明：项目下无可校验空域区块）
 --     202：航线高度超出限制：
 --       1. 航线高度超出限制；航线高度300米超过对应空域高度200米上限。（说明：仅航线高度超限）
 --       2. 航线高度超出限制；航点高度250米超过对应空域高度200米上限。（说明：仅航点高度超限）
@@ -1118,10 +1116,11 @@ BEGIN
       AND (p_only_enabled = false OR b.use_enabled = true);
 
     IF v_scope_count = 0 THEN
+        v_check_type := '201';
         v_msg := format('无数据：项目下无可校验空域区块，执行时间 %s 秒',
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
-        PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, v_check_type, '参数错误；请查看参数。'::text, 0::bigint;
+        PERFORM public.gis_write_error_log(200, v_msg, v_log_sql);
+        RETURN QUERY SELECT 200, v_msg, false, v_check_type, '航线超出空域范围；当前项目下无可校验空域；'::text, 0::bigint;
         RETURN;
     END IF;
 
