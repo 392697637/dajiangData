@@ -43,10 +43,10 @@
 --   E、plan_status=true表示空域可用，进入下一步，判断任务用空时间段是否完整落在空域计划时间段内。
 --   F、任务用空时间段未完整落在空域计划时间段内时任务不可执行。
 --   G、任务用空时间段完整在计划时间段内，进入下一步，判断传入的航线高度参数。
---   H、传入的航线高度不在空域最低/最高高度范围内时任务不可执行。
---   I、传入的航线高度在空域最低/最高高度范围内时，进入下一步，判断航点高度是否在空域最低/最高高度范围内。
---   J、航点高度不在空域最低/最高高度范围内时任务不可执行。
---   K、航点高度在空域最低/最高高度范围内时，任务可以执行。
+--   H、传入的航线高度超过空域高度上限时任务不可执行。
+--   I、传入的航线高度未超过空域高度上限时，进入下一步，判断航点高度是否超过空域高度上限。
+--   J、航点高度超过空域高度上限时任务不可执行。
+--   K、航点高度未超过空域高度上限时，任务可以执行。
 --   返回：
 --   code          状态码：200=执行成功 400=参数错误/无数据 500=执行异常
 --   msg           返回信息，包含可执行结果或不可执行原因
@@ -482,7 +482,7 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --   p_project_id       项目ID；varchar；必填；只检查该项目下启用且未删除的空域区块。
 --   p_task_id          任务ID；varchar；必填；用于返回msg中标识当前任务。
 --   p_route_geojson    航线GeoJSON字符串；text；必填；geometry必须为LineString或MultiLineString，航点Z值缺失或无效时返回参数错误。
---   p_route_height     航线高度参数；double precision；必填且不能小于0；单位：米；用于和空域区块最低/最高高度比较。
+--   p_route_height     航线高度参数；double precision；必填且不能小于0；单位：米；用于和空域区块高度上限比较。
 --   p_use_date         用空日期字符串；varchar；必填；格式yyyy-MM-dd；用于匹配bo_airspace_plan.use_date。
 --   p_task_time_plan   任务用空时间段JSON数组字符串；text；必填；格式如[{"startTime":"15:00:00","endTime":"16:00:00"}]。
 -- 入参校验：
@@ -490,10 +490,10 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --   2. 航线高度p_route_height不能小于0。
 --   3. p_use_date必须能转换为date，格式建议为yyyy-MM-dd。
 --   4. p_task_time_plan必须为非空JSON数组，每个元素必须包含startTime和endTime，且能转换为time。
---   5. p_route_geojson必须能解析为有效几何，并且航点Z值缺失或无效时返回参数错误；geometry类型由gis_flight_route_airspace校验。
+--   5. p_route_geojson必须能解析为有效几何，并且航点Z值缺失或无效时返回参数错误；geometry类型由gis_flight_airspace_check校验。
 -- 返回说明：
 --   code               integer；200=执行成功，400=参数错误/无可校验数据，500=执行异常。
---   msg                text；返回参数错误、不可执行原因或可执行结果；任务函数msg不返回执行耗时。
+--   msg                text；返回参数错误、不可执行原因或可执行结果；复用底层结果时可能包含执行耗时。
 --   ischeck            boolean；true=任务可执行，false=任务不可执行、参数错误或执行异常。
 --   hit_count          integer；命中的空域区块数量；未经过空域区块时为0。
 --   hit_blockids       text[]；命中的空域区块ID数组；未经过空域区块或参数错误时为空数组。
@@ -1282,8 +1282,8 @@ IS '校验航线范围及航线航点高度是否符合空域限制';
 -- 函数名称：5.gis_uav_flight_deviation_check
 -- 函数功能：飞行任务偏差校验
 -- 函数描述：
---   1. 接收项目ID、任务ID、无人机实时遥测信息和校验规则数组。
---   2. 根据项目ID和任务ID读取bo_flight_job中未删除的规划航线。
+--   1. 接收任务ID、无人机实时遥测信息和校验规则数组，项目ID由任务记录取得。
+--   2. 根据任务ID读取bo_flight_job中未删除的任务及规划航线。
 --   3. 规则1（无人机偏航）：比较当前位置与规划航线的二维最短距离，超过50米判为违规。
 --   4. 规则2（无人机超高）：检查遥测距地高度，超过120米判为违规。
 --   5. 规则3（闯入管制空域）：检查当前位置是否命中管控围栏，或所在空域是否已进入管制时段。
@@ -1365,19 +1365,19 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   height              距地高度；数值；必填；单位米，必须为非负有限值，用于超高校验。
 --   timeStamp           遥测时间；字符串；必填；格式yyyy-MM-dd HH:mm:ss，按北京时间用于可飞时段判断。
 -- 入参校验：
---   1. 项目ID、任务ID不能为空，遥测必须为JSON对象。
+--   1. 任务ID不能为空，遥测必须为JSON对象。
 --   2. 规则参数必须为长度3的一维整数数组，各元素只能为0或1，不能为NULL。
 --   3. 经纬度、海拔高度、距地高度及时间戳必须有效。
---   4. 指定项目下必须存在未删除的规划航线，否则返回400。
+--   4. 必须存在对应的未删除任务；启用偏航校验时须有有效规划航线，否则返回400。
 --   5. 执行规则1时，航线geom必须为有效、非空且坐标合法的LineString或MultiLineString。
 -- 返回说明：
 --   code         integer；200=校验完成，400=参数或数据错误，500=执行异常。
 --   msg          text；校验结果或错误原因；成功时包含当前违规项数。
 --   ischeck      boolean；true=本次所选规则全部正常，false=有违规或执行失败。
---   active_rule  jsonb数组；固定三位0/1，与入参规则位置一一对应；1=该规则正常，0=该规则违规或未执行，返回格式为[1,0,1]。
+--   active_rule  jsonb数组；固定三位0/1，与入参规则位置一一对应；1=未发现违规或未启用，0=该规则违规，返回格式为[1,0,1]。
 --                全部正常返回[1,1,1]；执行失败也返回[1,1,1]，必须先检查code。
 --   datajson     jsonb；包含project_id、task_id、telemetry的JSON对象。
---                project_id、task_id为去除首尾空白后的项目ID、任务ID；telemetry为原始遥测JSON。
+--                project_id取自任务记录，task_id为去除首尾空白后的任务ID；telemetry为原始遥测JSON。
 -- 注意事项：
 --   1. 偏航距离等于50米、距地高度等于120米时均正常。
 --   2. 用空计划按遥测时间转换为北京时间，采用[开始,结束)，支持跨午夜计划。
@@ -1387,7 +1387,7 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   6. 未选择的规则不参与结果汇总，不能将未返回的规则认定为已恢复。
 --   7. code=400或500时ischeck=false、active_rule=[1,1,1]，不能据此判断正常或恢复。
 --   8. 规则3由每次遥测调用触发，不包含空域时段结束后的后台定时检查。
---   9. ARRAY[1,0,1]仅执行规则1和3；ARRAY[0,1,0]仅执行规则2；ARRAY[0,0,0]不执行安全规则，基础参数及任务航线仍须有效。
+--   9. ARRAY[1,0,1]仅执行规则1和3；ARRAY[0,1,0]仅执行规则2；ARRAY[0,0,0]不执行安全规则，基础参数及任务记录仍须有效。
 -- 依赖说明：PostGIS、bo_flight_job、bo_airspace_block、bo_airspace_plan、gis_flight_route_zone_check及其围栏表。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_uav_flight_deviation_check(
@@ -1563,7 +1563,7 @@ IS '实时校验飞行任务偏航超高和管制空域入侵情况';
 --   msg          text；校验结果或错误原因。
 --   ischeck      boolean；true=本次所选规则全部正常，false=有违规或执行失败。
 --   active_rule  jsonb数组；固定三位0/1，位置依次对应偏航、超高、闯入管制空域，返回格式为[1,0,1]。
---                1=该规则正常，0=该规则违规或未执行；例如[1,0,1]表示仅检测到超高违规。
+--                1=未发现违规或未启用，0=该规则违规；例如[1,0,1]表示仅检测到超高违规。
 --   datajson     jsonb；项目ID、任务ID及原始遥测信息组成的JSON对象。
 -- datajson字段：
 --   project_id   项目ID，去除首尾空白。
@@ -1607,10 +1607,10 @@ IS '实时校验飞行任务偏航超高和管制空域入侵情况';
 -- 函数描述：
 --   1. 校验项目 ID、航线 GeoJSON、任务 ID 数组和缓冲半径。
 --   2. 通过 public.gis_geojson_to_geom 解析航线，统一转为二维 WGS84（SRID=4326）。
---   3. 仅接受有效的 LineString 或 MultiLineString；Z/M 高程和测量维度不参与判断。
+--   3. 仅接受有效的 LineString 或 MultiLineString；Z高度范围参与冲突判断，M维度不参与判断。
 --   4. 按缓冲半径（米）生成输入航线缓冲区；半径为 0 时直接使用原始航线。
 --   5. 从 public.bo_flight_job 查询未删除、项目匹配、任务 ID 匹配且规划航线有效的任务。
---   6. 使用 ST_Intersects 判断输入航线缓冲区与任务规划航线是否相交。
+--   6. 输入航线缓冲区与任务规划航线二维相交，且Z高度范围重叠时判定为冲突。
 -- 入参说明：
 --   p_project_id：项目 ID，varchar，必填； 
 --   p_route_geojson：待校验航线 GeoJSON，text，必填； 
@@ -1640,8 +1640,8 @@ SELECT public.gis_drop_function('gis_flight_task_route_check');
 --                    为大于等于 0 的有限数；NaN、Infinity 和 -Infinity 返回 400。
 --
 -- 入参及空间校验：
---   1. 解析后的航线统一转换为二维 WGS84 几何（SRID=4326），Z/M 维度不参与判断。
---   2. 航线必须为有效且非空的 LineString 或 MultiLineString。
+--   1. 解析后的航线使用 WGS84 坐标（SRID=4326），Z高度范围参与冲突判断。
+--   2. 航线必须为有效且非空的 LineString 或 MultiLineString，且能够取得Z高度范围。
 --   3. 缓冲半径为 0 时使用原始航线；大于 0 时使用 geography 生成米制缓冲区。
 --   4. 缓冲区生成失败、几何修复失败或其他空间计算异常返回 500/400 结果。
 --
@@ -1652,7 +1652,7 @@ SELECT public.gis_drop_function('gis_flight_task_route_check');
 --
 -- 冲突判定：
 --   使用 ST_Intersects 判断待校验航线缓冲区与任务规划航线是否相交；边界接触也视为
---   相交。命中的任务 ID 会去重并按字典序排序。
+--   相交；还须满足两条航线的Z高度范围重叠。命中的任务 ID 去重并按字典序排序。
 --
 -- 返回说明（固定返回一行）：
 --   code：200 表示校验完成；400 表示参数、GeoJSON 或航线几何不合法；500 表示执行
@@ -1662,7 +1662,7 @@ SELECT public.gis_drop_function('gis_flight_task_route_check');
 --   task_ids：冲突任务 ID，以英文逗号分隔；无冲突、参数错误或系统异常时返回空字符串。
 --
 -- 注意事项：
---   本函数只做二维平面空间相交判断，不比较飞行高度、时间、速度或其他任务属性；
+--   本函数按二维空间相交及航线Z高度范围重叠判断冲突，不比较时间、速度或其他任务属性；
 --   p_buffer_radius 的单位为米，输入 GeoJSON 坐标必须使用 WGS84 经纬度坐标。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_flight_task_route_check(
