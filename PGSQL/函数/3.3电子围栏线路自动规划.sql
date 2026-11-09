@@ -2142,3 +2142,117 @@ COMMENT ON FUNCTION gis_flight_paths_plan(JSONB, DOUBLE PRECISION, BOOLEAN, VARC
 -- FROM gis_flight_paths
 -- WHERE id = 1;
 
+/*
+-- =============================================================================
+-- 原始航点入库：gis_astar_3d_flight
+-- 本区块整体注释，解除注释后可替换同名规划函数。
+-- 入参及返回字段与原函数一致，只将输入起终点按表结构保存并返回入库记录。
+-- 不做参数校验、规划、高度调整、插点、去重或历史复用。
+-- 安全高度和高度模式原样入库；p_force_gen 仅保留入参兼容，不参与处理。
+-- total_distance 不计算，使用表默认值；ID、时间和删除标记由表默认值生成。
+-- 成功返回 200 和入库记录；执行异常或未插入记录时返回 500 和同结构空记录。
+-- 异常日志写入失败也不影响错误结果返回。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION gis_astar_3d_flight(
+    p_start_lon        DOUBLE PRECISION,
+    p_start_lat        DOUBLE PRECISION,
+    p_start_alt        DOUBLE PRECISION,
+    p_end_lon          DOUBLE PRECISION,
+    p_end_lat          DOUBLE PRECISION,
+    p_end_alt          DOUBLE PRECISION,
+    p_safe_altitude    DOUBLE PRECISION DEFAULT 120,
+    p_height_mode      DOUBLE PRECISION DEFAULT 0,
+    p_force_gen        BOOLEAN DEFAULT FALSE,
+    p_project_id       VARCHAR DEFAULT NULL,
+    p_create_user      VARCHAR DEFAULT NULL
+) RETURNS TABLE (
+    code integer,
+    msg text,
+    id integer,
+    project_id char(32),
+    create_user varchar(32),
+    create_time timestamp,
+    update_user varchar(32),
+    update_time timestamp,
+    del_flag boolean,
+    start_point geometry(PointZ,4326),
+    end_point geometry(PointZ,4326),
+    safe_altitude double precision,
+    path_line geometry(LineStringZ,4326),
+    smooth_path_line geometry(LineStringZ,4326),
+    waypoints jsonb,
+    smooth_waypoints jsonb,
+    total_distance double precision,
+    smooth_ratio double precision
+) AS $$
+DECLARE
+    v_error_msg text;
+    v_log_sql text;
+BEGIN
+    v_log_sql := format('SELECT * FROM public.gis_astar_3d_flight(%L, %L, %L, %L, %L, %L, %L, %L, %L, %L, %L);',
+        p_start_lon, p_start_lat, p_start_alt,
+        p_end_lon, p_end_lat, p_end_alt,
+        p_safe_altitude, p_height_mode, p_force_gen,
+        p_project_id, p_create_user);
+
+    RETURN QUERY
+    WITH endpoints AS (
+        SELECT
+            ST_SetSRID(ST_MakePoint(p_start_lon, p_start_lat, p_start_alt), 4326) AS start_point,
+            ST_SetSRID(ST_MakePoint(p_end_lon, p_end_lat, p_end_alt), 4326) AS end_point,
+            jsonb_build_array(
+                jsonb_build_object('lon', p_start_lon, 'lat', p_start_lat, 'alt', p_start_alt),
+                jsonb_build_object('lon', p_end_lon, 'lat', p_end_lat, 'alt', p_end_alt)
+            ) AS waypoints
+    ), route AS (
+        SELECT e.*, ST_MakeLine(e.start_point, e.end_point) AS path_line
+        FROM endpoints e
+    ), saved AS (
+        INSERT INTO public.gis_flight_paths (
+            project_id, create_user, update_user,
+            start_point, end_point, safe_altitude,
+            path_line, smooth_path_line,
+            waypoints, smooth_waypoints, smooth_ratio
+        )
+        SELECT
+            p_project_id, p_create_user, p_create_user,
+            r.start_point, r.end_point, p_safe_altitude,
+            r.path_line, r.path_line,
+            r.waypoints, r.waypoints, p_height_mode
+        FROM route r
+        RETURNING *
+    )
+    SELECT 200, '保存成功'::text, s.*
+    FROM saved s;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION '航线保存失败：未返回入库记录';
+    END IF;
+    RETURN;
+
+EXCEPTION WHEN OTHERS THEN
+    v_error_msg := '执行异常：' || SQLERRM;
+    BEGIN
+        INSERT INTO public.gis_error_log(code, msg, sqlstring)
+        VALUES (500, v_error_msg, v_log_sql);
+    EXCEPTION WHEN OTHERS THEN
+        NULL;
+    END;
+    RETURN QUERY SELECT 500, v_error_msg, (NULL::public.gis_flight_paths).*;
+END;
+$$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION gis_astar_3d_flight(
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, BOOLEAN, VARCHAR, VARCHAR
+) IS '输入起终点原样入库并返回记录，不执行路径规划或高度调整';
+
+-- 调用示例：入参顺序与原规划版本相同。
+-- SELECT *
+-- FROM gis_astar_3d_flight(
+--     113.48457, 34.814507, 100.0,
+--     113.48575564234284, 34.81534315486885, 80.0,
+--     120.0, 0, FALSE,
+--     '2c95908e958f3b75019593551f520126', 'user_123'
+-- );
+*/

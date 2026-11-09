@@ -1499,8 +1499,10 @@ IS '校验航点及整条航线是否符合空域范围和高度限制，任一�
 --   1. 接收任务ID、无人机实时遥测信息和校验规则数组，项目ID由任务记录取得。
 --   2. 根据任务ID读取bo_flight_job中未删除的任务及规划航线。
 --   3. 规则1（无人机偏航）：比较当前位置与规划航线的二维最短距离，超过50米判为违规。
---   4. 规则2（无人机超高）：检查遥测距地高度，超过120米判为违规。
---   5. 规则3（闯入管制空域）：检查当前位置是否命中管控围栏，或所在空域是否已进入管制时段。
+--   4. 规则2（无人机超高）：按当前位置及遥测timeStamp匹配启用区块和可用计划段，距地高度严格大于最终限高时判为违规。
+--      每个区块先取命中计划段中有效height的最大值；没有有效height时依次回退区块airspace_height、0米；多个区块覆盖时取各区块限高的最小值。
+--      当前实现中，未命中任何启用区块时最终限高为NULL，规则2不报超高。
+--   5. 规则3（闯入管制空域）：检查当前位置是否命中管控围栏，或任一覆盖当前位置的启用区块是否缺少覆盖遥测时间的可用计划段。
 --      无人机飞入管制范围，以及原可飞时段结束后仍停留在空域内，均判为违规。
 --   6. 汇总本次所选规则的违规类型；全部正常时通过校验，任一规则违规时不通过。
 -- 参数说明：
@@ -1517,7 +1519,8 @@ IS '校验航点及整条航线是否符合空域范围和高度限制，任一�
 -- =============================================================================
 -- 航线规划来源：使用现有public.bo_flight_job表
 -- =============================================================================
--- 任务ID使用bo_flight_job.out_id，规划航线使用plan_route_gemo，规划空域使用plan_airspace_block_id。
+-- 按bo_flight_job.out_id定位任务，从project_id和plan_route_gemo取得项目及规划航线。
+-- plan_airspace_block_id记录规划空域关联；实时空域匹配以当前位置覆盖的项目区块为准。
 
 -- =============================================================================
 -- =============================================================================
@@ -1576,8 +1579,8 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 -- 遥测字段说明：
 --   longitude/latitude  WGS84经纬度；数值；必填；范围分别为[-180,180]、[-90,90]。
 --   altitude            海拔高度；数值；必填；单位米，必须为有限值，用于围栏高度判断。
---   height              距地高度；数值；必填；单位米，必须为非负有限值，用于超高校验。
---   timeStamp           遥测时间；字符串；必填；格式yyyy-MM-dd HH:mm:ss，按北京时间用于可飞时段判断。
+--   height              距地高度；数值；必填；单位米，必须为非负有限值，用于与规则2计算的最终限高比较。
+--   timeStamp           遥测时间；字符串；必填；建议格式yyyy-MM-dd HH:mm:ss；实际按timestamp without time zone解析后按北京时间解释，须可解析且为有限时间。
 -- 入参校验：
 --   1. 任务ID不能为空，遥测必须为JSON对象。
 --   2. 规则参数必须为长度3的一维整数数组，各元素只能为0或1，不能为NULL。
@@ -1591,17 +1594,22 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   active_rule  jsonb数组；固定三位0/1，与入参规则位置一一对应；1=未发现违规或未启用，0=该规则违规，返回格式为[1,0,1]。
 --                全部正常返回[1,1,1]；执行失败也返回[1,1,1]，必须先检查code。
 --   datajson     jsonb；包含project_id、task_id、telemetry的JSON对象。
---                project_id取自任务记录，task_id为去除首尾空白后的任务ID；telemetry为原始遥测JSON。
+--                project_id原样取自任务记录，task_id为去除首尾空白后的任务ID；telemetry为原始遥测JSON。
 -- 注意事项：
---   1. 偏航距离等于50米、距地高度等于120米时均正常。
---   2. 用空计划按遥测时间转换为北京时间，采用[开始,结束)，支持跨午夜计划。
+--   1. 偏航距离等于50米、距地高度等于最终限高时均正常（均按严格大于判断违规）。
+--   2. 用空计划按遥测对应的北京时间匹配，采用[开始,结束)；结束时间小于或等于开始时间时，结束日期顺延一天。
+--      规则2和3均查询当天及前一天的计划；计划段时间仅接受HH:mm或HH:mm:ss，小时范围00至23，不接受24:00:00或小数秒。
 --   3. 持续异常去重、恢复及乱序过滤由调用方维护；只有code=200才表示校验完成。
 --   4. 规划航线按任务ID从bo_flight_job.plan_route_gemo读取，项目ID由bo_flight_job.project_id取得。
---   5. 经过空域数组用于记录规划航线关联关系；实时管制校验仍检查当前位置所在的全部项目空域，避免偏航进入其他空域时漏检。
---   6. 未选择的规则不参与结果汇总，不能将未返回的规则认定为已恢复。
+--   5. 规划空域字段用于记录航线关联关系；实时规则2和3检查当前位置覆盖的全部启用、未删除且final_geom不为空的项目区块。
+--   6. 未启用规则不参与结果汇总，其active_rule位置保持为1，不能据此认定该规则正常或已恢复。
 --   7. code=400或500时ischeck=false、active_rule=[1,1,1]，不能据此判断正常或恢复。
 --   8. 规则3由每次遥测调用触发，不包含空域时段结束后的后台定时检查。
 --   9. ARRAY[1,0,1]仅执行规则1和3；ARRAY[0,1,0]仅执行规则2；ARRAY[0,0,0]不执行安全规则，基础参数及任务记录仍须有效。
+--   10. 规则2在每个覆盖区块中，筛选未删除、plan_status=true且时间命中的计划段，height须通过非负整数或小数正则；
+--       先对命中段的有效height取最大值，缺失或未通过正则的height不参与max；max为NULL时，依次回退区块airspace_height、0米；
+--       多个区块覆盖时取各区块限高的最小值；当前实现未命中任何启用区块时限高为NULL，规则2不报超高。
+--   11. time_plan按首尾正则初筛后转换为jsonb并展开；该正则不保证JSON语法合法，通过初筛的非法JSON仍可能使本次校验返回400。
 -- 依赖说明：PostGIS、bo_flight_job、bo_airspace_block、bo_airspace_plan、gis_flight_route_zone_check及其围栏表。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_uav_flight_deviation_check(
@@ -1620,18 +1628,23 @@ LANGUAGE plpgsql
 VOLATILE
 AS $$
 DECLARE
+    -- 任务与遥测：altitude为海拔高度，作为点位Z值；height为距地高度，用于超高校验。
     v_task_id varchar := btrim(p_task_id);
     v_project varchar;
     v_lon double precision;
     v_lat double precision;
     v_alt double precision;
     v_height double precision;
+    v_height_limit numeric;
     v_point geometry;
     v_route geometry;
     v_distance double precision;
+    -- v_time保存遥测对应的绝对时间，v_local保存北京时间，用于匹配计划日期和时段。
     v_time timestamptz;
     v_local timestamp;
 
+    -- v_rules保存实际启用的规则编号；v_active_rule固定按偏航、超高、闯入管制空域排列。
+    -- 入参开关中1表示启用；返回标记中0表示违规、1表示未发现违规或未启用。
     v_rule integer;
     v_violation_count integer := 0;
     v_rules integer[];
@@ -1643,16 +1656,18 @@ DECLARE
     v_log_sql text;
 
 BEGIN
+    -- 一、记录本次调用，随后完成基础参数校验；所有规则均关闭时仍须校验参数和任务。
     v_log_sql := format('SELECT * FROM public.gis_uav_flight_deviation_check(%L, %L, %L);',
         p_task_id, p_telemetry::text, p_rules::text);
 
     -- 记录函数调用日志：入参和函数名称写入gis_error_log
     PERFORM public.gis_write_error_log(600, 'gis_uav_flight_deviation_check', v_log_sql);
-    -- 完成所有入参校验和规则计算后，统一返回本次结果。
+    -- 任务ID须非空，遥测须为JSON对象；参数错误统一交由下方异常分支返回400。
     IF COALESCE(v_task_id, '') = ''
        OR jsonb_typeof(p_telemetry) IS DISTINCT FROM 'object' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '任务ID和遥测对象不能为空';
     END IF;
+    -- 三位开关只能取0或1，不接受NULL、多维数组或其他长度。
     IF p_rules IS NULL OR cardinality(p_rules) <> 3
        OR array_ndims(p_rules) IS DISTINCT FROM 1 OR EXISTS (
         SELECT 1 FROM unnest(p_rules) e(item)
@@ -1660,9 +1675,12 @@ BEGIN
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规则开关必须为三个整数0或1，如[1,0,1]';
     END IF;
+    -- 用元素的位置生成规则编号，例如[1,0,1]转换为规则编号数组[1,3]。
+    -- 全部关闭时生成空数组，后续规则计算及违规汇总循环均跳过。
     SELECT COALESCE(array_agg(e.pos::integer ORDER BY e.pos), ARRAY[]::integer[])
     INTO v_rules FROM unnest(p_rules) WITH ORDINALITY e(item, pos)
     WHERE e.item = 1;
+    -- 二、解析遥测坐标和高度：经纬度按WGS84范围校验，海拔不得为NaN或无穷值。
     v_lon := (p_telemetry->>'longitude')::double precision;
     v_lat := (p_telemetry->>'latitude')::double precision;
     v_alt := (p_telemetry->>'altitude')::double precision;
@@ -1671,10 +1689,13 @@ BEGIN
        OR v_alt IS NULL OR v_alt::text IN ('NaN', 'Infinity', '-Infinity') THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '经纬度或海拔无效，单位必须为度/米';
     END IF;
+    -- 距地高度与海拔分开处理，距地高度必须为非负有限值。
     v_height := (p_telemetry->>'height')::double precision;
     IF v_height IS NULL OR v_height < 0 OR v_height::text IN ('NaN', 'Infinity', '-Infinity') THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '遥测height距地高度不能为空且必须为非负有限值（米）';
     END IF;
+    -- 三、遥测时间去除首尾空白后按timestamp without time zone解析，再按北京时间解释；须为有限时间。
+    -- yyyy-MM-dd HH:mm:ss为建议输入格式；此处通过类型转换解析，计划匹配使用遥测时间。
     IF p_telemetry->>'timeStamp' IS NULL OR btrim(p_telemetry->>'timeStamp') = '' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '遥测时间timeStamp不能为空（格式yyyy-MM-dd HH:mm:ss）';
     END IF;
@@ -1688,13 +1709,16 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'timeStamp必须为有效时间';
     END IF;
     v_local := v_time AT TIME ZONE 'Asia/Shanghai';
+    -- 点位保留海拔Z值供管控围栏使用；偏航距离和空域覆盖判断会单独转为二维。
     v_point := ST_SetSRID(ST_MakePoint(v_lon, v_lat, v_alt), 4326);
+    -- 四、按平台任务out_id读取未删除任务，由任务记录取得项目ID和规划航线。
     SELECT r.project_id, r.plan_route_gemo INTO v_project, v_route
     FROM public.bo_flight_job r
     WHERE r.out_id = v_task_id AND r.del_flag = false;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '指定任务out_id不存在或任务已删除';
     END IF;
+    -- 五、规则1：启用偏航校验时才要求规划航线有效，计算当前位置到整条航线的最短距离。
     IF 1 = ANY(v_rules) THEN
         IF v_route IS NULL OR ST_IsEmpty(v_route)
            OR GeometryType(v_route) NOT IN ('LINESTRING', 'MULTILINESTRING')
@@ -1707,54 +1731,127 @@ BEGIN
                       OR NOT (ST_Y(d.geom) BETWEEN -90 AND 90)) THEN
             RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规划航线必须使用WGS84经纬度';
         END IF;
+        -- 转为geography后距离单位为米；仅比较二维位置，不将高度差计入偏航距离。
         v_distance := ST_Distance(ST_Force2D(v_point)::geography, v_route::geography);
     END IF;
+    -- 六、规则2：按当前点位与遥测时间，计算本次超高校验使用的高度上限。
+    IF 2 = ANY(v_rules) THEN
+        -- v_local来自遥测timeStamp，按计划日期和[开始,结束)筛选对应计划段；前一天计划用于匹配跨午夜时段。
+        -- 先查所有位置覆盖的启用区块，对每个区块独立查命中时间的计划段height。
+        -- 每个区块先取命中计划段中有效height的最大值；缺失或未通过非负整数、小数正则的height不参与max。
+        -- 仅当所有命中段的height均无效，或没有命中任何计划段时，才回退区块airspace_height；后者为空则取0。
+        -- 多个区块覆盖同一点时，再取各区块限高的最小值。
+        -- 未命中任何启用区块时，外层min返回NULL，汇总时规则2按未发现超高处理。
+        SELECT min(blk.block_limit) INTO v_height_limit
+        FROM (
+            SELECT b.id,
+                   COALESCE(
+                       (SELECT max(
+                           CASE WHEN (item ->> 'height') ~ '^[0-9]+(\.[0-9]+)?$'
+                                THEN (item ->> 'height')::numeric END
+                        )
+                        FROM public.bo_airspace_plan p
+                        -- 将time_plan文本展开为计划段；首尾正则仅做外形筛选，不保证JSON语法合法。
+                        -- 通过外形筛选但无法转换为jsonb的数据，仍会进入下方400异常分支。
+                        CROSS JOIN LATERAL jsonb_array_elements(
+                            CASE
+                                WHEN btrim(COALESCE(p.time_plan, '')) ~ '^\s*\['
+                                 AND btrim(COALESCE(p.time_plan, '')) ~ '(\{[^\{\}]*\}|\])\s*$'
+                                THEN p.time_plan::jsonb
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS plan_item(item)
+                        WHERE p.block_id = b.id
+                          AND p.del_flag = false AND p.plan_status = true
+                          AND p.use_date BETWEEN v_local::date - 1 AND v_local::date
+                          -- 当前正则仅接受00:00至23:59的HH:mm或HH:mm:ss格式，不接受24:00:00或小数秒。
+                          AND NULLIF(item ->> 'startTime', '') ~ '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$'
+                          AND NULLIF(item ->> 'endTime', '')   ~ '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$'
+                          -- 开始时刻包含、结束时刻排除；结束时间小于或等于开始时间时，结束日期顺延一天。
+                          AND v_local >= p.use_date + NULLIF(item ->> 'startTime', '')::time
+                          AND v_local <  p.use_date + NULLIF(item ->> 'endTime', '')::time
+                              + CASE WHEN NULLIF(item ->> 'endTime', '')::time
+                                     <= NULLIF(item ->> 'startTime', '')::time
+                                     THEN interval '1 day' ELSE interval '0 day' END
+                       ),
+                       b.airspace_height::numeric,
+                       0
+                   ) AS block_limit
+            FROM public.bo_airspace_block b
+            WHERE b.project_id = v_project AND b.del_flag = false
+              AND b.use_enabled = true AND b.final_geom IS NOT NULL
+              -- ST_Covers包含区块边界，空间覆盖只按二维位置判断。
+              AND ST_Covers(ST_SetSRID(ST_Force2D(b.final_geom), 4326), ST_Force2D(v_point))
+        ) blk;
+    END IF;
+    -- 七、规则3：命中管控围栏，或所在任一区块没有当前可飞计划段，均视为闯入管制空域。
     IF 3 = ANY(v_rules) THEN
         -- 复用飞行审核脚本中的管控围栏规则，包含项目围栏与全局围栏。
+        -- 参数'2'选择管控围栏；依赖函数执行失败时，整次校验进入500异常分支。
         SELECT * INTO v_control FROM public.gis_flight_route_zone_check(
             v_project, ST_AsGeoJSON(v_point), '2');
         IF v_control.code IS DISTINCT FROM 200 THEN
             RAISE EXCEPTION '管控围栏校验失败：%', v_control.msg;
         END IF;
         v_control_hit := COALESCE(v_control.ischeck, false);
+        -- 检查当前位置覆盖的全部启用项目区块，不局限于任务规划时关联的区块。
+        -- 只要有一个覆盖区块不存在有效计划段，即触发违规；仍位于区块内但可飞时段已结束也会命中。
         SELECT v_control_hit OR EXISTS (
             SELECT 1 FROM public.bo_airspace_block b
             WHERE b.project_id = v_project AND b.del_flag = false
               AND b.use_enabled = true AND b.final_geom IS NOT NULL
               AND ST_Covers(ST_SetSRID(ST_Force2D(b.final_geom), 4326), ST_Force2D(v_point))
+              -- NOT EXISTS表示没有可覆盖当前遥测时间的可用计划，包含无计划、计划停用或时段不匹配。
               AND NOT EXISTS (
                   SELECT 1 FROM public.bo_airspace_plan p
                   CROSS JOIN LATERAL jsonb_array_elements(
-                      COALESCE(NULLIF(btrim(p.time_plan), ''), '[]')::jsonb
+                      CASE
+                          WHEN btrim(COALESCE(p.time_plan, '')) ~ '^\s*\['
+                           AND btrim(COALESCE(p.time_plan, '')) ~ '(\{[^\{\}]*\}|\])\s*$'
+                          THEN p.time_plan::jsonb
+                          ELSE '[]'::jsonb
+                      END
                   ) s(item)
                   WHERE p.block_id = b.id AND p.del_flag = false AND p.plan_status = true
+                    -- 与规则2一致，读取当天及前一天计划，以覆盖跨午夜且尚未结束的计划段。
                     AND p.use_date BETWEEN v_local::date - 1 AND v_local::date
-                    AND v_local >= p.use_date + (s.item->>'startTime')::time
-                    AND v_local < p.use_date + (s.item->>'endTime')::time
-                        + CASE WHEN (s.item->>'endTime')::time <= (s.item->>'startTime')::time
+                    -- 时间格式与规则2保持相同的正则限制，匹配区间同样采用[开始,结束)。
+                    AND NULLIF(s.item->>'startTime', '') ~ '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$'
+                    AND NULLIF(s.item->>'endTime', '')   ~ '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$'
+                    AND v_local >= p.use_date + NULLIF(s.item->>'startTime', '')::time
+                    AND v_local <  p.use_date + NULLIF(s.item->>'endTime', '')::time
+                        + CASE WHEN NULLIF(s.item->>'endTime', '')::time <= NULLIF(s.item->>'startTime', '')::time
                                THEN interval '1 day' ELSE interval '0 day' END
               )
         ) INTO v_intrusion;
     END IF;
 
+    -- 八、仅汇总已启用规则；偏航距离严格大于50米、距地高度严格大于非NULL限高时才违规。
+    -- 未启用规则的返回标记保持为1。
     FOREACH v_rule IN ARRAY v_rules LOOP
-        v_bad := CASE v_rule WHEN 1 THEN v_distance > 50 WHEN 2 THEN v_height > 120 ELSE v_intrusion END;
+        v_bad := CASE v_rule
+            WHEN 1 THEN v_distance > 50
+            WHEN 2 THEN v_height_limit IS NOT NULL AND v_height > v_height_limit
+            ELSE v_intrusion END;
         IF v_bad THEN
             v_active_rule[v_rule] := 0;
             v_violation_count := v_violation_count + 1;
         END IF;
     END LOOP;
+    -- code=200表示校验完成，ischeck由违规项数决定；同时返回任务所属项目与原始遥测信息。
     RETURN QUERY SELECT 200, format('校验完成，当前异常%s项', v_violation_count),
         v_violation_count = 0, to_jsonb(v_active_rule),
         jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
 EXCEPTION
+    -- 参数显式校验错误，以及数值、时间、JSON等数据转换异常，统一返回400。
+    -- 失败时[1,1,1]仅为占位，调用方须先检查code，不能把失败结果视为正常或恢复。
     WHEN data_exception THEN
         PERFORM public.gis_write_error_log(400, 'gis_uav_flight_deviation_check', SQLERRM::text);
         RETURN QUERY SELECT 400, SQLERRM::text, false, '[1,1,1]'::jsonb,
             jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
+    -- 其余执行异常返回500并记录错误日志，不输出此前已经计算出的部分规则结果。
     WHEN OTHERS THEN
         PERFORM public.gis_write_error_log(500, 'gis_uav_flight_deviation_check', SQLERRM::text);
-        -- 执行失败时不返回部分校验结果。
         RETURN QUERY SELECT 500, ('实时安全告警校验异常：' || SQLERRM)::text,
             false, '[1,1,1]'::jsonb,
             jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
@@ -1770,8 +1867,8 @@ IS '实时校验飞行任务偏航超高和管制空域入侵情况';
 --   longitude   WGS84经度；数值，必填，范围[-180,180]。
 --   latitude    WGS84纬度；数值，必填，范围[-90,90]。
 --   altitude    海拔高度；数值，必填，单位米。
---   height      距地高度；数值，必填，单位米，非负有限值。
---   timeStamp   遥测时间；必填，字符串格式yyyy-MM-dd HH:mm:ss，按北京时间解析。
+--   height      距地高度；数值，必填，单位米，非负有限值；用于与规则2计算的最终限高比较，限高取值及兜底规则见函数注意事项。
+--   timeStamp   遥测时间；字符串，必填，须可解析且为有限时间；建议格式yyyy-MM-dd HH:mm:ss，实际按timestamp without time zone解析后按北京时间解释。
 -- 返回字段：
 --   code         integer；200=校验完成，400=参数或数据错误，500=执行异常。
 --   msg          text；校验结果或错误原因。
@@ -1780,7 +1877,7 @@ IS '实时校验飞行任务偏航超高和管制空域入侵情况';
 --                1=未发现违规或未启用，0=该规则违规；例如[1,0,1]表示仅检测到超高违规。
 --   datajson     jsonb；项目ID、任务ID及原始遥测信息组成的JSON对象。
 -- datajson字段：
---   project_id   项目ID，去除首尾空白。
+--   project_id   任务记录中的项目ID，原样返回。
 --   task_id     任务ID，去除首尾空白。
 --   telemetry    原样返回传入的遥测JSON。
 -- 注意：code=400/500时active_rule=[1,1,1]，不表示正常，调用方须先检查code。
