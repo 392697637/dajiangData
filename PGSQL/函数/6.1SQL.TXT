@@ -106,3 +106,7 @@ set PGPASSWORD=KtdpostSQL@2026!@#
 psql -h 218.57.15.226 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_shandong.sql
 
 218.57.15.226
+
+
+set PGPASSWORD=KtdpostSQL@2026!@#
+psql -h 47.94.77.151 -p 15432 -U zhuoyi -d ktd_lx_2026gis -f D:\MAPDATA\DEM\4326\gis_dem_henan.sql
