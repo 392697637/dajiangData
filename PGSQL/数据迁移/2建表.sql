@@ -124,3 +124,15 @@ COMMENT ON COLUMN "public"."bo_ground_ele"."length" IS '长度';
 COMMENT ON COLUMN "public"."bo_ground_ele"."sign_time" IS '标注时间';
 COMMENT ON COLUMN "public"."bo_ground_ele"."is_hot" IS '是否热点';
 COMMENT ON TABLE "public"."bo_ground_ele" IS '地物标注信息';
+
+
+
+
+-- -- 修改字段为 4326 带Z通用几何
+-- ALTER TABLE bo_ground_ele
+-- ALTER COLUMN geom TYPE geometry(GeometryZ, 4326)
+-- USING geom::geometry(GeometryZ, 4326);
+
+-- -- 重建空间索引
+-- DROP INDEX IF EXISTS idx_bo_ground_ele_geom;
+-- CREATE INDEX idx_bo_ground_ele_geom ON bo_ground_ele USING GIST(geom);
