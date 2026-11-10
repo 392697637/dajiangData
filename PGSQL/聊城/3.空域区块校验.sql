@@ -2,6 +2,14 @@
 -- 3.空域区块校验.sql
 -- 空域区块校验规则说明
 --
+-- 脚本用途：提供航线/点位空域命中、任务用空计划、空域范围与高度、实时遥测及任务航线冲突校验。
+-- 通用约定：
+--   1. 输入坐标使用WGS84经纬度（SRID=4326），高度和缓冲半径单位为米；航线长度单位为千米。
+--   2. code表示执行状态，200仅表示校验完成；业务结果还须结合ischeck及各函数的结果字段判断。
+--   3. 第1、2个函数的ischeck=true表示命中；第3至6个函数的ischeck=true表示校验通过。
+--   4. check_type为text类型的数字字符串，仅第3、4个函数返回；第3个函数另有204（用空计划或时间不满足）。
+--   5. 空域空间范围使用bo_airspace_block.final_geom；平面范围与高度分别校验，具体高度规则见各函数说明。
+--
 --   （1）航线空域区块命中校验
 --   函数：public.gis_flight_route_airspace
 --   作用：根据任务航线判断是否经过指定项目下启用、未删除且final_geom不为空的空域区块。
@@ -31,28 +39,30 @@
 --   ischeck       是否命中空域区块
 --   hit_count     命中的空域区块数量
 --   hit_blockids  命中的空域区块ID数组
+--   task_id       varchar；预留返回字段，当前正常返回时未赋值（NULL）
 --
 --   （3）任务航线用空计划校验
 --   函数：public.gis_flight_task_airspace
 --   作用：校验任务航线是否满足空域区块、用空计划、用空时间和高度限制，返回任务是否可执行。
 --   规则：
---   A、先调用gis_flight_route_airspace判断任务航线经过哪些空域区块。
---   B、未经过空域区块时任务不可执行。
---   C、经过空域区块时，进入下一步，判断plan_status是否为true。
---   D、plan_status=false表示空域不可用，任务不可执行。
---   E、plan_status=true表示空域可用，进入下一步，判断任务用空时间段是否完整落在空域计划时间段内。
---   F、任务用空时间段未完整落在空域计划时间段内时任务不可执行。
---   G、底层空域校验返回200或202时继续向下执行（202由计划高度终裁），返回201、203、400、500时直接返回。
---   H、任务用空时间段完整落在计划时间段内，按该计划时间段time_plan的height校验航线校验高度。
---   I、任一航点Z值缺失或无效时，整条航线统一使用传入的航线高度参数作为校验高度；否则取航点Z最大值；计划段height缺失或无效时按区块airspace_height兜底。
---   J、航线校验高度超过计划时间段height上限时任务不可执行（check_type=202）。
---   K、航线校验高度未超过计划时间段height上限时，任务可以执行。
+--   A、先调用gis_flight_airspace_check，以p_only_enabled=true校验空域范围和航点高度。
+--   B、底层code=200且check_type为200或202时继续执行；202由计划高度终裁，201、203、400、500直接返回。
+--   C、再调用gis_flight_route_airspace取得航线命中的空域区块ID；未命中任何区块时任务不可执行。
+--   D、每个命中区块在p_use_date当天都必须有未删除且plan_status=true的用空计划；无计划或计划不可用时任务不可执行。
+--   E、p_task_time_plan为非空JSON数组，元素包含startTime和endTime；每个任务时间段必须被每个命中区块的某一个计划时间段完整包含，不拼接多个计划段。
+--   F、任务段和计划段的结束时间小于或等于开始时间时，结束日期均顺延一天；起止边界相等可满足包含关系。
+--   G、任一航点Z值缺失或无效时，整条航线统一使用p_route_height作为校验高度；否则取航点Z最大值。
+--   H、对完整包含任务时间段的计划段，至少有一个段的height不低于航线校验高度；height缺失或无效时按区块airspace_height兜底。
+--   I、任一区块存在计划高度超限时归类202；其他计划或时间问题归类204；所有区块、所有任务时间段均满足时任务可执行。
 --   返回：
 --   code          状态码：200=执行成功 400=参数错误/无数据 500=执行异常
 --   msg           返回信息，包含可执行结果或不可执行原因
 --   ischeck       任务是否可执行，true=可执行，false=不可执行
 --   hit_count     命中的空域区块数量
 --   hit_blockids  命中的空域区块ID数组
+--   task_id       当前任务ID，原样返回p_task_id
+--   check_type    text；200=通过，201=范围超限/无可校验空域，202=高度超限，203=范围和高度均超限，204=用空计划或时间不满足，400=参数错误，500=执行异常
+--   check_msg     校验结果的详细原因和处理建议
 --
 --   （4）任务航线空域范围和高度校验
 --   函数：public.gis_flight_airspace_check
@@ -60,24 +70,69 @@
 --   规则：
 --   A、项目ID不能为空，只校验该项目下未删除且final_geom不为空的空域区块。
 --   B、航线GeoJSON不能为空，geometry必须为LineString或MultiLineString；任一航点Z值缺失或无效时，整条航线统一使用p_route_height。
---   C、p_only_enabled=false时不判断发布/启用状态；p_only_enabled=true时只校验已启用/已发布空域。
+--   C、p_only_enabled默认true，只校验use_enabled=true的空域；false时不限制启用状态。
 --   D、所有航点必须落在空域区块final_geom范围内，且整条航线的线段必须落在空域区块并集范围内；任一航点或任一线段超出时ischeck=false，归类为201（或203）。
---   E、航点高度（航点Z值；任一航点缺失或无效时整条航线统一使用p_route_height）不能超过覆盖航点的空域区块airspace_height；airspace_height为NULL时按0米上限处理。
+--   E、航点高度不能超过覆盖该航点的区块airspace_height最小值；覆盖区块的高度均为NULL时按0米上限处理，等于上限可通过。
 --   F、范围和高度全部通过时ischeck=true；否则ischeck=false，调用方应阻断提交。
 --   返回：
---   code       状态码：200=执行成功 400=参数错误/无数据 500=执行异常
+--   code       状态码：200=执行成功（含无可校验空域的业务不通过） 400=参数错误 500=执行异常
 --   msg        返回信息，包含校验结果或错误原因
 --   ischeck    是否通过空域范围和高度校验，true=通过，false=不通过
---   check_type 校验结果类型：200=范围和高度通过，201=范围超限，202=高度超限，203=范围和高度均超限，400=参数错误或无数据，500=执行异常
+--   check_type text；200=范围和高度通过，201=范围超限/无可校验空域，202=高度超限，203=范围和高度均超限，400=参数错误，500=执行异常
 --   check_msg  校验结果的中文说明，包含具体失败原因或通过说明
---   hit_count  命中的空域区块数量
+--   hit_count  bigint；覆盖航点的去重空域区块数量，与第1、3个函数按整条航线相交统计的数量口径不同
+--
+--   （5）无人机实时偏航、超高和闯入管制空域校验
+--   函数：public.gis_uav_flight_deviation_check
+--   作用：根据任务ID和实时遥测执行所选规则，返回本次违规标记及原始遥测信息。
+--   入参：
+--   p_task_id     任务ID，匹配bo_flight_job.out_id；项目ID及规划航线从未删除任务记录取得。
+--   p_telemetry   jsonb对象，必含longitude、latitude、altitude（海拔米）、height（非负距地高度米）、timeStamp。
+--   p_rules       integer[]，默认ARRAY[1,1,1]；固定三位0/1，依次控制偏航、超高、闯入管制空域；1执行，0跳过。
+--   规则：
+--   A、偏航：当前位置到规划航线的二维最短距离严格大于50米时违规；启用该规则时必须有有效规划航线。
+--   B、超高：按当前位置覆盖的启用项目区块及遥测时间匹配可用计划段；各区块取命中段有效height最大值，无有效值时依次回退区块airspace_height、0米。
+--      多区块覆盖时取各区块限高的最小值，距地高度严格大于该限高时违规；未命中任何启用区块时本规则不报超高。
+--   C、闯入管制空域：命中项目/全局管控围栏，或任一覆盖当前位置的启用项目区块没有覆盖遥测时间的可用计划段时违规。
+--   D、timeStamp按北京时间解释，建议yyyy-MM-dd HH:mm:ss；查询当天和前一天计划，采用[开始,结束)，结束时间小于或等于开始时间时顺延一天。
+--      计划段startTime/endTime仅接受HH:mm或HH:mm:ss，小时00至23；违规判断由每次遥测调用触发。
+--   E、只汇总已启用规则；持续异常去重、恢复和乱序处理由调用方维护。
+--   返回：
+--   code          integer；200=校验完成，400=参数或数据错误，500=执行异常
+--   msg           校验结果或错误原因，正常执行时包含违规项数
+--   ischeck       本次所选规则是否全部通过
+--   active_rule   jsonb数组，固定三位，依次对应偏航、超高、闯入管制空域；0=违规，1=未发现违规或未启用
+--                 code=400或500时也返回[1,1,1]，须先检查code，不能据此判断正常或恢复
+--   datajson      jsonb对象，包含project_id、task_id、telemetry
+--
+--   （6）任务航线冲突校验
+--   函数：public.gis_flight_task_route_check
+--   作用：在指定项目和任务ID集合内，检查待校验航线与任务规划航线是否存在空间冲突。
+--   入参：
+--   p_project_id     项目ID，必填
+--   p_route_geojson  待校验航线GeoJSON，解析后须为有效、非空的LineString/MultiLineString，并能取得Z高度范围
+--   p_task_ids       varchar[]，必填且非空；元素去除首尾空白并去重，不允许NULL或空字符串
+--   p_buffer_radius double precision，单位米，默认50；须为非负有限值，0表示使用原始航线
+--   规则：
+--   A、仅检查bo_flight_job中项目匹配、out_id在指定任务集合内、未删除（del_flag为NULL也按未删除处理）且规划航线非空有效的记录。
+--   B、待校验航线的二维缓冲区与任务规划航线相交，且两条航线的Z高度范围重叠时判定冲突；边界接触、高度区间端点相等均计入。
+--   C、冲突任务ID去重后按字典序排序；本函数不比较任务时间、速度或其他属性。
+--   返回：
+--   code       integer；200=校验完成，400=参数或航线数据错误，500=执行异常
+--   msg        校验结果或错误原因，发现冲突时包含冲突数量和任务ID
+--   ischeck    true=未发现冲突，false=发现冲突或校验失败
+--   task_ids   text；冲突任务ID以英文逗号分隔，无冲突或执行失败时为空字符串
 --
 -- 依赖说明：
 --   1. PostGIS 空间扩展。
---   2. public.gis_geojson_to_geom(text) GeoJSON解析函数。
---   3. public.gis_write_error_log(integer, text, text) 错误日志函数。
---   4. public.bo_airspace_block 空域区块表。
---   5. public.bo_airspace_plan 用空计划表。
+--   2. PGSQL/函数/baseFunction/gis_drop_function.sql：public.gis_drop_function(text)，按名称删除旧函数。
+--   3. PGSQL/函数/baseFunction/gis_geojson_to_geom.sql：public.gis_geojson_to_geom(text)，解析GeoJSON。
+--   4. PGSQL/聊城/1.飞行审核.sql：public.gis_write_error_log(integer, text, text)，写入public.gis_error_log。
+--      同文件的public.gis_flight_route_zone_check(text, text, text)用于第5个函数的管控围栏校验。
+--   5. PGSQL/聊城/2.空域区块.sql：public.bo_airspace_block空域区块表、public.bo_airspace_plan用空计划表。
+--   6. public.bo_flight_job任务表，第5、6个函数读取out_id、project_id、del_flag、plan_route_gemo。
+--   7. public.bo_electric_fence全局围栏表，以及存在时参与校验的public.gis_electric_fence_<项目ID>项目围栏表。
+--   8. 第3个函数运行时复用本文件的第4个和第1个函数；调用前需完成本文件全部函数的创建。
 -- =============================================================================
 
 -- =============================================================================
@@ -1069,7 +1124,7 @@ SELECT gis_drop_function('gis_flight_airspace_check');
 --   2. 范围判断使用二维几何：航点按ST_Covers逐点判断，整条航线按ST_Covers判断是否完全落在空域并集内；Z值不参与空间判断。
 --   3. 任一航点Z高度缺失或无效时整条航线统一使用p_route_height；航线Z值完整时该值不参与计算。
 --   4. 任一航点未落入可飞空域、任一线段越出空域并集，或任一航点高度超过覆盖该航点的可飞空域高度，ischeck=false，调用方应阻断提交。
---   5. 高度仅对有空域覆盖的航点判断；全部航点在空域外时，只判范围失败，不推断高度超限；覆盖航点的空域airspace_height为NULL时按0米上限处理。
+--   5. 高度仅对有空域覆盖的航点判断；全部航点在空域外时，只判范围失败，不推断高度超限；重叠区块取airspace_height最小值，覆盖区块的高度均为NULL时按0米上限处理。
 --   6. 航线整体校验使用项目下可校验空域区块的并集，因此航线跨越多块空域时按并集判断，不要求必须落在同一区块内。
 --   7. p_only_enabled=true时只校验启用空域；p_only_enabled=false时校验项目下未删除空域。
 -- =============================================================================
@@ -1348,7 +1403,8 @@ BEGIN
         SELECT
             point_no,
             point_height,
-            max(airspace_height)::numeric AS max_airspace_height,
+            -- 同一航点被多个区块覆盖时，按其中最低的高度上限校验。
+            min(airspace_height)::numeric AS min_airspace_height,
             count(DISTINCT block_id)::bigint AS block_count
         FROM point_block_hits
         GROUP BY point_no, point_height
@@ -1356,13 +1412,13 @@ BEGIN
     SELECT
         count(*) FILTER (WHERE block_count = 0)::bigint,
         count(*) FILTER (
-            WHERE block_count > 0 AND point_height > COALESCE(max_airspace_height, 0)
+            WHERE block_count > 0 AND point_height > COALESCE(min_airspace_height, 0)
         )::bigint,
         count(*)::bigint,
         (SELECT count(DISTINCT block_id)::bigint FROM point_block_hits),
         string_agg(DISTINCT format('航点高度%s米超过对应空域高度%s米上限',
-            point_height, COALESCE(max_airspace_height, 0)), '；') FILTER (
-            WHERE block_count > 0 AND point_height > COALESCE(max_airspace_height, 0))
+            point_height, COALESCE(min_airspace_height, 0)), '；') FILTER (
+            WHERE block_count > 0 AND point_height > COALESCE(min_airspace_height, 0))
     INTO
         v_outside_count,
         v_point_height_over_count,
