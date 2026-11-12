@@ -87,7 +87,7 @@
 --   函数：public.gis_uav_flight_deviation_line
 --   作用：按航飞模式和高度基准，将机库起飞段、规划航线、返航段和降落段拼接为完整三维航线，供第6个函数使用。
 --   入参：
---   p_uav_location   geometry；机库PointZ，XY为WGS84经纬度，Z为机库海拔（米）。
+--   p_uav_location   geometry；机库所在地面PointZ，XY为WGS84经纬度，Z为地面海拔（米），不含机库距地高度。
 --   p_ground_height  double precision；机库相对地面高度（米），地面机库传0；非负有限值。
 --   p_safe_height    double precision；相对机库的安全起飞高度（米）；非负有限值。
 --   p_return_height  double precision；相对机库的返航高度（米）；非负有限值。
@@ -96,12 +96,12 @@
 --   p_flight_mode    integer；航飞模式，默认1；1=垂直爬升，2=倾斜爬升，不能为NULL。
 --   规则：
 --   A、相对分支：机库点Z=0，原航点Z减p_ground_height；安全点Z=p_safe_height，返航点Z=p_return_height，忽略地形高差。
---   B、海拔分支：采用相同的相对机库航线逻辑，再给所有点统一加机库海拔；原航点Z为原Z-p_ground_height+机库海拔。
+--   B、海拔分支：采用相同的相对机库航线逻辑，再给所有点统一加机库起飞点海拔（地面海拔+p_ground_height）；原航点Z为原Z-p_ground_height+机库起飞点海拔。
 --   C、垂直爬升：先在机库处升至换算后首航点高度与安全起飞点高度的较大值，再平飞至首航点上方；安全点更高时垂直下降至首航点。
 --   D、倾斜爬升：先在机库处升至安全起飞高度，再直线飞向首航点；两种模式均按原顺序经过规划航点。
 --   E、返航先在末航点经纬度处垂直升降到返航高度，再平飞到机库上方同一高度，最后垂直降落；末航点已在返航高度时直接平飞。
 --   F、机库和原航线SRID须为4326或0，SRID=0按WGS84解释；多段航线须在XYZ三维空间首尾衔接，不自动反转或连接断开的航段。
---   G、两个分支均忽略航点与机库之间的地形高差，不查询DEM；海拔航线与相对航线仅相差机库海拔这一统一Z偏移。
+--   G、两个分支均忽略航点与机库之间的地形高差，不查询DEM；海拔航线与相对航线仅相差机库起飞点海拔这一统一Z偏移。
 --   返回：
 --   geometry      SRID=4326的LineStringZ，起终点均为机库，所有Z统一为所选高度基准（米），允许负Z
 --   异常          参数或航线连续性无效时抛出SQLSTATE 22023；由第6个函数调用时转换为code=400
@@ -1681,13 +1681,31 @@ ALTER TABLE public.bo_flight_job
     ADD COLUMN IF NOT EXISTS ground_height double precision DEFAULT 0,
     ADD COLUMN IF NOT EXISTS safe_height double precision,
     ADD COLUMN IF NOT EXISTS return_height double precision,
-    ADD COLUMN IF NOT EXISTS flight_mode smallint;
+    ADD COLUMN IF NOT EXISTS flight_mode smallint DEFAULT 1; -- 航飞模式默认1，即直升模式（垂直爬升）
 
-COMMENT ON COLUMN public.bo_flight_job.uav_location IS '机库位置，WGS84三维点（经度、纬度、海拔高度），SRID=4326，高度单位：米';
+ALTER TABLE public.bo_flight_job -- 兼容已存在flight_mode字段的任务表
+    ALTER COLUMN flight_mode SET DEFAULT 1; -- 默认直升模式：1垂直爬升，2倾斜爬升
+
+-- SELECT * -- 返回查询状态及地面海拔elevation，单位：米
+-- FROM public.gis_dem_value_at_point(
+--     ST_SetSRID(ST_MakePoint(113.474638, 34.813974), 4326) -- 机库经纬度
+-- );
+-- 93
+-- 补充指定任务起降参数，以下示例值请按实际配置调整。
+UPDATE public.bo_flight_job -- 更新无人机飞行任务表
+SET uav_location = ST_SetSRID(ST_MakePoint(113.474638, 34.813974, 93), 4326), -- 机库所在地面位置：WGS84经纬度、DEM地面海拔93米，不加机库距地高度
+    ground_height = 18.7, -- 机库距地高度（米）=机库起飞点海拔111.7-机库位置DEM地面海拔93
+    safe_height = 102, -- 安全起飞高度，相对机库（米），示例值需按实际配置调整
+    return_height = 102, -- 返航高度，相对机库（米），示例值需按实际配置调整
+    flight_mode = 1 -- 航飞模式：1直升模式（垂直爬升，默认），2倾斜爬升
+WHERE out_id = '3ebd184710f4406ead42fb418c79801f' -- 按平台任务ID匹配
+  AND del_flag = false; -- 仅更新未删除的任务
+
+COMMENT ON COLUMN public.bo_flight_job.uav_location IS '机库所在地面位置，WGS84三维点（经度、纬度、地面海拔高度），不含机库距地高度，SRID=4326，高度单位：米';
 COMMENT ON COLUMN public.bo_flight_job.ground_height IS '机库相对地面高度，单位：米，默认0';
 COMMENT ON COLUMN public.bo_flight_job.safe_height IS '安全起飞高度，相对起飞点（机库）的高度，单位：米；垂直爬升时起飞高度取安全点与首航点高度的较大值，安全点更高时平飞至首航点上方再垂直下降；倾斜爬升时先上升至该高度再飞向首航点';
 COMMENT ON COLUMN public.bo_flight_job.return_height IS '无人机返航高度，相对机库高度，单位：米；在末航点处垂直升降至该高度后平飞到机库上方，再垂直降落至机库';
-COMMENT ON COLUMN public.bo_flight_job.flight_mode IS '航飞模式：1垂直爬升（先垂直爬升后平飞，安全起飞高度高于首航点时增加垂直下降段）；2倾斜爬升（爬升至安全起飞高度后，再直线飞向航线起始点）';
+COMMENT ON COLUMN public.bo_flight_job.flight_mode IS '航飞模式：默认1，即直升模式；1垂直爬升（先垂直爬升后平飞，安全起飞高度高于首航点时增加垂直下降段）；2倾斜爬升（爬升至安全起飞高度后，再直线飞向航线起始点）';
 
 -- =============================================================================
 -- 函数名称：5.gis_uav_flight_deviation_line
@@ -1695,12 +1713,12 @@ COMMENT ON COLUMN public.bo_flight_job.flight_mode IS '航飞模式：1垂直爬
 -- 函数描述：
 --   1. 校验机库位置、机库距地高度、安全起飞高度、返航高度、航飞模式及规划航线。
 --   A. p_is_altitude=false：将原航点距地高度减去机库距地高度，输出相对机库航线。
---   B. p_is_altitude=true：按相同相对机库逻辑构造航线，再给所有点统一加机库海拔，输出海拔航线。
+--   B. p_is_altitude=true：按相同相对机库逻辑构造航线，再给所有点统一加机库起飞点海拔（地面海拔+机库距地高度），输出海拔航线。
 --   C. 模式1垂直爬升：先升至换算后首航点高度与安全起飞点高度的较大值，再平飞至首航点上方，安全点更高时垂直下降至首航点。
 --   D. 模式2倾斜爬升：机库先垂直爬升到安全起飞高度，再直线飞向首航点。
 --   E. 依次拼接起飞段、换算后的规划航线、末航点处升降至返航高度的垂直段、平飞返航段和垂直降落段。
 -- 入参说明：
---   p_uav_location   机库三维位置，XY为WGS84经纬度，Z为机库海拔。
+--   p_uav_location   机库所在地面三维位置，XY为WGS84经纬度，Z为地面海拔，不含机库距地高度。
 --   p_ground_height  机库相对地面高度；地面机库传0。
 --   p_safe_height    安全起飞高度，相对起飞点（机库）。
 --   p_return_height  返航高度，相对机库。
@@ -1711,7 +1729,7 @@ COMMENT ON COLUMN public.bo_flight_job.flight_mode IS '航飞模式：1垂直爬
 --   返回单个geometry值，实际为SRID=4326的LineStringZ；所有点的Z采用同一高度基准，单位：米。
 -- 注意事项：
 --   1. 本函数生成完整航线，供gis_uav_flight_deviation_check使用；不单独返回偏航或空域校验结果。
---   2. 两个分支均按业务约定忽略航点与机库之间的地形高差，不查询DEM；输出仅相差统一的机库海拔偏移。
+--   2. 两个分支均按业务约定忽略航点与机库之间的地形高差，不查询DEM；输出仅相差统一的机库起飞点海拔偏移。
 --   3. 输入参数或航线连续性无效时抛出SQLSTATE 22023异常，不返回code/msg结果行。
 -- =============================================================================
 
@@ -1725,7 +1743,7 @@ SELECT public.gis_drop_function('public.gis_uav_flight_deviation_line');
 -- 函数介绍：5.gis_uav_flight_deviation_line
 -- 主要作用：统一规划航点的高度基准，再按航飞模式生成从机库起飞到返回机库降落的完整三维航线。
 -- 入参说明：
---   p_uav_location   机库位置；geometry；必填；非空PointZ，XY为经纬度，Z为有限的海拔高度（米）。
+--   p_uav_location   机库所在地面位置；geometry；必填；非空PointZ，XY为经纬度，Z为有限的地面海拔高度（米），不含机库距地高度。
 --   p_ground_height  机库相对地面高度；double precision；必填；非负有限值（米），地面机库传0。
 --   p_safe_height    安全起飞高度；double precision；必填；相对机库的非负有限高度（米）。
 --   p_return_height  返航高度；double precision；必填；相对机库的非负有限高度（米）。
@@ -1742,7 +1760,8 @@ SELECT public.gis_drop_function('public.gis_uav_flight_deviation_line');
 -- 返回说明：
 --   geometry          完整三维航线，实际为SRID=4326的LineStringZ；起点和终点均为机库点。
 --   相对高度分支：机库点Z=0，规划航点Z=原航点Z-p_ground_height，安全点Z=p_safe_height，返航点Z=p_return_height。
---   海拔高度分支：机库点Z=机库海拔，规划航点Z=原航点Z-p_ground_height+机库海拔，安全点Z=机库海拔+p_safe_height，返航点Z=机库海拔+p_return_height。
+--   海拔高度分支：机库起飞点海拔=ST_Z(p_uav_location)+p_ground_height；机库点Z=机库起飞点海拔。
+--   规划航点Z=原航点Z-p_ground_height+机库起飞点海拔，安全点Z=机库起飞点海拔+p_safe_height，返航点Z=机库起飞点海拔+p_return_height。
 -- 航飞模式说明：
 --   1. 垂直爬升：机库 → 机库上方爬升点（首航点与安全点高度的较大值） → 必要时增加首航点上方同高度点 → 换算后的规划航线 → 末航点处返航高度点 → 机库上方返航点 → 机库。
 --   2. 倾斜爬升：机库 → 机库上方安全起飞点 → 换算后的规划航线 → 末航点处返航高度点 → 机库上方返航点 → 机库。
@@ -1752,7 +1771,7 @@ SELECT public.gis_drop_function('public.gis_uav_flight_deviation_line');
 -- 注意事项：
 --   1. 输出允许负Z；所有Z统一表示所选高度基准，XY仍为WGS84经纬度，高度单位均为米。
 --   2. 两个分支均不查询DEM，按业务约定忽略不同航点与机库之间的地形高差。
---   3. 海拔分支采用与相对分支相同的路径逻辑，各点Z统一加p_uav_location的机库海拔；机库和遥测海拔须采用相同高程基准。
+--   3. 海拔分支采用与相对分支相同的路径逻辑，各点Z统一加机库起飞点海拔（所在地面海拔+机库距地高度）；地面与遥测海拔须采用相同高程基准。
 --   4. 保留原航点和航段的顺序与方向；返航先在末航点处垂直升降，再平飞回机库上方并垂直降落；末航点已在返航高度时不重复增加同位置点。
 -- 依赖说明：PostGIS；两种高度输出均不依赖DEM查询函数或地形数据。
 -- =============================================================================
@@ -1783,7 +1802,7 @@ DECLARE
     v_last_point geometry;
     v_takeoff_height double precision;
 BEGIN
-    -- 一、机库须有有效经纬度和海拔Z；即使输出相对高度，也先校验完整的机库三维位置。
+    -- 一、机库所在地面位置须有有效经纬度和地面海拔Z；即使输出相对高度，也先校验完整的地面三维位置。
     IF p_uav_location IS NULL OR ST_IsEmpty(p_uav_location)
        OR GeometryType(p_uav_location) <> 'POINT' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '机库位置必须为非空的WGS84三维点';
@@ -1793,7 +1812,7 @@ BEGIN
        OR NOT (ST_Y(p_uav_location) BETWEEN -90 AND 90)
        OR ST_Z(p_uav_location) IS NULL
        OR ST_Z(p_uav_location)::text IN ('NaN', 'Infinity', '-Infinity') THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '机库位置须使用WGS84经纬度并包含有限的海拔高度';
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '机库位置须使用WGS84经纬度并包含有限的地面海拔高度';
     END IF;
     -- 这三个输入高度均要求非负有限；换算后的航点Z则可以为负，两者校验范围不同。
     IF EXISTS (
@@ -1839,8 +1858,8 @@ BEGIN
         END IF;
         v_previous_end := ST_EndPoint(v_part.geom);
     END LOOP;
-    -- 三、两种输出均按相对机库逻辑换算；相对输出的基准为0，海拔输出统一加机库海拔。
-    v_home_height := CASE WHEN p_is_altitude THEN ST_Z(p_uav_location) ELSE 0 END;
+    -- 三、两种输出均按相对机库逻辑换算；海拔输出以地面海拔加机库距地高度作为起飞点海拔。
+    v_home_height := CASE WHEN p_is_altitude THEN ST_Z(p_uav_location) + p_ground_height ELSE 0 END;
     -- 按原几何路径顺序保存航点，避免排序、合线或去重改变飞行路线。
     SELECT array_agg(d.geom ORDER BY d.path) INTO v_points FROM ST_DumpPoints(v_route) d;
     FOR v_point_index IN 1..array_length(v_points, 1) LOOP
@@ -1851,7 +1870,7 @@ BEGIN
             ST_X(v_points[v_point_index]), ST_Y(v_points[v_point_index]), v_point_height
         ), 4326);
     END LOOP;
-    -- 四、建立同基准机库点：相对模式以机库为0，海拔模式直接使用机库原始海拔。
+    -- 四、建立同基准机库起飞点：相对模式以机库为0，海拔模式为所在地面海拔加机库距地高度。
     v_home := ST_SetSRID(ST_MakePoint(ST_X(p_uav_location), ST_Y(p_uav_location), v_home_height), 4326);
     -- 五、先计算安全起飞点高度；模式1爬升至安全点与首航点高度的较大值，模式2直接采用安全点。
     v_takeoff_height := v_home_height + p_safe_height;
@@ -1886,10 +1905,10 @@ IS '按航飞模式构造机库起飞、规划航线、返航及降落的完整�
 -- =============================================================================
 -- 调用示例
 -- =============================================================================
--- 1. 省略高度类型和航飞模式，默认垂直爬升、输出相对机库航线；机库海拔120米、距地20米，安全起飞60米、返航90米。
+-- 1. 省略高度类型和航飞模式，默认垂直爬升、输出相对机库航线；所在地面海拔100米、距地20米，机库起飞点海拔120米，安全起飞60米、返航90米。
 -- 原航点距地高度分别为120米、150米，换算后相对机库高度为100米、130米，垂直爬升至首航点高度100米。
 -- SELECT ST_AsEWKT(public.gis_uav_flight_deviation_line(
---     ST_GeomFromText('POINT Z(113.46 34.81 120)', 4326),
+--     ST_GeomFromText('POINT Z(113.46 34.81 100)', 4326),
 --     20,
 --     60,
 --     90,
@@ -1897,10 +1916,10 @@ IS '按航飞模式构造机库起飞、规划航线、返航及降落的完整�
 -- ));
 -- 返回Z序列为[0,100,100,130,90,90,0]，末航点先从130米垂直降到90米，再以90米高度平飞返航并降落。
 --
--- 2. 倾斜爬升，输出海拔航线；按与相对高度相同的路径逻辑构造，再统一加机库海拔120米。
+-- 2. 倾斜爬升，输出海拔航线；按与相对高度相同的路径逻辑构造，再统一加机库起飞点海拔100+20=120米。
 -- 安全起飞点海拔为120+60=180米，返航点海拔为120+90=210米；原航点海拔分别为120-20+120=220米、150-20+120=250米。
 -- SELECT ST_AsEWKT(public.gis_uav_flight_deviation_line(
---     ST_GeomFromText('POINT Z(113.46 34.81 120)', 4326),
+--     ST_GeomFromText('POINT Z(113.46 34.81 100)', 4326),
 --     20,
 --     60,
 --     90,
@@ -1925,7 +1944,7 @@ IS '按航飞模式构造机库起飞、规划航线、返航及降落的完整�
 
 -- 4. 默认垂直爬升，安全起飞120米高于换算后的首航点100米；先升至120米，平飞到首航点上方，再垂直降到100米。
 -- SELECT ST_AsEWKT(public.gis_uav_flight_deviation_line(
---     ST_GeomFromText('POINT Z(113.46 34.81 120)', 4326),
+--     ST_GeomFromText('POINT Z(113.46 34.81 100)', 4326),
 --     20,
 --     120,
 --     90,
@@ -2006,7 +2025,7 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 -- 高度基准说明：
 --   1. altitude缺失、格式错误、非有限、为0或与height精确相等时选择相对分支，否则使用有效海拔；规则1的三维校验和规则2采用同一分支，机库位置为空时规则1不使用高度。
 --   2. 相对分支：遥测使用height，机库点Z=0，原航点Z和空域距地限高均减ground_height；忽略航点与机库的地形高差。
---   3. 海拔分支：遥测使用altitude，机库点Z为机库海拔，原航点Z-ground_height后统一加机库海拔；空域距地限高仍加遥测点DEM。
+--   3. 海拔分支：遥测使用altitude，机库起飞点海拔为所在地面海拔+ground_height，原航点Z-ground_height后统一加机库起飞点海拔；空域距地限高仍加遥测点DEM。
 --   4. altitude和height分别解析，格式错误或非有限值视为不可用；海拔分支不要求height有效。
 -- 规则说明：
 --   A. 规则1：机库位置非空时，按航飞模式生成完整航线，将XY转换到以遥测位置为中心的米制投影，计算包含Z高度差的三维最短距离。
@@ -2271,7 +2290,7 @@ BEGIN
         -- 空域计划/区块限高均为距地高度，转换到与本次遥测相同的高度基准后再比较。
         IF v_height_limit IS NOT NULL THEN
             IF v_use_altitude THEN
-                -- 此处仅为超高校验按遥测位置查询DEM换算限高；航线构造按机库海拔统一平移，不查询DEM。
+                -- 此处仅为超高校验按遥测位置查询DEM换算限高；航线构造按机库起飞点海拔（地面海拔+距地高度）统一平移，不查询DEM。
                 -- 必需DEM不可用时返回400，同一次调用不会临时回退height而混用高度基准。
                 BEGIN
                     SELECT dem.code, dem.elevation INTO v_dem_code, v_ground_elevation
