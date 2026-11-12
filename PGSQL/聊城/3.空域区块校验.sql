@@ -2142,9 +2142,22 @@ BEGIN
     IF v_height::text IN ('NaN', 'Infinity', '-Infinity') THEN
         v_height := NULL;
     END IF;
-    -- 按上游约定，海拔为0或等于相对高度时使用相对高度；海拔缺失时也进入相对分支。
+    -- 按上游约定，海拔为0或等于相对高度时使用相对高度；海拔或可单参调用的DEM函数缺失时也进入相对分支。
     v_use_altitude := v_alt IS NOT NULL AND v_alt <> 0
-                      AND (v_height IS NULL OR v_alt <> v_height);
+                      AND (v_height IS NULL OR v_alt <> v_height)
+                      AND (
+                          to_regprocedure('public.gis_dem_value_at_point(geometry)') IS NOT NULL
+                          OR EXISTS (
+                              SELECT 1 FROM pg_proc p
+                              WHERE p.oid = to_regprocedure('public.gis_dem_value_at_point(geometry,text)')
+                                AND p.pronargdefaults >= 1
+                          )
+                      );
+    IF v_alt IS NOT NULL AND v_alt <> 0
+       AND (v_height IS NULL OR v_alt <> v_height) AND NOT v_use_altitude THEN
+        PERFORM public.gis_write_error_log(600,
+            'gis_uav_flight_deviation_check：DEM函数缺失或不支持单参数调用，改用相对高度height', v_log_sql);
+    END IF;
     v_telemetry_height := CASE WHEN v_use_altitude THEN v_alt ELSE v_height END;
     -- 三、遥测时间去除首尾空白后按timestamp without time zone解析，再按北京时间解释；须为有限时间。
     -- yyyy-MM-dd HH:mm:ss为建议输入格式；此处通过类型转换解析，计划匹配使用遥测时间。
