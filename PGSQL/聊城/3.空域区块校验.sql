@@ -2,13 +2,14 @@
 -- 3.空域区块校验.sql
 -- 空域区块校验规则说明
 --
--- 脚本用途：提供航线/点位空域命中、任务用空计划、空域范围与高度、实时遥测及任务航线冲突校验。
+-- 脚本用途：提供航线/点位空域命中、任务用空计划、空域范围与高度、完整起降航线构造、实时遥测及任务航线冲突校验。
 -- 通用约定：
 --   1. 输入坐标使用WGS84经纬度（SRID=4326），高度和缓冲半径单位为米；航线长度单位为千米。
 --   2. code表示执行状态，200仅表示校验完成；业务结果还须结合ischeck及各函数的结果字段判断。
---   3. 第1、2个函数的ischeck=true表示命中；第3至6个函数的ischeck=true表示校验通过。
+--   3. 第1、2个函数的ischeck=true表示命中；第3、4、6、7个函数的ischeck=true表示校验通过。
 --   4. check_type为text类型的数字字符串，仅第3、4个函数返回；第3个函数另有204（用空计划或时间不满足）。
 --   5. 空域空间范围使用bo_airspace_block.final_geom；平面范围与高度分别校验，具体高度规则见各函数说明。
+--   6. 第5个函数gis_uav_flight_deviation_line直接返回geometry；参数或必需DEM无效时抛出异常，不返回code/ischeck。
 --
 --   （1）航线空域区块命中校验
 --   函数：public.gis_flight_route_airspace
@@ -39,7 +40,7 @@
 --   ischeck       是否命中空域区块
 --   hit_count     命中的空域区块数量
 --   hit_blockids  命中的空域区块ID数组
---   task_id       varchar；预留返回字段，当前正常返回时未赋值（NULL）
+--   task_id       varchar；预留返回字段，正常、参数错误和执行异常时均返回NULL
 --
 --   （3）任务航线用空计划校验
 --   函数：public.gis_flight_task_airspace
@@ -82,32 +83,58 @@
 --   check_msg  校验结果的中文说明，包含具体失败原因或通过说明
 --   hit_count  bigint；覆盖航点的去重空域区块数量，与第1、3个函数按整条航线相交统计的数量口径不同
 --
---   （5）无人机实时偏航、超高和用空计划时段校验
+--   （5）无人机完整起降航线构造
+--   函数：public.gis_uav_flight_deviation_line
+--   作用：按航飞模式和高度基准，将机库起飞段、规划航线、返航段和降落段拼接为完整三维航线，供第6个函数使用。
+--   入参：
+--   p_uav_location   geometry；机库PointZ，XY为WGS84经纬度，Z为机库海拔（米）。
+--   p_ground_height  double precision；机库相对地面高度（米），地面机库传0；非负有限值。
+--   p_safe_height    double precision；相对机库的安全起飞高度（米）；非负有限值。
+--   p_return_height  double precision；相对机库的返航高度（米）；非负有限值。
+--   p_route          geometry；原规划航线LineStringZ或按飞行顺序首尾衔接的MultiLineStringZ，Z为非负有限的距地高度（米）。
+--   p_is_altitude    boolean；输出高度基准，默认false；false=相对机库高度，true=海拔高度，不能为NULL。
+--   p_flight_mode    integer；航飞模式，默认1；1=垂直爬升，2=倾斜爬升，不能为NULL。
+--   规则：
+--   A、相对分支：机库点Z=0，原航点Z减p_ground_height；安全点Z=p_safe_height，返航点Z=p_return_height，忽略地形高差。
+--   B、海拔分支：机库点Z取机库海拔，原航点Z加对应航点DEM；安全点和返航点Z分别为机库海拔加p_safe_height、p_return_height。
+--   C、垂直爬升：先在机库处升至换算后的首航点高度，再飞向首航点；首航点高度不得低于安全起飞点高度。
+--   D、倾斜爬升：先在机库处升至安全起飞高度，再直线飞向首航点；两种模式均按原顺序经过规划航点。
+--   E、返航从末航点直接连接机库上方返航点，再垂直降落至机库；不额外插入末航点上方的转折点。
+--   F、机库和原航线SRID须为4326或0，SRID=0按WGS84解释；多段航线须在XYZ三维空间首尾衔接，不自动反转或连接断开的航段。
+--   G、相对分支不查询DEM；海拔分支要求每个原航点具有有效DEM，0米及负地形海拔有效，且高程基准须一致。
+--   返回：
+--   geometry      SRID=4326的LineStringZ，起终点均为机库，所有Z统一为所选高度基准（米），允许负Z
+--   异常          参数、航线连续性、安全起飞条件或必需DEM无效时抛出SQLSTATE 22023；由第6个函数调用时转换为code=400
+--
+--   （6）无人机实时偏航、超高和用空计划时段校验
 --   函数：public.gis_uav_flight_deviation_check
 --   作用：根据任务ID和实时遥测执行所选规则，返回本次违规标记及原始遥测信息。
 --   入参：
---   p_task_id     任务ID，匹配bo_flight_job.out_id；项目ID及规划航线从未删除任务记录取得。
---   p_telemetry   jsonb对象，必含longitude、latitude、timeStamp；altitude为飞行海拔米，height为地形换算不可用时的备用高度米；高度仅供规则2使用。
---   p_rules       integer[]，默认ARRAY[1,1,1]；固定三位0/1，依次控制偏航、超高、用空计划时段；1执行，0跳过。
+--   p_task_id               varchar；任务ID，匹配bo_flight_job.out_id；项目ID、规划航线和起降参数从未删除任务记录取得。
+--   p_telemetry             jsonb对象；必含longitude、latitude、timeStamp；altitude为海拔米，height为相对机库高度米；规则1、2使用选定高度。
+--   p_rules                 integer[]；默认ARRAY[1,1,1]；固定三位0/1，依次控制偏航、超高、用空计划时段；1执行，0跳过。
+--   p_deviation_threshold   double precision；偏航距离阈值，单位米，默认50；须为非负有限值，不能为NULL。
 --   规则：
---   A、偏航：当前位置到规划航线的二维最短距离严格大于50米时违规；启用该规则时必须有有效规划航线。
---   B、超高：按当前位置覆盖的启用项目区块及遥测时间匹配可用计划段；各区块取命中段有效height最大值，无有效值时依次回退区块airspace_height、0米。
---      优先以altitude减去当前位置DEM地形海拔得到校验高度；altitude缺失或为0、地形海拔为0、地形查询失败或换算结果无效时统一回退height，回退高度须为非负有限值。
---      多区块覆盖时取各区块限高的最小值，距地高度严格大于该限高时违规；未命中任何启用区块时本规则不报超高。
---   C、用空计划时段：任一覆盖当前位置的启用项目区块没有覆盖遥测时间的可用计划段时违规；不检查管控围栏，不依赖任务plan_airspace_block_id。
+--   A、高度基准：altitude缺失、格式错误、非有限、为0或与height精确相等时使用相对机库高度，否则使用有效海拔；规则1和2采用同一分支。
+--   B、偏航：先用gis_uav_flight_deviation_line构造同高度基准的完整航线；当前位置到完整航线的三维最短距离严格大于p_deviation_threshold时违规，等于阈值正常。
+--      启用该规则时，任务须有有效三维规划航线、机库位置、机库距地高度、安全起飞高度、返航高度及航飞模式；原航线Z为相对地面高度。
+--   C、超高：按当前位置覆盖的启用项目区块及遥测时间匹配可用计划段；各区块取命中段有效height最大值，无有效值时依次回退区块airspace_height、0米。
+--      相对限高=距地限高-ground_height，海拔限高=距地限高+遥测点DEM；相对分支忽略地形高差，必需DEM无效时返回400。
+--      多区块覆盖时取各区块限高的最小值；同基准遥测高度严格大于该限高时违规，等于限高正常；未命中任何启用区块时本规则不报超高。
+--   D、用空计划时段：任一覆盖当前位置的启用项目区块没有覆盖遥测时间的可用计划段时违规；不检查管控围栏，不依赖任务plan_airspace_block_id。
 --      未命中任何启用区块时沿用原逻辑，不报本项异常；区块边界视为命中。
---   D、timeStamp按北京时间解释，建议yyyy-MM-dd HH:mm:ss；规则2和3查询当天和前一天计划，采用[开始,结束)，结束时间小于或等于开始时间时顺延一天。
+--   E、timeStamp按北京时间解释，建议yyyy-MM-dd HH:mm:ss；规则2和3查询当天和前一天计划，采用[开始,结束)，结束时间小于或等于开始时间时顺延一天。
 --      计划段startTime/endTime仅接受HH:mm或HH:mm:ss，小时00至23；违规判断由每次遥测调用触发。
---   E、只汇总已启用规则；持续异常去重、恢复和乱序处理由调用方维护。
+--   F、只汇总已启用规则；仅启用规则3时不要求遥测高度及起降参数有效，持续异常去重、恢复和乱序处理由调用方维护。
 --   返回：
---   code          integer；200=校验完成，400=参数或数据错误，500=执行异常
+--   code          integer；200=校验完成（可能有违规），400=参数或数据错误，500=执行异常
 --   msg           校验结果或错误原因，正常执行时包含违规项数
 --   ischeck       本次所选规则是否全部通过
 --   active_rule   jsonb数组，固定三位，依次对应偏航、超高、用空计划时段；0=违规，1=未发现违规或未启用
 --                 code=400或500时也返回[1,1,1]，须先检查code，不能据此判断正常或恢复
 --   datajson      jsonb对象，包含project_id、task_id、telemetry
 --
---   （6）任务航线冲突校验
+--   （7）任务航线冲突校验
 --   函数：public.gis_flight_task_route_check
 --   作用：在指定项目和任务ID集合内，检查待校验航线与任务规划航线是否存在空间冲突。
 --   入参：
@@ -131,9 +158,10 @@
 --   3. PGSQL/函数/baseFunction/gis_geojson_to_geom.sql：public.gis_geojson_to_geom(text)，解析GeoJSON。
 --   4. PGSQL/聊城/1.飞行审核.sql：public.gis_write_error_log(integer, text, text)，写入public.gis_error_log。
 --   5. PGSQL/聊城/2.空域区块.sql：public.bo_airspace_block空域区块表、public.bo_airspace_plan用空计划表。
---   6. public.bo_flight_job任务表，第5、6个函数读取out_id、project_id、del_flag、plan_route_gemo。
+--   6. public.bo_flight_job任务表，第6、7个函数读取out_id、project_id、del_flag、plan_route_gemo。
+--      第6个函数还读取uav_location、ground_height、safe_height、return_height、flight_mode，调用第5个函数gis_uav_flight_deviation_line构造完整航线。
 --   7. 第3个函数运行时复用本文件的第4个和第1个函数；调用前需完成本文件全部函数的创建。
---   8. PGSQL/函数/6.2DEM分析函数.sql：public.gis_dem_value_at_point(geometry, text)及其DEM表解析函数，用于实时高度换算；函数或地形数据不可用时回退遥测height。
+--   8. PGSQL/函数/6.2DEM分析函数.sql：public.gis_dem_value_at_point(geometry, text)及其DEM表解析函数；海拔分支用于航点和空域限高换算，必需DEM不可用时返回400。
 -- =============================================================================
 
 -- =============================================================================
@@ -212,6 +240,7 @@ BEGIN
     -- 记录函数调用日志：入参和函数名称写入gis_error_log
     PERFORM public.gis_write_error_log(600, 'gis_flight_route_airspace', v_log_sql);
 
+    -- 一、校验项目和航线文本；参数不完整时直接返回400，不执行后续空间查询。
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         v_msg := format('参数错误：项目ID不能为空，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
@@ -229,6 +258,7 @@ BEGIN
     END IF;
 
     BEGIN
+        -- 二、通过统一GeoJSON解析函数取得几何；解析错误在当前分支转换为参数错误。
         v_route_geom := public.gis_geojson_to_geom(p_route_geojson);
     EXCEPTION WHEN OTHERS THEN
         v_msg := format('参数错误：航线GeoJSON解析失败：%s，执行时间 %s 秒',
@@ -246,6 +276,7 @@ BEGIN
         RETURN;
     END IF;
 
+    -- 命中校验仅使用二维位置；修复几何后再次限制类型，避免集合或其他几何参与航线判断。
     v_route_geom := ST_SetSRID(ST_MakeValid(ST_Force2D(v_route_geom)), 4326);
     v_route_type := GeometryType(v_route_geom);
 
@@ -258,8 +289,10 @@ BEGIN
         RETURN;
     END IF;
 
+    -- geography长度单位为米，除以1000后返回千米；该长度不计入航点高度差。
     route_length_km := round((ST_Length(v_route_geom::geography) / 1000.0)::numeric, 6)::double precision;
 
+    -- 三、先确认项目下存在可校验区块，区分“无空域数据”和“有数据但航线未命中”。
     SELECT count(*)::integer
     INTO v_scope_count
     FROM public.bo_airspace_block b
@@ -276,6 +309,7 @@ BEGIN
         RETURN;
     END IF;
 
+    -- 四、对启用且未删除的项目区块逐个判断二维相交；边界接触也计入，区块ID去重并排序。
     SELECT
         count(*)::integer,
         COALESCE(array_agg(hit.id::text ORDER BY hit.id), ARRAY[]::text[])
@@ -293,6 +327,7 @@ BEGIN
           )
     ) hit;
 
+    -- 五、命中任一区块即为true；code=200只表示查询完成，未命中时仍返回200。
     ischeck := hit_count > 0;
     code := 200;
     v_elapsed := round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3);
@@ -306,6 +341,7 @@ BEGIN
     RETURN NEXT;
 
 EXCEPTION WHEN OTHERS THEN
+    -- 未被参数分支处理的空间或数据库异常统一记录日志，并返回空命中结果。
     v_msg := format('航线空域区块校验执行异常：%s，执行时间 %s 秒',
         SQLERRM, round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     PERFORM public.gis_write_error_log(500, v_msg, v_log_sql);
@@ -339,7 +375,7 @@ IS '校验航线是否命中项目内启用的空域区块并返回结果';
 --   p_project_id     项目ID。
 --   p_point_geojson  点位GeoJSON Feature，geometry必须为Point。
 -- 返回说明：
---   返回code、msg、ischeck、hit_count、hit_blockids。
+--   返回code、msg、ischeck、hit_count、hit_blockids、task_id。
 -- 注意事项：
 --   Z值不参与空间命中判断。
 -- =============================================================================
@@ -364,6 +400,7 @@ SELECT gis_drop_function('gis_flight_point_airspace');
 --   ischeck       boolean；true=点位命中至少一个空域区块，false=未命中或执行失败。
 --   hit_count     integer；命中的空域区块数量，未命中或执行失败时为0。
 --   hit_blockids  text[]；命中的空域区块ID数组，未命中或执行失败时为空数组。
+--   task_id       varchar；预留返回字段，本函数不接收任务ID，所有返回分支均为NULL。
 -- 注意事项：
 --   1. 空间判断使用二维几何，点位Z值不参与命中判断。
 --   2. 边界点按命中处理；重叠区块返回所有命中的区块ID。
@@ -396,11 +433,12 @@ BEGIN
     -- 记录函数调用日志：入参和函数名称写入gis_error_log
     PERFORM public.gis_write_error_log(600, 'gis_flight_point_airspace', v_log_sql);
 
+    -- 一、项目和点位文本均为必填；此处只校验输入，尚未查询空域区块。
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         v_msg := format('参数错误：项目ID不能为空，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::varchar;
         RETURN;
     END IF;
 
@@ -408,17 +446,18 @@ BEGIN
         v_msg := format('参数错误：点位GeoJSON不能为空，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::varchar;
         RETURN;
     END IF;
 
     BEGIN
+        -- 二、限定为Point类型的Feature，再交给统一解析函数；裸Point和其他类型均不接受。
         IF p_point_geojson::jsonb->>'type' IS DISTINCT FROM 'Feature'
            OR p_point_geojson::jsonb->'geometry'->>'type' IS DISTINCT FROM 'Point' THEN
             v_msg := format('参数错误：点位GeoJSON必须为Point类型的Feature，执行时间 %s 秒',
                 round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
             PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-            RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+            RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::varchar;
             RETURN;
         END IF;
         v_point_geom := public.gis_geojson_to_geom(p_point_geojson);
@@ -426,7 +465,7 @@ BEGIN
         v_msg := format('参数错误：点位GeoJSON解析失败：%s，执行时间 %s 秒',
             SQLERRM, round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::varchar;
         RETURN;
     END;
 
@@ -434,12 +473,14 @@ BEGIN
         v_msg := format('参数错误：点位geometry必须为非空Point，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::varchar;
         RETURN;
     END IF;
 
+    -- 后续只按二维经纬度判断覆盖关系，输入点的Z高度不参与命中校验。
     v_point_geom := ST_SetSRID(ST_Force2D(v_point_geom), 4326);
 
+    -- 三、没有启用且未删除的项目区块时返回400，与点位未命中区块的200结果区分。
     SELECT count(*)::integer INTO v_scope_count
     FROM public.bo_airspace_block b
     WHERE b.del_flag = false
@@ -451,10 +492,11 @@ BEGIN
         v_msg := format('无可校验空域区块数据，执行时间 %s 秒',
             round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
         PERFORM public.gis_write_error_log(400, v_msg, v_log_sql);
-        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[];
+        RETURN QUERY SELECT 400, v_msg, false, 0::integer, ARRAY[]::text[], NULL::varchar;
         RETURN;
     END IF;
 
+    -- 四、ST_Covers包含区块边界；重叠位置保留所有命中区块，去重后生成稳定排序的ID数组。
     SELECT count(*)::integer,
            COALESCE(array_agg(hit.id::text ORDER BY hit.id), ARRAY[]::text[])
     INTO hit_count, hit_blockids
@@ -471,6 +513,7 @@ BEGIN
           )
     ) hit;
 
+    -- 五、按命中数量生成业务结果；命中0个时ischeck=false，仍表示本次查询正常完成，预留task_id保持NULL。
     ischeck := hit_count > 0;
     code := 200;
     IF ischeck THEN
@@ -483,10 +526,11 @@ BEGIN
     RETURN NEXT;
 
 EXCEPTION WHEN OTHERS THEN
+    -- 捕获空间计算及查询异常，日志保留原始调用，返回500和空命中集合。
     v_msg := format('点位空域区块校验执行异常：%s，执行时间 %s 秒',
         SQLERRM, round(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     PERFORM public.gis_write_error_log(500, v_msg, v_log_sql);
-    RETURN QUERY SELECT 500, v_msg, false, 0::integer, ARRAY[]::text[];
+    RETURN QUERY SELECT 500, v_msg, false, 0::integer, ARRAY[]::text[], NULL::varchar;
 END;
 $$;
 
@@ -505,7 +549,7 @@ IS '判断项目点位命中的空域区块并返回命中明细结果';
 --   1. 基础参数校验：项目、任务、航线GeoJSON、航点Z值、航线高度、日期、时间段。
 --   2. 解析用空日期和任务时间段。
 --   A. 先调用gis_flight_airspace_check做空域范围和高度阻断校验。
---   B. 底层返回201、203、400、500时直接返回；返回200或202时继续向下执行（202由计划高度终裁）。
+--   B. 底层code=200且check_type为200或202时继续执行，202由计划高度终裁；其余状态或分类直接返回。
 --   C. 调用gis_flight_route_airspace判断任务航线经过哪些空域区块；未经过时任务不可执行。
 --   D. 经过空域区块时，判断plan_status是否为true；false表示空域不可用，任务不可执行。
 --   E. plan_status=true后，判断任务用空时间段是否完整落在空域计划时间段内，未完整落入时任务不可执行。
@@ -520,10 +564,10 @@ IS '判断项目点位命中的空域区块并返回命中明细结果';
 --   p_use_date         用空日期，格式yyyy-MM-dd。
 --   p_task_time_plan   任务用空时间段JSON数组。
 -- 返回说明：
---   返回code、msg、ischeck、hit_count、hit_blockids。
+--   返回code、msg、ischeck、hit_count、hit_blockids、task_id、check_type、check_msg。
 -- 注意事项：
 --   1. plan_status=true表示空域可用，plan_status=false表示空域不可用。
---   2. 本函数先调用gis_flight_airspace_check做空域范围校验；底层返回200或202时继续按用空计划time_plan的height校验航线校验高度。
+--   2. 本函数先调用gis_flight_airspace_check；仅底层code=200且check_type为200或202时，继续按用空计划time_plan的height校验高度。
 --   3. time_plan元素格式如{"startTime":"10:12:00","endTime":"15:12:00","height":120}；height缺失、为空或非数值时按区块airspace_height兜底。
 -- =============================================================================
 
@@ -554,6 +598,7 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --   ischeck            boolean；true=任务可执行，false=任务不可执行、参数错误或执行异常。
 --   hit_count          integer；命中的空域区块数量；未经过空域区块时为0。
 --   hit_blockids       text[]；命中的空域区块ID数组；未经过空域区块或参数错误时为空数组。
+--   task_id            varchar；原样返回p_task_id，供调用方关联当前任务。
 -- msg业务结果说明：
 --   1. 未经过空域区块：任务{task_id}未经过空域区块，不可执行。
 --   2. 无用空计划：任务{task_id}不可执行：{空域名称}({空域ID})：{yyyy-MM-dd}无用空计划。
@@ -565,7 +610,7 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --   check_type       text；校验结果分类ID（数字字符串）：
 --     200：校验通过，ischeck=true，可以执行任务。
 --     201：航线超出空域范围，或当前项目下没有符合校验条件的空域区块。
---     202：高度超限；底层航点高度超限（复用底层202），或任务高度超出计划时间段height上限（以计划校验结果为准）。
+--     202：任务高度超出包含任务时间段的计划高度上限；底层仅高度超限时继续校验，不直接复用底层202。
 --     203：范围超限且航点高度超限（复用底层203）。
 --     204：用空计划或时间不满足。
 --     400：参数错误。
@@ -574,7 +619,7 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --   check_msg        text；对应分类的详细原因、判断规则和处理建议：
 --     200：空域范围、高度、用空计划和任务时间段均满足要求，可以执行任务。
 --     201：航线范围校验不通过时，直接复用gis_flight_airspace_check的check_msg。
---     202：底层返回202时复用底层check_msg；计划高度校验不通过时，说明任务时间段落入的计划时间段高度上限及航线校验高度。
+--     202：说明任务时间段已落入计划时间段，但航线校验高度超过包含它的计划高度上限；结果以计划高度校验为准。
 --     203：直接复用gis_flight_airspace_check的check_msg，说明范围和高度同时不通过的原因。
 --     204：用空计划或时间不满足，包含以下情况：
 --       1. 用空计划或时间不满足；无用空计划；该空域在指定日期未配置用空计划。
@@ -588,7 +633,8 @@ SELECT gis_drop_function('gis_flight_task_airspace');
 --   1. plan_status=true表示空域可用；plan_status=false表示空域不可用。
 --   2. 只有plan_status=true时才继续校验任务时间段。
 --   3. 任一航点Z高度缺失或无效时，整条航线统一按航线高度参数作为校验高度；否则取航点Z最大值。
---   4. 可飞空域范围由gis_flight_airspace_check统一处理；底层返回202时不直接阻断，以命中区块用空计划time_plan的height终裁高度。
+--   4. 可飞空域范围由gis_flight_airspace_check统一处理；底层code=200且check_type=202时不直接阻断，以用空计划height终裁高度。
+--   5. 原航点Z、p_route_height、区块airspace_height和计划段height须采用同一高度基准；函数直接比较数值，不自动进行海拔与相对高度换算。
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.gis_flight_task_airspace(
@@ -614,6 +660,7 @@ VOLATILE
 AS $$
 DECLARE
     v_log_sql text;
+    -- 底层范围校验和命中查询分别保留结果，后续计划校验复用其分类及命中区块。
     v_airspace_check record;
     v_route_check record;
     v_route_geom geometry;
@@ -678,6 +725,7 @@ BEGIN
     END;
 
     BEGIN
+        -- 任务可包含多个时间段；先校验数组及每段时间，再在计划匹配时补齐日期和跨午夜结束时间。
         v_task_time_plan := p_task_time_plan::jsonb;
 
         IF jsonb_typeof(v_task_time_plan) IS DISTINCT FROM 'array'
@@ -720,8 +768,8 @@ BEGIN
     FROM public.gis_flight_airspace_check(p_project_id, p_route_geojson, p_route_height::numeric, true)
     LIMIT 1;
 
-    -- 仅200（通过）和202（航点高度超限）继续向下执行：202不直接阻断，以命中区块用空计划time_plan的height终裁高度；
-    -- 201、203包含范围超限，400、500为参数或执行异常，均直接返回底层结果。
+    -- 底层code=200且check_type为200（通过）或202（仅航点高度超限）时继续；202由用空计划height终裁。
+    -- check_type为201或203包含范围超限，code为400或500表示参数或执行异常，均直接返回底层结果。
     IF COALESCE(v_airspace_check.code, 500) <> 200
        OR COALESCE(v_airspace_check.check_type, '500') NOT IN ('200', '202') THEN
         RETURN QUERY SELECT
@@ -820,6 +868,7 @@ BEGIN
     -- 4. 任务时间段已落入计划时间段时，包含它的计划时间段height上限必须不低于航线校验高度v_check_height，否则不可执行（check_type=202）；
     --    计划时间段height缺失、为空或非数值时，按该区块airspace_height兜底。
     WITH hit_blocks AS (
+        -- 只展开航线已命中的区块，后续每个区块都必须满足任务用空条件。
         SELECT
             b.id,
             b.airspace_name,
@@ -829,6 +878,7 @@ BEGIN
         WHERE b.id = ANY(hit_blockids)
     ),
     task_segments AS (
+        -- 把时分秒转换为完整时间戳；结束不晚于开始时，按次日结束处理。
         SELECT
             row_number() OVER () AS segment_no,
             NULLIF(item ->> 'startTime', '')::time AS start_time,
@@ -842,6 +892,7 @@ BEGIN
         FROM jsonb_array_elements(v_task_time_plan) AS task_item(item)
     ),
     block_day_plan AS (
+        -- LEFT JOIN保留当天没有计划的区块，便于生成“无用空计划”的明确原因。
         SELECT
             hb.id AS block_id,
             COALESCE(NULLIF(btrim(hb.airspace_name), ''), hb.id) AS block_name,
@@ -857,6 +908,7 @@ BEGIN
            AND p.del_flag = false
     ),
     plan_segments AS (
+        -- 展开区块计划段并补齐起止日期；缺少有效计划高度时沿用该区块的最高高度。
         SELECT
             bdp.block_id,
             bdp.block_name,
@@ -892,6 +944,8 @@ BEGIN
         ) seg ON true
     ),
     block_time_check AS (
+        -- 双层NOT EXISTS表示：不存在任何一个未被单个计划段完整包含的任务段。
+        -- 相邻计划段不拼接使用，只有计划可用的区块才进入时间包含关系校验。
         SELECT
             bdp.block_id,
             NOT EXISTS (
@@ -912,6 +966,7 @@ BEGIN
         WHERE bdp.plan_status = true
     ),
     invalid_reasons AS (
+        -- 分别收集缺计划、计划禁用、时间不包含和计划高度不足，不因首个失败而丢失其他区块原因。
         SELECT DISTINCT
             block_id,
             block_name,
@@ -1000,6 +1055,7 @@ BEGIN
 
     ),
     invalid_blocks AS (
+        -- 同一区块的多项问题合并展示，再按区块ID排序汇总到任务结果。
         SELECT
             block_id,
             block_name,
@@ -1012,6 +1068,7 @@ BEGIN
     INTO v_error_msgs, v_plan_issue_types
     FROM invalid_blocks;
 
+    -- 六、按是否存在失败原因返回任务结果；有高度问题时优先分类202，其余计划问题归类204。
     IF COALESCE(array_length(v_error_msgs, 1), 0) > 0 THEN
         v_msg := format('任务%s不可执行：%s',
             p_task_id, array_to_string(v_error_msgs, '；'));
@@ -1031,6 +1088,7 @@ BEGIN
     END IF;
 
 EXCEPTION WHEN OTHERS THEN
+    -- 未预期异常统一阻断任务，保留原始调用日志并返回500分类。
     v_msg := format('任务航线用空校验执行异常：%s', SQLERRM);
     PERFORM public.gis_write_error_log(500, v_msg, v_log_sql);
     RETURN QUERY SELECT 500, v_msg, false, 0::integer, ARRAY[]::text[], p_task_id, '500'::text, v_msg || '。本次校验未能完成，任务不可执行；请联系管理员检查错误日志，处理后重新校验。';
@@ -1065,7 +1123,7 @@ IS '校验任务航线用空计划时间高度及空域可执行状态';
 -- 参数说明：
 --   p_project_id       项目ID；只检查该项目下未删除的空域区块。
 --   p_route_geojson    航线GeoJSON，支持LineString/MultiLineString/Feature。
---   p_route_height     航线高度，单位米；必填且不能小于0；仅在航线缺少Z时参与计算。
+--   p_route_height     备用航线高度，单位米；必填且不能小于0；任一航点Z缺失或无效时用于整条航线赋值并参与超限判断。
 --   p_only_enabled     是否只检查已启用/已发布空域；默认true。
 -- 返回说明：返回code、msg、ischeck、check_type、check_msg、hit_count。
 -- 注意事项：ischeck=true表示通过校验；ischeck=false表示调用方应阻断提交。
@@ -1082,14 +1140,14 @@ SELECT gis_drop_function('gis_flight_airspace_check');
 -- 入参说明：
 --   p_project_id       项目ID；text；必填；只检查该项目下未删除且final_geom不为空的空域区块。
 --   p_route_geojson    航线GeoJSON字符串；text；必填；支持Feature/geometry格式，geometry必须为LineString或MultiLineString；任一航点Z值缺失或无效时整条航线统一使用p_route_height。
---   p_route_height     航线高度；numeric；必填且不能小于0；单位米；仅在航线缺少Z时整条航线统一使用该值，不参与超限判定。
+--   p_route_height     备用航线高度；numeric；必填且不能小于0；单位米；任一航点Z缺失或无效时整条航线采用该值参与超限判断，Z完整有效时不参与计算。
 --   p_only_enabled     是否只校验启用空域；boolean；选填，默认true；true=只检查启用空域，false=检查未删除空域。
 -- 入参校验：
 --   1. p_project_id不能为空。
 --   2. p_route_geojson不能为空，且必须能通过public.gis_geojson_to_geom解析为有效几何。
 --   3. 解析后的geometry必须为LineString或MultiLineString。
 --   4. 任一航点Z高度缺失或无效（缺失、非数值、NaN、Infinity、-Infinity）时，整条航线统一使用p_route_height赋值，再按对应空域上限判断是否超限。
---   5. p_route_height不能为空，且必须大于等于0；航线Z值完整时该值不参与计算。
+--   5. p_route_height不能为空，且必须大于等于0；航线Z值完整有效时该值不参与计算。
 --   6. 航线中任一线段坐标为空（coordinates=[]）时返回400，避免被静默忽略。
 -- 返回说明：
 --   code             integer；200=执行成功（包括无可校验空域时的范围校验不通过），400=参数错误，500=执行异常。
@@ -1123,11 +1181,12 @@ SELECT gis_drop_function('gis_flight_airspace_check');
 -- 注意事项：
 --   1. 本函数只校验可飞空域范围和高度，不校验用空计划、任务时间段或空域计划状态。
 --   2. 范围判断使用二维几何：航点按ST_Covers逐点判断，整条航线按ST_Covers判断是否完全落在空域并集内；Z值不参与空间判断。
---   3. 任一航点Z高度缺失或无效时整条航线统一使用p_route_height；航线Z值完整时该值不参与计算。
+--   3. 任一航点Z高度缺失或无效时整条航线统一使用p_route_height参与超限判断；航线Z值完整有效时该值不参与计算。
 --   4. 任一航点未落入可飞空域、任一线段越出空域并集，或任一航点高度超过覆盖该航点的可飞空域高度，ischeck=false，调用方应阻断提交。
 --   5. 高度仅对有空域覆盖的航点判断；全部航点在空域外时，只判范围失败，不推断高度超限；重叠区块取airspace_height最小值，覆盖区块的高度均为NULL时按0米上限处理。
 --   6. 航线整体校验使用项目下可校验空域区块的并集，因此航线跨越多块空域时按并集判断，不要求必须落在同一区块内。
 --   7. p_only_enabled=true时只校验启用空域；p_only_enabled=false时校验项目下未删除空域。
+--   8. 原航点Z、p_route_height与区块airspace_height须采用同一高度基准；函数直接比较数值，不自动进行海拔与相对高度换算。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_flight_airspace_check(
     p_project_id text,
@@ -1172,6 +1231,7 @@ BEGIN
     -- 记录函数调用日志：入参和函数名称写入gis_error_log
     PERFORM public.gis_write_error_log(600, 'gis_flight_airspace_check', v_log_sql);
 
+    -- 一、检查项目、航线文本、备用高度和启用状态开关，参数错误统一返回400分类。
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         v_msg := format('参数错误：项目ID不能为空，执行时间 %s 秒',
             ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
@@ -1205,6 +1265,7 @@ BEGIN
     END IF;
 
     BEGIN
+        -- 二、提取实际航线坐标并统一高度；任一航点Z不可用时，整条航线采用p_route_height。
         v_route_json := p_route_geojson::jsonb;
 
         -- 单次jsonb遍历完成geometry提取、空坐标线段检测和Z填充重建；提取方式与gis_geojson_to_geom一致，只处理实际geometry，不遍历properties。
@@ -1272,6 +1333,7 @@ BEGIN
                 ) AS flag
             ),
             filled_lines AS (
+                -- 按原要素、线段和航点顺序重建XYZ坐标，避免补高度时改变飞行顺序。
                 SELECT
                     ng.feature_ord,
                     jsonb_agg(s.line_coords ORDER BY s.line_ord) AS filled_coordinates
@@ -1295,6 +1357,7 @@ BEGIN
                 GROUP BY ng.feature_ord
             ),
             filled_geometries AS (
+                -- 将重建的坐标写回原几何，之后统一包装为FeatureCollection交给公共函数解析。
                 SELECT
                     ng.feature_ord,
                     CASE WHEN ng.lines IS NULL THEN ng.geom
@@ -1330,6 +1393,7 @@ BEGIN
             RETURN;
         END IF;
 
+        -- 保留带Z航线供高度统计，同时准备二维副本用于范围覆盖与相交判断。
         v_route := ST_SetSRID(public.gis_geojson_to_geom(v_route_json::text), 4326);
         v_route_2d := ST_Force2D(v_route);
     EXCEPTION WHEN OTHERS THEN
@@ -1348,6 +1412,7 @@ BEGIN
         RETURN;
     END IF;
 
+    -- 统一解析可能得到其他几何类型，进入航线范围校验前再限制为线或多段线。
     v_route_type := ST_GeometryType(v_route);
 
     IF v_route_type NOT IN ('ST_LineString', 'ST_MultiLineString') THEN
@@ -1358,6 +1423,7 @@ BEGIN
         RETURN;
     END IF;
 
+    -- 三、按项目、删除标记及p_only_enabled筛选区块；没有区块时按范围不通过返回201。
     SELECT count(*)
     INTO v_scope_count
     FROM public.bo_airspace_block b
@@ -1376,6 +1442,7 @@ BEGIN
     END IF;
 
     WITH route_points AS MATERIALIZED (
+        -- 四、逐航点保留二维位置及原Z；物化结果供空间命中和高度统计重复使用。
         SELECT
             row_number() OVER () AS point_no,
             ST_SetSRID(ST_Force2D((dp).geom), 4326) AS geom_2d,
@@ -1383,6 +1450,7 @@ BEGIN
         FROM ST_DumpPoints(v_route) AS dp
     ),
     point_block_hits AS MATERIALIZED (
+        -- LEFT JOIN保留未覆盖航点；先用包围盒缩小范围，再用ST_Covers精确判断且包含边界。
         SELECT
             rp.point_no,
             rp.point_height,
@@ -1401,6 +1469,7 @@ BEGIN
            )
     ),
     point_stats AS (
+        -- 每个航点单独统计覆盖数和最低限高，避免用其他位置的区块高度代替当前航点上限。
         SELECT
             point_no,
             point_height,
@@ -1487,6 +1556,7 @@ BEGIN
         RETURN;
     END IF;
 
+    -- 已排除范围和高度同时失败，剩余范围问题单独归类201。
     IF v_outside_count > 0 OR v_route_outside THEN
         v_check_type := '201';
         v_msg := format('校验不通过：%s，阻断提交，执行时间 %s 秒',
@@ -1507,6 +1577,7 @@ BEGIN
         RETURN;
     END IF;
 
+    -- 范围全部满足但存在超高航点时归类202；高度等于限高不会计入超限数量。
     IF v_point_height_over_count > 0 THEN
         v_check_type := '202';
         -- 与check_msg共用按各航点对应空域上限生成的超限说明，避免使用跨空域最大高度。
@@ -1517,6 +1588,7 @@ BEGIN
         RETURN;
     END IF;
 
+    -- 航点范围、整条线段范围及各航点高度均满足后，才返回业务通过。
     v_check_type := '200';
     RETURN QUERY SELECT
         200,
@@ -1528,6 +1600,7 @@ BEGIN
         v_hit_count;
 
 EXCEPTION WHEN OTHERS THEN
+    -- 未预期的几何处理或查询异常返回500，不复用此前算出的部分统计结果。
     v_msg := format('执行异常：%s，执行时间 %s 秒',
         SQLERRM, ROUND(EXTRACT(epoch FROM clock_timestamp() - v_start_time)::numeric, 3));
     PERFORM public.gis_write_error_log(500, v_msg, v_log_sql);
@@ -1549,31 +1622,6 @@ IS '校验航点及整条航线是否符合空域范围和高度限制，任一�
 --     true
 -- );
 
--- =============================================================================
--- 函数名称：5.gis_uav_flight_deviation_check
--- 函数功能：飞行任务偏差校验
--- 函数描述：
---   1. 接收任务ID、无人机实时遥测信息和校验规则数组，项目ID由任务记录取得。
---   2. 根据任务ID读取bo_flight_job中未删除的任务及规划航线。
---   3. 规则1（无人机偏航）：比较当前位置与规划航线的二维最短距离，超过50米判为违规。
---   4. 规则2（无人机超高）：按当前位置及遥测timeStamp匹配启用区块和可用计划段，距地高度严格大于最终限高时判为违规。
---      校验高度优先使用altitude减去当前位置DEM地形海拔；altitude缺失或为0、地形海拔为0、地形查询失败或换算结果无效时回退height。
---      每个区块先取命中计划段中有效height的最大值；没有有效height时依次回退区块airspace_height、0米；多个区块覆盖时取各区块限高的最小值。
---      当前实现中，未命中任何启用区块时最终限高为NULL，规则2不报超高。
---   5. 规则3（用空计划时段）：检查任一覆盖当前位置的启用项目区块是否缺少覆盖遥测时间的可用计划段。
---      仅保留原有区块与计划时段判断，不检查管控围栏、不依赖任务绑定空域，也不要求altitude和height。
---      未命中任何启用区块时不报本项异常；原可飞时段结束后仍停留在区块内时判为违规。
---   6. 汇总本次所选规则的违规类型；全部正常时通过校验，任一规则违规时不通过。
--- 参数说明：
---   p_task_id    任务ID，用于定位任务、规划航线及所属项目。
---   p_telemetry   无人机实时遥测，包括经纬度、海拔高度、距地高度和遥测时间。
---   p_rules       三位整数校验开关数组，按偏航、超高、用空计划时段排列；1执行，0跳过，默认ARRAY[1,1,1]。
--- 返回说明：
---   返回code、msg、ischeck、active_rule、datajson。
---   ischeck表示本次校验是否通过，active_rule按偏航、超高、用空计划时段的位置返回违规标记。
--- 注意事项：
---   持续异常去重、恢复正常后再次告警由调用方结合前后遥测结果处理。
--- =============================================================================
 
 -- =============================================================================
 -- 航线规划来源：使用现有public.bo_flight_job表
@@ -1624,64 +1672,366 @@ IS '校验航点及整条航线是否符合空域范围和高度限制，任一�
 -- COMMENT ON COLUMN public.bo_flight_job.feature IS '扩展字段';
 -- COMMENT ON COLUMN public.bo_flight_job.project_id IS '项目id';
 -- COMMENT ON COLUMN public.bo_flight_job.del_flag IS '是否删除：t删除；f未删除';
+
+COMMENT ON TABLE public.bo_flight_job IS '无人机飞行任务表';
+
+-- 为已有任务表补充机库位置、相对地面高度、安全起飞高度、返航高度和航飞模式；允许重复执行。
+ALTER TABLE public.bo_flight_job
+    ADD COLUMN IF NOT EXISTS uav_location geometry(PointZ, 4326),
+    ADD COLUMN IF NOT EXISTS ground_height double precision DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS safe_height double precision,
+    ADD COLUMN IF NOT EXISTS return_height double precision,
+    ADD COLUMN IF NOT EXISTS flight_mode smallint;
+
+COMMENT ON COLUMN public.bo_flight_job.uav_location IS '机库位置，WGS84三维点（经度、纬度、海拔高度），SRID=4326，高度单位：米';
+COMMENT ON COLUMN public.bo_flight_job.ground_height IS '机库相对地面高度，单位：米，默认0';
+COMMENT ON COLUMN public.bo_flight_job.safe_height IS '安全起飞高度，相对起飞点（机库）的高度，单位：米；垂直爬升时作为首航点高度的安全下限，倾斜爬升时先上升至该高度再飞向首航点';
+COMMENT ON COLUMN public.bo_flight_job.return_height IS '无人机返航高度，相对机库高度，单位：米';
+COMMENT ON COLUMN public.bo_flight_job.flight_mode IS '航飞模式：1垂直爬升（爬升至航线起始点高度后，再飞向航线起始点）；2倾斜爬升（爬升至安全起飞高度后，再直线飞向航线起始点）';
+
+-- =============================================================================
+-- 函数名称：5.gis_uav_flight_deviation_line
+-- 函数功能：按航飞模式和高度基准构造起飞、规划航线、返航及降落的完整三维航线
+-- 函数描述：
+--   1. 校验机库位置、机库距地高度、安全起飞高度、返航高度、航飞模式及规划航线。
+--   A. p_is_altitude=false：将原航点距地高度减去机库距地高度，输出相对机库航线。
+--   B. p_is_altitude=true：将原航点距地高度加上对应航点DEM地形海拔，输出海拔航线。
+--   C. 模式1垂直爬升：机库先垂直爬升到换算后的首航点高度，再飞向首航点。
+--   D. 模式2倾斜爬升：机库先垂直爬升到安全起飞高度，再直线飞向首航点。
+--   E. 依次拼接起飞段、换算后的规划航线、末航点至机库上方返航点的直线段和垂直降落段。
+-- 入参说明：
+--   p_uav_location   机库三维位置，XY为WGS84经纬度，Z为机库海拔。
+--   p_ground_height  机库相对地面高度；地面机库传0。
+--   p_safe_height    安全起飞高度，相对起飞点（机库）。
+--   p_return_height  返航高度，相对机库。
+--   p_route          规划航线，原航点Z为相对地面高度。
+--   p_is_altitude    输出高度基准：false相对机库高度（默认），true海拔高度。
+--   p_flight_mode    航飞模式：1垂直爬升（默认），2倾斜爬升。
+-- 返回说明：
+--   返回单个geometry值，实际为SRID=4326的LineStringZ；所有点的Z采用同一高度基准，单位：米。
+-- 注意事项：
+--   1. 本函数生成完整航线，供gis_uav_flight_deviation_check使用；不单独返回偏航或空域校验结果。
+--   2. 相对分支按业务约定忽略航点与机库之间的地形高差；海拔分支按每个原航点查询DEM。
+--   3. 输入参数无效或海拔分支缺少有效DEM时抛出SQLSTATE 22023异常，不返回code/msg结果行。
+-- =============================================================================
+
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+-- 统一删除public下同名旧函数及全部重载，再创建航飞模式位于最后的新签名；五参调用默认相对机库高度、垂直爬升。
+SELECT public.gis_drop_function('public.gis_uav_flight_deviation_line');
+
+-- =============================================================================
+-- 函数介绍：5.gis_uav_flight_deviation_line
+-- 主要作用：统一规划航点的高度基准，再按航飞模式生成从机库起飞到返回机库降落的完整三维航线。
+-- 入参说明：
+--   p_uav_location   机库位置；geometry；必填；非空PointZ，XY为经纬度，Z为有限的海拔高度（米）。
+--   p_ground_height  机库相对地面高度；double precision；必填；非负有限值（米），地面机库传0。
+--   p_safe_height    安全起飞高度；double precision；必填；相对机库的非负有限高度（米）。
+--   p_return_height  返航高度；double precision；必填；相对机库的非负有限高度（米）。
+--   p_route          原规划航线；geometry；必填；有效且非空的LineStringZ或MultiLineStringZ，原航点Z为距地高度（米）。
+--   p_is_altitude    输出高度基准；boolean；选填，默认false；false=相对机库高度，true=海拔高度，不能为NULL。
+--   p_flight_mode    航飞模式；integer；选填，默认1；1=垂直爬升，2=倾斜爬升，不能为NULL。
+-- 入参校验：
+--   1. 机库和规划航线的SRID须为4326或0；SRID=0按WGS84解释，不执行坐标变换。
+--   2. 所有经度须位于[-180,180]、纬度须位于[-90,90]，机库须包含有限Z，原航点须包含非负有限Z。
+--   3. 机库距地高度、安全起飞高度、返航高度均不能为空、不能小于0，不能为NaN或正负Infinity。
+--   4. 多段航线须按存储顺序在XYZ三维空间首尾衔接，不允许空航段、断开或自动反转航段。
+--   5. 模式1换算后的首航点高度须不低于机库上方安全起飞点高度，否则抛出22023异常。
+--   6. 海拔分支每个原航点均须取得code=200且为有限值的DEM地形海拔；0米、负海拔均为有效数据。
+-- 返回说明：
+--   geometry          完整三维航线，实际为SRID=4326的LineStringZ；起点和终点均为机库点。
+--   相对高度分支：机库点Z=0，规划航点Z=原航点Z-p_ground_height，安全点Z=p_safe_height，返航点Z=p_return_height。
+--   海拔高度分支：机库点Z=机库海拔，规划航点Z=原航点Z+该航点DEM，安全点Z=机库海拔+p_safe_height，返航点Z=机库海拔+p_return_height。
+-- 航飞模式说明：
+--   1. 垂直爬升：机库 → 机库上方首航点高度处 → 换算后的规划航线 → 机库上方返航点 → 机库。
+--   2. 倾斜爬升：机库 → 机库上方安全起飞点 → 换算后的规划航线 → 机库上方返航点 → 机库。
+-- 异常结果说明：
+--   1. 参数、航线连续性、安全起飞高度或必需DEM无效时抛出SQLSTATE 22023，并说明具体错误。
+--   2. 由gis_uav_flight_deviation_check调用时，上述异常转换为code=400、ischeck=false的校验结果。
+-- 注意事项：
+--   1. 输出允许负Z；所有Z统一表示所选高度基准，XY仍为WGS84经纬度，高度单位均为米。
+--   2. 相对分支不查询DEM，按业务约定忽略不同航点与机库之间的地形高差。
+--   3. 海拔分支只转换原航点高度，机库直接使用p_uav_location的Z；机库海拔和DEM须采用相同高程基准。
+--   4. 保留原航点和航段的顺序与方向；返航直接从末航点连接机库上方返航点，再垂直降落。
+-- 依赖说明：PostGIS；海拔分支还需要public.gis_dem_value_at_point及航点对应位置的有效DEM数据。
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.gis_uav_flight_deviation_line(
+    p_uav_location geometry,
+    p_ground_height double precision,
+    p_safe_height double precision,
+    p_return_height double precision,
+    p_route geometry,
+    p_is_altitude boolean DEFAULT false,
+    p_flight_mode integer DEFAULT 1
+)
+RETURNS geometry
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_route geometry;
+    v_part record;
+    v_previous_end geometry;
+    v_points geometry[];
+    v_point_index integer;
+    v_dem_code integer;
+    v_ground_elevation double precision;
+    v_point_height double precision;
+    v_home_height double precision;
+    v_home geometry;
+    v_takeoff geometry;
+    v_return geometry;
+    v_takeoff_height double precision;
+BEGIN
+    -- 一、机库须有有效经纬度和海拔Z；即使输出相对高度，也先校验完整的机库三维位置。
+    IF p_uav_location IS NULL OR ST_IsEmpty(p_uav_location)
+       OR GeometryType(p_uav_location) <> 'POINT' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '机库位置必须为非空的WGS84三维点';
+    END IF;
+    IF ST_SRID(p_uav_location) NOT IN (0, 4326)
+       OR NOT (ST_X(p_uav_location) BETWEEN -180 AND 180)
+       OR NOT (ST_Y(p_uav_location) BETWEEN -90 AND 90)
+       OR ST_Z(p_uav_location) IS NULL
+       OR ST_Z(p_uav_location)::text IN ('NaN', 'Infinity', '-Infinity') THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '机库位置须使用WGS84经纬度并包含有限的海拔高度';
+    END IF;
+    -- 这三个输入高度均要求非负有限；换算后的航点Z则可以为负，两者校验范围不同。
+    IF EXISTS (
+        SELECT 1 FROM (VALUES (p_ground_height), (p_safe_height), (p_return_height)) h(value)
+        WHERE h.value IS NULL OR h.value < 0 OR h.value::text IN ('NaN', 'Infinity', '-Infinity')
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '机库距地高度、安全起飞高度及返航高度必须为非负有限值（米）';
+    END IF;
+    IF p_flight_mode IS NULL OR p_flight_mode NOT IN (1, 2) THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '航飞模式必须为1（垂直爬升）或2（倾斜爬升）';
+    END IF;
+    IF p_is_altitude IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '航线高度类型不能为空：false为相对机库高度，true为海拔高度';
+    END IF;
+    -- 二、原航线须为有效三维线，原Z表示距地高度，不能用海拔或相对机库高度直接传入。
+    IF p_route IS NULL OR ST_IsEmpty(p_route)
+       OR GeometryType(p_route) NOT IN ('LINESTRING', 'MULTILINESTRING')
+       OR NOT ST_IsValid(p_route) THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规划航线必须为有效且非空的三维LineString或MultiLineString';
+    END IF;
+    IF ST_SRID(p_route) NOT IN (0, 4326) OR EXISTS (
+        SELECT 1 FROM ST_DumpPoints(p_route) d
+        WHERE NOT (ST_X(d.geom) BETWEEN -180 AND 180)
+           OR NOT (ST_Y(d.geom) BETWEEN -90 AND 90)
+           OR ST_Z(d.geom) IS NULL OR ST_Z(d.geom) < 0
+           OR ST_Z(d.geom)::text IN ('NaN', 'Infinity', '-Infinity')
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规划航点须使用WGS84经纬度并包含非负有限的相对地面高度';
+    END IF;
+    -- 前面已限制SRID为0或4326；此处统一标记并保留XYZ，不执行经纬度坐标变换。
+    v_route := ST_SetSRID(ST_Force3DZ(p_route), 4326);
+    -- 多段航线不能凭空补线，且不能用ST_LineMerge改变原有航段的方向和顺序。
+    FOR v_part IN SELECT d.geom FROM ST_Dump(v_route) d ORDER BY d.path LOOP
+        IF ST_IsEmpty(v_part.geom) THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '多段规划航线不能包含空航段';
+        END IF;
+        IF v_previous_end IS NOT NULL AND (
+            ST_X(v_previous_end) <> ST_X(ST_StartPoint(v_part.geom))
+            OR ST_Y(v_previous_end) <> ST_Y(ST_StartPoint(v_part.geom))
+            OR ST_Z(v_previous_end) <> ST_Z(ST_StartPoint(v_part.geom))
+        ) THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '多段规划航线必须按飞行顺序在三维空间首尾衔接';
+        END IF;
+        v_previous_end := ST_EndPoint(v_part.geom);
+    END LOOP;
+    -- 三、按原几何路径顺序保存航点，再逐点换算Z，避免排序、合线或去重改变飞行路线。
+    SELECT array_agg(d.geom ORDER BY d.path) INTO v_points FROM ST_DumpPoints(v_route) d;
+    FOR v_point_index IN 1..array_length(v_points, 1) LOOP
+        IF p_is_altitude THEN
+            -- 海拔分支须查询当前航点自身的地形海拔，不能用机库或其他航点的DEM统一代替。
+            BEGIN
+                SELECT dem.code, dem.elevation INTO v_dem_code, v_ground_elevation
+                FROM public.gis_dem_value_at_point(ST_Force2D(v_points[v_point_index])) dem
+                LIMIT 1;
+            EXCEPTION WHEN OTHERS THEN
+                RAISE EXCEPTION USING ERRCODE = '22023',
+                    MESSAGE = format('无法取得第%s个航点的DEM地形海拔：%s', v_point_index, SQLERRM);
+            END;
+            IF v_dem_code IS DISTINCT FROM 200 OR v_ground_elevation IS NULL
+               OR v_ground_elevation::text IN ('NaN', 'Infinity', '-Infinity') THEN
+                RAISE EXCEPTION USING ERRCODE = '22023',
+                    MESSAGE = format('第%s个航点缺少有效DEM地形海拔，无法生成海拔航线', v_point_index);
+            END IF;
+            -- code=200且数值有限即有效，0米和负DEM均保留参与距地高度加地形海拔的换算。
+            v_point_height := ST_Z(v_points[v_point_index]) + v_ground_elevation;
+        ELSE
+            -- 相对分支按约定忽略地形高差，只减机库距地高度；整个分支不依赖DEM。
+            v_point_height := ST_Z(v_points[v_point_index]) - p_ground_height;
+        END IF;
+        -- 经纬度保持原值，只替换高度；最终所有规划航点采用同一高度基准。
+        v_points[v_point_index] := ST_SetSRID(ST_MakePoint(
+            ST_X(v_points[v_point_index]), ST_Y(v_points[v_point_index]), v_point_height
+        ), 4326);
+    END LOOP;
+    -- 四、建立同基准机库点：相对模式以机库为0，海拔模式直接使用机库原始海拔。
+    v_home_height := CASE WHEN p_is_altitude THEN ST_Z(p_uav_location) ELSE 0 END;
+    v_home := ST_SetSRID(ST_MakePoint(ST_X(p_uav_location), ST_Y(p_uav_location), v_home_height), 4326);
+    -- 五、先计算安全起飞点高度；模式1采用首航点高度，并保证不低于安全起飞点。
+    v_takeoff_height := v_home_height + p_safe_height;
+    IF p_flight_mode = 1 THEN
+        IF ST_Z(v_points[1]) < v_takeoff_height THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '垂直爬升时，换算后的航线首点高度不得低于安全起飞点高度';
+        END IF;
+        v_takeoff_height := ST_Z(v_points[1]);
+    END IF;
+    v_takeoff := ST_SetSRID(ST_MakePoint(ST_X(p_uav_location), ST_Y(p_uav_location), v_takeoff_height), 4326);
+    -- 返航高度始终相对机库；返航点的经纬度与机库相同，供末航点直线返回后垂直降落。
+    v_return := ST_SetSRID(ST_MakePoint(ST_X(p_uav_location), ST_Y(p_uav_location), v_home_height + p_return_height), 4326);
+    -- 六、按实际构造顺序连接起飞点、爬升点、全部规划航点、返航点和降落点。
+    RETURN ST_MakeLine(ARRAY[v_home, v_takeoff] || v_points || ARRAY[v_return, v_home]);
+END;
+$$;
+COMMENT ON FUNCTION public.gis_uav_flight_deviation_line(geometry, double precision, double precision, double precision, geometry, boolean, integer)
+IS '按航飞模式构造机库起飞、规划航线、返航及降落的完整三维航线，默认垂直爬升，支持相对机库或海拔高度输出';
+
+-- =============================================================================
+-- 调用示例
+-- =============================================================================
+-- 1. 省略高度类型和航飞模式，默认垂直爬升、输出相对机库航线；机库海拔120米、距地20米，安全起飞60米、返航90米。
+-- 原航点距地高度分别为120米、150米，换算后相对机库高度为100米、130米，垂直爬升至首航点高度100米。
+-- SELECT ST_AsEWKT(public.gis_uav_flight_deviation_line(
+--     ST_GeomFromText('POINT Z(113.46 34.81 120)', 4326),
+--     20,
+--     60,
+--     90,
+--     ST_GeomFromText('LINESTRING Z(113.48 34.81 120,113.48 34.83 150)', 4326)
+-- ));
+-- 返回Z序列为[0,100,100,130,90,0]，起飞和降落点均位于机库。
+--
+-- 2. 倾斜爬升，输出海拔航线；调用前须安装DEM查询函数并保证两个航点均有有效地形数据。
+-- 安全起飞点海拔为120+60=180米，返航点海拔为120+90=210米；原航点Z分别加各自DEM地形海拔。
+-- SELECT ST_AsEWKT(public.gis_uav_flight_deviation_line(
+--     ST_GeomFromText('POINT Z(113.46 34.81 120)', 4326),
+--     20,
+--     60,
+--     90,
+--     ST_GeomFromText('LINESTRING Z(113.48 34.81 120,113.48 34.83 150)', 4326),
+--     true,
+--     2
+-- ));
+--
+-- 3. 从已有任务读取起降参数和规划航线；第六参false输出相对机库航线，最后一参采用任务航飞模式。
+-- SELECT ST_AsEWKT(public.gis_uav_flight_deviation_line(
+--     j.uav_location,
+--     j.ground_height,
+--     j.safe_height,
+--     j.return_height,
+--     j.plan_route_gemo,
+--     false,
+--     j.flight_mode
+-- )) AS full_route
+-- FROM public.bo_flight_job j
+-- WHERE j.out_id = 'f6a024e15c604ce4a7dfd2f895c266fe' AND j.del_flag = false;
+
+-- =============================================================================
+-- 函数名称：6.gis_uav_flight_deviation_check
+-- 函数功能：实时校验无人机偏航、超高和用空计划时段
+-- 函数描述：
+--   1. 校验任务ID、遥测坐标、遥测时间、规则开关和偏航距离阈值。
+--   2. 按bo_flight_job.out_id读取未删除任务，取得所属项目、规划航线和起降参数。
+--   A. 选择高度基准：altitude不可用、为0或等于height时使用相对机库高度，否则使用海拔高度。
+--   B. 规则1：调用gis_uav_flight_deviation_line生成同高度基准的完整起降航线，三维最短距离严格超过偏航阈值时违规。
+--   C. 规则2：按遥测位置和时间取得空域计划限高，转换到同一高度基准后比较，遥测高度严格超过限高时违规。
+--   D. 规则3：任一覆盖当前位置的启用项目区块没有覆盖遥测时间的有效计划段时违规。
+--   E. 汇总启用规则的违规项数和标记；只有本次启用规则全部正常时，ischeck才为true。
+-- 入参说明：
+--   p_task_id               任务ID，匹配bo_flight_job.out_id；项目ID从任务记录取得。
+--   p_telemetry             遥测JSON对象，包含经纬度、海拔高度、相对机库高度和遥测时间。
+--   p_rules                 三位整数规则开关，依次控制偏航、超高、用空计划时段；1执行，0跳过，默认ARRAY[1,1,1]。
+--   p_deviation_threshold   偏航距离阈值，单位：米，默认50；须为非负有限值。
+-- 返回说明：
+--   返回code、msg、ischeck、active_rule、datajson。
+--   code表示是否完成校验，ischeck表示是否通过；active_rule按偏航、超高、用空计划时段的顺序返回标记。
+-- 注意事项：
+--   1. 入参p_rules中1表示启用；返回active_rule中0表示违规，1表示未发现违规或未启用，两者含义不同。
+--   2. code=200仍可能存在违规；code=400或500时，active_rule=[1,1,1]只是占位，不能据此认定正常。
+--   3. 规则2和3使用遥测时间匹配计划；未覆盖任何启用项目区块时，这两项均不报异常。
+--   4. 持续异常去重、恢复和乱序处理由调用方结合前后遥测结果维护。
+-- =============================================================================
+
+-- =============================================================================
 -- 删除函数
 -- =============================================================================
 SELECT gis_drop_function('gis_uav_flight_deviation_check');
 
 -- =============================================================================
--- 函数介绍：5.gis_uav_flight_deviation_check
--- 主要作用：读取指定项目任务的规划航线，执行偏航、超高和用空计划时段校验，返回校验结果及遥测信息。
+-- 函数介绍：6.gis_uav_flight_deviation_check
+-- 主要作用：按任务ID读取规划航线及起降参数，对单次遥测执行偏航、超高和用空计划时段校验。
 -- 入参说明：
---   p_task_id    任务ID；varchar；必填；与bo_flight_job.out_id匹配，且del_flag=false；项目ID由任务记录取得。
---   p_telemetry   遥测信息；jsonb；必填；必须为JSON对象，必含经纬度和时间戳，高度按下述优先级取值。
---   p_rules       校验开关；integer[]；选填，默认ARRAY[1,1,1]；固定三位0/1，位置依次对应规则1、2、3。
+--   p_task_id               任务ID；varchar；必填；匹配bo_flight_job.out_id，只读取del_flag=false的任务，项目ID由任务记录取得。
+--   p_telemetry             遥测信息；jsonb；必填；必须为JSON对象，包含经纬度和时间戳，高度按下述规则取值。
+--   p_rules                 规则开关；integer[]；选填，默认ARRAY[1,1,1]；依次控制偏航、超高、用空计划时段，1执行、0跳过。
+--   p_deviation_threshold   偏航距离阈值；double precision；选填，默认50；单位：米；非负有限值，不能为NULL。
 -- 遥测字段说明：
---   longitude/latitude  WGS84经纬度；数值；必填；范围分别为[-180,180]、[-90,90]。
---   altitude            飞行海拔高度；数值；单位米；规则2优先使用非零有限值结合DEM计算距地高度，不可用时回退height；规则1和3不依赖高度。
---   height              备用飞行高度；数值；单位米；altitude为0、地形海拔为0或无法换算有效距地高度时必填，须为非负有限值，回退后按距地高度参与比较。
---   timeStamp           遥测时间；字符串；必填；建议格式yyyy-MM-dd HH:mm:ss；实际按timestamp without time zone解析后按北京时间解释，须可解析且为有限时间。
+--   longitude              WGS84经度；数值；必填；范围[-180,180]，单位：度。
+--   latitude               WGS84纬度；数值；必填；范围[-90,90]，单位：度。
+--   altitude               海拔高度；有限数值，单位：米，允许负值；不可用、为0或等于height时选择相对分支，否则选择海拔分支。
+--   height                 相对起飞点（机库）高度；有限数值，单位：米，允许负值；相对分支启用规则1或2时必填。
+--   timeStamp              遥测时间；字符串；必填；建议yyyy-MM-dd HH:mm:ss，按timestamp without time zone解析后按北京时间解释。
 -- 入参校验：
 --   1. 任务ID不能为空，遥测必须为JSON对象。
 --   2. 规则参数必须为长度3的一维整数数组，各元素只能为0或1，不能为NULL。
---   3. 经纬度及时间戳必须有效；启用规则2时，DEM换算高度和备用height至少有一种可用。
---   4. 必须存在对应的未删除任务；启用偏航校验时须有有效规划航线，否则返回400。
---   5. 执行规则1时，航线geom必须为有效、非空且坐标合法的LineString或MultiLineString。
+--   3. 经纬度须在上述范围内，timeStamp须可解析且为有限时间；启用规则1或2时，选定分支的遥测高度须有效。
+--   4. 必须存在对应的未删除任务；规则1启用时，由gis_uav_flight_deviation_line校验规划航线及完整起降参数。
+--   5. 规则2存在空域限高时，相对分支须有非负有限的ground_height，海拔分支须有遥测点对应的有效DEM。
+--   6. p_deviation_threshold须为非负有限值，即使关闭规则1也须有效；参数或必需数据无效时返回400。
 -- 返回说明：
---   code         integer；200=校验完成，400=参数或数据错误，500=执行异常。
---   msg          text；校验结果或错误原因；成功时包含当前违规项数。
---   ischeck      boolean；true=本次所选规则全部正常，false=有违规或执行失败。
---   active_rule  jsonb数组；固定三位0/1，与入参规则位置一一对应；1=未发现违规或未启用，0=该规则违规，返回格式为[1,0,1]。
---                全部正常返回[1,1,1]；执行失败也返回[1,1,1]，必须先检查code。
---   datajson     jsonb；包含project_id、task_id、telemetry的JSON对象。
---                project_id原样取自任务记录，task_id为去除首尾空白后的任务ID；telemetry为原始遥测JSON。
+--   code                   integer；200=校验完成（可能有违规），400=参数或数据错误，500=执行异常。
+--   msg                    text；正常执行时返回当前违规项数，失败时返回具体错误原因。
+--   ischeck                boolean；true=本次启用规则全部正常，false=有违规、参数错误或执行异常。
+--   active_rule            jsonb数组；固定三位，依次对应偏航、超高、用空计划时段；0=违规，1=未发现违规或未启用。
+--   datajson               jsonb对象；包含project_id、task_id、telemetry。
+--     project_id           任务记录中的项目ID，原样返回。
+--     task_id              去除首尾空白后的任务ID。
+--     telemetry            原样返回的遥测JSON对象。
+-- msg业务结果说明：
+--   1. 全部正常：code=200，msg=校验完成，当前异常0项，ischeck=true。
+--   2. 存在违规：code=200，msg=校验完成，当前异常{N}项，ischeck=false；具体违规类型通过active_rule判断。
+--   3. 参数或数据错误：code=400，msg说明任务、遥测、阈值、起降参数或必需DEM等错误原因，ischeck=false。
+--   4. 执行异常：code=500，msg以“实时安全告警校验异常：”开头并附异常原因，ischeck=false。
+-- active_rule业务结果说明（仅code=200时有效）：
+--   [1,1,1]：本次启用规则未发现违规；关闭的规则也返回1，不表示这些规则已完成校验。
+--   [0,1,1]：仅偏航违规；[1,0,1]：仅超高违规；[1,1,0]：仅用空计划时段违规。
+--   多项违规时对应位置同时为0，例如[0,0,1]表示偏航和超高违规，[0,0,0]表示三项均违规。
+-- 高度基准说明：
+--   1. altitude缺失、格式错误、非有限、为0或与height精确相等时选择相对分支，否则使用有效海拔；规则1和2采用同一分支。
+--   2. 相对分支：遥测使用height，机库点Z=0，原航点Z和空域距地限高均减ground_height；忽略航点与机库的地形高差。
+--   3. 海拔分支：遥测使用altitude，机库点Z为机库海拔，原航点Z加对应航点DEM，空域距地限高加遥测点DEM。
+--   4. altitude和height分别解析，格式错误或非有限值视为不可用；海拔分支不要求height有效。
+-- 规则说明：
+--   A. 规则1：按航飞模式生成完整航线，将XY转换到以遥测位置为中心的米制投影，计算包含Z高度差的三维最短距离。
+--      距离严格大于p_deviation_threshold时违规，等于阈值正常；比较整条完整航线，不区分当前飞行阶段。
+--   B. 规则2：查找覆盖遥测位置的启用、未删除且final_geom不为空的项目区块，区块边界也视为命中。
+--      每个区块对覆盖遥测时间的有效计划段height取最大值；height只接受非负整数或小数，无有效值时回退区块airspace_height，再为空取0。
+--      计划高度优先覆盖区块高度，不额外与区块最高高度取较小值；多个覆盖区块之间取限高最小值，再统一高度基准比较。
+--      遥测高度严格大于最终限高时违规，等于限高正常；本规则只检查超高，不检查min_height。
+--   C. 规则3：任一覆盖区块没有当前有效计划段时违规；计划须未删除、plan_status=true且日期及时间命中。
+--      计划段是否有效只按时间判断，height是否有效不影响计划命中；不检查管控围栏或任务plan_airspace_block_id。
+--   D. 规则2和3同时启用时复用区块及计划查询；仅启用规则3时单独查询，不解析计划高度。
 -- 注意事项：
---   1. 偏航距离等于50米、距地高度等于最终限高时均正常（均按严格大于判断违规）。
---   2. 用空计划按遥测对应的北京时间匹配，采用[开始,结束)；结束时间小于或等于开始时间时，结束日期顺延一天。
---      规则2和3均查询当天及前一天的计划；计划段时间仅接受HH:mm或HH:mm:ss，小时范围00至23，不接受24:00:00或小数秒。
---   3. 持续异常去重、恢复及乱序过滤由调用方维护；只有code=200才表示校验完成。
---   4. 规划航线按任务ID从bo_flight_job.plan_route_gemo读取，项目ID由bo_flight_job.project_id取得。
---   5. 规则2和3均检查当前位置覆盖的全部启用、未删除且final_geom不为空的项目区块，不依赖任务plan_airspace_block_id。
---   6. 未启用规则不参与结果汇总，其active_rule位置保持为1，不能据此认定该规则正常或已恢复。
---   7. code=400或500时ischeck=false、active_rule=[1,1,1]，不能据此判断正常或恢复。
---   8. 规则3由每次遥测调用触发；任一覆盖区块没有当前有效计划段时违规，不检查管控围栏或高度；未命中任何启用区块时不报本项异常。
---   9. ARRAY[1,0,1]仅执行规则1和3；ARRAY[0,1,0]仅执行规则2；ARRAY[0,0,0]不执行安全规则，基础参数及任务记录仍须有效。
---   10. 规则2在每个覆盖区块中，筛选未删除、plan_status=true且时间命中的计划段，height须通过非负整数或小数正则；
---       先对命中段的有效height取最大值，缺失或未通过正则的height不参与max；max为NULL时，依次回退区块airspace_height、0米；
---       多个区块覆盖时取各区块限高的最小值；当前实现未命中任何启用区块时限高为NULL，规则2不报超高。
---   11. time_plan按首尾正则初筛后转换为jsonb并展开；该正则不保证JSON语法合法，通过初筛的非法JSON仍可能使本次校验返回400。
---   12. 规则2仅在altitude为非零有限值时查询gis_dem_value_at_point，code=200且地形海拔为非零有限值才参与相减；负地形海拔仍为有效数据。
---       altitude为0时不查询DEM，地形海拔为0时不参与换算，两种情况均回退height；换算后的距地高度等于0仍为有效结果。
---       未安装地形函数、DEM无覆盖/无有效像元、返回错误状态、空值/非有限值或查询抛异常时，全部回退height；换算距地高度为负时也回退height。
---       altitude和DEM须采用相同高程基准；height兜底按距地高度解释，若上游为相对起飞点高度，须由调用方明确其误差。
---   13. altitude缺失、格式错误或非有限值时视为不可用，规则2可独立回退height；规则1和3不依赖高度。
---       规则2成功取得DEM换算高度时不要求height有效；规则2关闭时不查询DEM、不校验备用height。
---   14. 规则2和3同时启用时复用区块及计划查询结果；仅启用规则3时单独检查区块与计划时段，不解析计划高度。
--- 依赖说明：PostGIS、bo_flight_job、bo_airspace_block、bo_airspace_plan；优先换算需gis_dem_value_at_point及DEM数据，不可用时回退height。
+--   1. 规则2和3按遥测对应的北京时间查询当天及前一天计划，采用[开始,结束)；结束时间小于或等于开始时间时顺延一天。
+--   2. 计划段startTime/endTime仅接受HH:mm或HH:mm:ss，小时范围00至23；time_plan示例为[{"startTime":"10:00:00","endTime":"12:00:00","height":150}]。
+--   3. time_plan只按首尾正则初筛，通过初筛的非法JSON仍可能使本次校验返回400。
+--   4. 未覆盖任何启用项目区块时，规则2限高为NULL、规则3无缺失计划区块，这两项均不报异常；不据此判断已处于可飞空域内。
+--   5. 相对分支不查询DEM；海拔分支DEM须返回code=200和有限海拔，0米、负值均有效，且须与机库及遥测海拔采用同一高程基准。
+--      必需DEM缺失、无覆盖、非有限或查询失败时返回400，不在同次校验中切换高度基准。
+--   6. 规则1和2均关闭时不要求遥测高度及起降参数有效；规则3始终不依赖高度，全部规则关闭仍须通过基础参数和任务校验。
+--   7. code=400或500时ischeck=false、active_rule=[1,1,1]，不能把占位标记解释为正常或恢复。
+--   8. 调用方须保证任务out_id唯一、项目ID和空域限高数据有效；本函数当前未单独校验重复out_id、空项目或区块限高的有限性。
+--   9. 仅检查本次遥测，持续异常去重、恢复、乱序及遥测时效处理由调用方维护。
+-- 依赖说明：PostGIS、gis_write_error_log、gis_uav_flight_deviation_line、bo_flight_job、bo_airspace_block、bo_airspace_plan；海拔分支还需要DEM查询函数和对应数据。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_uav_flight_deviation_check(
     p_task_id varchar,
     p_telemetry jsonb,
-    p_rules integer[] DEFAULT ARRAY[1,1,1]
+    p_rules integer[] DEFAULT ARRAY[1,1,1],
+    p_deviation_threshold double precision DEFAULT 50
 )
 RETURNS TABLE (
     code integer,
@@ -1694,20 +2044,29 @@ LANGUAGE plpgsql
 VOLATILE
 AS $$
 DECLARE
-    -- altitude为飞行海拔，优先减地形海拔取得距地高度；height仅作备用校验高度。
+    -- altitude为海拔，height为相对机库高度；按上游约定选择本次统一使用的高度基准。
     v_task_id varchar := btrim(p_task_id);
     v_project varchar;
     v_lon double precision;
     v_lat double precision;
     v_alt double precision;
     v_height double precision;
+    v_use_altitude boolean;
+    v_telemetry_height double precision;
     v_ground_elevation double precision;
     v_dem_code integer;
     v_check_height numeric;
     v_height_limit numeric;
     v_point_2d geometry;
+    v_point_3d geometry;
     v_route geometry;
+    v_uav_location geometry;
+    v_dock_ground_height double precision;
+    v_safe_height double precision;
+    v_return_height double precision;
+    v_flight_mode integer;
     v_distance double precision;
+    v_local_projection text;
     -- v_time保存遥测对应的绝对时间，v_local保存北京时间，用于匹配计划日期和时段。
     v_time timestamptz;
     v_local timestamp;
@@ -1724,8 +2083,8 @@ DECLARE
 
 BEGIN
     -- 一、记录本次调用，随后完成基础参数校验；所有规则均关闭时仍须校验参数和任务。
-    v_log_sql := format('SELECT * FROM public.gis_uav_flight_deviation_check(%L, %L, %L);',
-        p_task_id, p_telemetry::text, p_rules::text);
+    v_log_sql := format('SELECT * FROM public.gis_uav_flight_deviation_check(%L, %L, %L, %L);',
+        p_task_id, p_telemetry::text, p_rules::text, p_deviation_threshold::text);
 
     -- 记录函数调用日志：入参和函数名称写入gis_error_log
     PERFORM public.gis_write_error_log(600, 'gis_uav_flight_deviation_check', v_log_sql);
@@ -1742,6 +2101,11 @@ BEGIN
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规则开关必须为三个整数0或1，如[1,0,1]';
     END IF;
+    -- 阈值0允许零距离容差，不能用来关闭偏航规则；关闭规则须通过p_rules控制。
+    IF p_deviation_threshold IS NULL OR p_deviation_threshold < 0
+       OR p_deviation_threshold::text IN ('NaN', 'Infinity', '-Infinity') THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '偏航距离阈值必须为非负有限值（米）';
+    END IF;
     -- 用元素的位置生成规则编号，例如[1,0,1]转换为规则编号数组[1,3]。
     -- 全部关闭时生成空数组，后续规则计算及违规汇总循环均跳过。
     SELECT COALESCE(array_agg(e.pos::integer ORDER BY e.pos), ARRAY[]::integer[])
@@ -1755,7 +2119,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '经纬度无效，单位必须为度';
     END IF;
 
-    -- 规则2允许飞行海拔缺失并回退height；规则1和3仅使用二维位置。
+    -- 分别解析海拔和相对机库高度；格式错误或非有限值视为缺失，后续按启用规则要求选定高度有效。
     BEGIN
         v_alt := NULLIF(btrim(p_telemetry->>'altitude'), '')::double precision;
     EXCEPTION WHEN data_exception THEN
@@ -1764,6 +2128,18 @@ BEGIN
     IF v_alt::text IN ('NaN', 'Infinity', '-Infinity') THEN
         v_alt := NULL;
     END IF;
+    BEGIN
+        v_height := NULLIF(btrim(p_telemetry->>'height'), '')::double precision;
+    EXCEPTION WHEN data_exception THEN
+        v_height := NULL;
+    END;
+    IF v_height::text IN ('NaN', 'Infinity', '-Infinity') THEN
+        v_height := NULL;
+    END IF;
+    -- 按上游约定，海拔为0或等于相对高度时使用相对高度；海拔缺失时也进入相对分支。
+    v_use_altitude := v_alt IS NOT NULL AND v_alt <> 0
+                      AND (v_height IS NULL OR v_alt <> v_height);
+    v_telemetry_height := CASE WHEN v_use_altitude THEN v_alt ELSE v_height END;
     -- 三、遥测时间去除首尾空白后按timestamp without time zone解析，再按北京时间解释；须为有限时间。
     -- yyyy-MM-dd HH:mm:ss为建议输入格式；此处通过类型转换解析，计划匹配使用遥测时间。
     IF p_telemetry->>'timeStamp' IS NULL OR btrim(p_telemetry->>'timeStamp') = '' THEN
@@ -1779,68 +2155,41 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'timeStamp必须为有效时间';
     END IF;
     v_local := v_time AT TIME ZONE 'Asia/Shanghai';
-    -- 偏航、空域覆盖和DEM查询均只使用二维位置。
+    -- 空域覆盖和DEM查询使用二维位置，偏航稍后结合选定高度构造三维点。
     v_point_2d := ST_SetSRID(ST_MakePoint(v_lon, v_lat), 4326);
-    -- 四、按平台任务out_id读取未删除任务，由任务记录取得项目ID和规划航线。
-    SELECT r.project_id, r.plan_route_gemo INTO v_project, v_route
+    -- 四、按平台任务out_id读取未删除任务，取得项目、原航线及起降参数。
+    SELECT r.project_id, r.plan_route_gemo, r.uav_location, r.ground_height,
+           r.safe_height, r.return_height, r.flight_mode
+    INTO v_project, v_route, v_uav_location, v_dock_ground_height,
+         v_safe_height, v_return_height, v_flight_mode
     FROM public.bo_flight_job r
     WHERE r.out_id = v_task_id AND r.del_flag = false;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '指定任务out_id不存在或任务已删除';
     END IF;
-    -- 五、规则1：启用偏航校验时才要求规划航线有效，计算当前位置到整条航线的最短距离。
+    -- 只有偏航和超高需要遥测高度；只查计划时段时，缺少altitude/height不阻断校验。
+    IF 1 = ANY(v_rules) OR 2 = ANY(v_rules) THEN
+        IF v_telemetry_height IS NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '偏航或超高校验需要有效海拔或相对机库高度';
+        END IF;
+        v_check_height := v_telemetry_height::numeric;
+    END IF;
+    -- 五、规则1：将完整航线和遥测点统一为海拔或相对机库高度，再计算三维最短距离。
     IF 1 = ANY(v_rules) THEN
-        IF v_route IS NULL OR ST_IsEmpty(v_route)
-           OR GeometryType(v_route) NOT IN ('LINESTRING', 'MULTILINESTRING')
-           OR NOT ST_IsValid(v_route) THEN
-            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'bo_flight_job.plan_route_gemo必须为有效且非空的规划航线';
-        END IF;
-        v_route := ST_SetSRID(ST_Force2D(v_route), 4326);
-        IF EXISTS (SELECT 1 FROM ST_DumpPoints(v_route) d
-                   WHERE NOT (ST_X(d.geom) BETWEEN -180 AND 180)
-                      OR NOT (ST_Y(d.geom) BETWEEN -90 AND 90)) THEN
-            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规划航线必须使用WGS84经纬度';
-        END IF;
-        -- 转为geography后距离单位为米；仅比较二维位置，不将高度差计入偏航距离。
-        v_distance := ST_Distance(v_point_2d::geography, v_route::geography);
+        v_route := public.gis_uav_flight_deviation_line(
+            v_uav_location, v_dock_ground_height, v_safe_height,
+            v_return_height, v_route, v_use_altitude, v_flight_mode
+        );
+        v_point_3d := ST_SetSRID(ST_MakePoint(v_lon, v_lat, v_telemetry_height), 4326);
+        -- 局部等距投影以本次遥测位置为中心，XY转为米，Z保留米，避免经纬度与高度混用单位。
+        v_local_projection := format('+proj=aeqd +lat_0=%s +lon_0=%s +datum=WGS84 +units=m +no_defs', v_lat, v_lon);
+        v_distance := ST_3DDistance(
+            ST_Transform(v_point_3d, v_local_projection),
+            ST_Transform(v_route, v_local_projection)
+        );
     END IF;
     -- 六、规则2：按当前点位与遥测时间，计算本次超高校验使用的高度上限。
     IF 2 = ANY(v_rules) THEN
-        -- altitude为0时直接回退height；其余情况优先用飞行海拔减去当前位置地形海拔。
-        -- 地形函数未安装、返回失败/0值/空值/非有限值或抛出异常时，均保留NULL以进入height兜底分支。
-        IF v_alt IS NOT NULL AND v_alt <> 0 THEN
-            BEGIN
-                SELECT dem.code, dem.elevation
-                INTO v_dem_code, v_ground_elevation
-                FROM public.gis_dem_value_at_point(v_point_2d) dem
-                LIMIT 1;
-
-                IF v_dem_code = 200 AND v_ground_elevation IS NOT NULL AND v_ground_elevation <> 0
-                   AND v_ground_elevation::text NOT IN ('NaN', 'Infinity', '-Infinity') THEN
-                    v_check_height := v_alt::numeric - v_ground_elevation::numeric;
-                    -- 负距地高度视为换算无效，不截断为0，统一使用备用height。
-                    IF v_check_height < 0 THEN
-                        v_check_height := NULL;
-                    END IF;
-                END IF;
-            EXCEPTION WHEN OTHERS THEN
-                v_check_height := NULL;
-            END;
-        END IF;
-
-        IF v_check_height IS NULL THEN
-            BEGIN
-                v_height := (p_telemetry->>'height')::double precision;
-            EXCEPTION WHEN data_exception THEN
-                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '无法取得有效DEM换算高度，备用height必须为非负有限值（米）';
-            END;
-            IF v_height IS NULL OR v_height < 0
-               OR v_height::text IN ('NaN', 'Infinity', '-Infinity') THEN
-                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '无法取得有效DEM换算高度，备用height不能为空且必须为非负有限值（米）';
-            END IF;
-            v_check_height := v_height::numeric;
-        END IF;
-
         -- v_local来自遥测timeStamp，按计划日期和[开始,结束)筛选对应计划段；前一天计划用于匹配跨午夜时段。
         -- 先查所有位置覆盖的启用区块，对每个区块独立查命中时间的计划段height。
         -- 每个区块同时统计命中计划段数量与有效height最大值，供规则2和3复用；无效height不参与max，但不影响计划命中。
@@ -1881,10 +2230,36 @@ BEGIN
           -- 先用原列包围盒利用现有GiST索引，再精确判断二维覆盖（包含区块边界）。
           AND b.final_geom && v_point_2d
           AND ST_Covers(ST_SetSRID(ST_Force2D(b.final_geom), 4326), v_point_2d);
+        -- 空域计划/区块限高均为距地高度，转换到与本次遥测相同的高度基准后再比较。
+        IF v_height_limit IS NOT NULL THEN
+            IF v_use_altitude THEN
+                -- 此处查遥测位置的DEM换算当前限高，与航线构造时逐航点查询DEM的用途不同。
+                -- 必需DEM不可用时返回400，同一次调用不会临时回退height而混用高度基准。
+                BEGIN
+                    SELECT dem.code, dem.elevation INTO v_dem_code, v_ground_elevation
+                    FROM public.gis_dem_value_at_point(v_point_2d) dem LIMIT 1;
+                EXCEPTION WHEN OTHERS THEN
+                    RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '无法取得遥测点DEM地形海拔：' || SQLERRM;
+                END;
+                IF v_dem_code IS DISTINCT FROM 200 OR v_ground_elevation IS NULL
+                   OR v_ground_elevation::text IN ('NaN', 'Infinity', '-Infinity') THEN
+                    RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '遥测点缺少有效DEM地形海拔，无法进行海拔超高校验';
+                END IF;
+                v_height_limit := v_height_limit + v_ground_elevation::numeric;
+            ELSE
+                IF v_dock_ground_height IS NULL OR v_dock_ground_height < 0
+                   OR v_dock_ground_height::text IN ('NaN', 'Infinity', '-Infinity') THEN
+                    RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '相对高度超高校验需要非负有限的机库距地高度';
+                END IF;
+                -- 按业务约定忽略航点与机库的地形高差：相对限高=距地限高-机库距地高度。
+                v_height_limit := v_height_limit - v_dock_ground_height::numeric;
+            END IF;
+        END IF;
     END IF;
     -- 七、规则3：仅检查所在区块是否有覆盖遥测时间的有效计划段。
     -- 规则2已完成相同的区块与时段查询时直接复用；未命中任何启用区块时不报本项异常。
     IF 3 = ANY(v_rules) AND NOT (2 = ANY(v_rules)) THEN
+        -- 找到任意一个“位置覆盖但没有当前有效计划段”的区块即可违规，并非任一区块有计划就通过。
         SELECT EXISTS (
             SELECT 1 FROM public.bo_airspace_block b
             WHERE b.project_id = v_project AND b.del_flag = false
@@ -1914,14 +2289,15 @@ BEGIN
         ) INTO v_no_plan;
     END IF;
 
-    -- 八、仅汇总已启用规则；偏航距离严格大于50米、距地高度严格大于非NULL限高时才违规。
+    -- 八、仅汇总已启用规则；三维偏航距离严格大于传入阈值、同基准遥测高度严格大于非NULL限高时才违规。
     -- 未启用规则的返回标记保持为1。
     FOREACH v_rule IN ARRAY v_rules LOOP
         v_bad := CASE v_rule
-            WHEN 1 THEN v_distance > 50
+            WHEN 1 THEN v_distance > p_deviation_threshold
             WHEN 2 THEN v_height_limit IS NOT NULL AND v_check_height > v_height_limit
             ELSE v_no_plan END;
         IF v_bad THEN
+            -- 返回标记初始化为1，仅把已启用且实际违规的位置改为0，同时累计异常项数。
             v_active_rule[v_rule] := 0;
             v_violation_count := v_violation_count + 1;
         END IF;
@@ -1945,63 +2321,49 @@ EXCEPTION
             jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
 END;
 $$;
-COMMENT ON FUNCTION public.gis_uav_flight_deviation_check(varchar, jsonb, integer[])
-IS '实时校验飞行任务偏航、超高和所在区块的有效用空计划时段';
-
--- =============================================================================
--- 入参与返回结果说明
--- =============================================================================
--- 遥测信息字段：
---   longitude   WGS84经度；数值，必填，范围[-180,180]。
---   latitude    WGS84纬度；数值，必填，范围[-90,90]。
---   altitude    飞行海拔高度；数值，单位米；规则2优先使用非零有限值减去当前位置DEM地形海拔计算距地高度，不可用时回退height；规则1和3不依赖高度。
---   height      备用飞行高度；数值，单位米；altitude缺失或为0、地形海拔为0、地形获取失败或换算结果无效时按距地高度参与比较，使用时必须为非负有限值。
---   timeStamp   遥测时间；字符串，必填，须可解析且为有限时间；建议格式yyyy-MM-dd HH:mm:ss，实际按timestamp without time zone解析后按北京时间解释。
--- 返回字段：
---   code         integer；200=校验完成，400=参数或数据错误，500=执行异常。
---   msg          text；校验结果或错误原因。
---   ischeck      boolean；true=本次所选规则全部正常，false=有违规或执行失败。
---   active_rule  jsonb数组；固定三位0/1，位置依次对应偏航、超高、用空计划时段，返回格式为[1,0,1]。
---                1=未发现违规或未启用，0=该规则违规；例如[1,0,1]表示仅检测到超高违规。
---   datajson     jsonb；项目ID、任务ID及原始遥测信息组成的JSON对象。
--- datajson字段：
---   project_id   任务记录中的项目ID，原样返回。
---   task_id     任务ID，去除首尾空白。
---   telemetry    原样返回传入的遥测JSON。
--- 注意：code=400/500时active_rule=[1,1,1]，不表示正常，调用方须先检查code。
--- 返回示例（返回行表示为JSON）：
--- {"code":200,"msg":"校验完成，当前异常1项","ischeck":false,"active_rule":[0,1,1],
---  "datajson":{"project_id":"项目ID","task_id":"任务ID",
---  "telemetry":{"longitude":116.09,"latitude":36.48,
---               "altitude":160,"height":125,"timeStamp":"2026-10-22 15:30:00"}}}
+COMMENT ON FUNCTION public.gis_uav_flight_deviation_check(varchar, jsonb, integer[], double precision)
+IS '按任务和遥测实时校验三维偏航、超高及用空计划时段，支持规则开关和偏航距离阈值，默认50米';
 
 -- =============================================================================
 -- 调用示例
 -- =============================================================================
--- 1. 保存规划航线，经过空域ID数组可按航线与项目空域的二维相交关系生成。
--- 规划任务数据由业务写入public.bo_flight_job，此处不重复创建航线表。
--- SELECT 'record-001', 'route-001', 'project-001', 'task-001', '测试规划航线', route.geom,
---        ARRAY(SELECT b.id::text FROM public.bo_airspace_block b
---              WHERE b.project_id = 'project-001' AND b.del_flag = false
---                AND b.use_enabled = true AND b.final_geom IS NOT NULL
---                AND ST_Intersects(ST_Force2D(route.geom), ST_Force2D(b.final_geom))
---              ORDER BY b.id)
--- FROM (SELECT ST_GeomFromText('LINESTRING Z(116.08 36.47 100,116.10 36.49 100)', 4326) AS geom) route;
---
--- 2. 按任务ID、遥测信息和规则开关进行实时校验；项目ID由任务记录自动取得。
+-- 前提：任务已存在且del_flag=false；执行规则1时须具备规划航线、机库位置、机库距地高度、安全起飞高度、返航高度及航飞模式。
+-- 海拔分支还须具备有效DEM；以下示例展示调用方式，实际是否通过取决于任务航线、空域和计划数据。
+-- 1. 默认执行全部规则，偏航阈值为50米；213.49既不为0也不等于101.9，使用海拔分支。
 -- SELECT * FROM public.gis_uav_flight_deviation_check(
---     'task-001',
---     '{"longitude":116.09,"latitude":36.48,
---       "altitude":160,"height":125,"timeStamp":"2026-10-22 15:30:00"}'::jsonb,
---     ARRAY[1,0,1]
+--     'f6a024e15c604ce4a7dfd2f895c266fe',
+--     '{"height":101.9,"altitude":213.49,"latitude":34.816419,"longitude":113.472792,"timeStamp":"2026-11-11 10:49:32"}'::jsonb
 -- );
--- 仅校验超高时最后一个参数传ARRAY[0,1,0]；正常时active_rule返回[1,1,1]。
--- 入参ARRAY[1,0,1]：仅执行偏航、用空计划时段校验；若仅偏航违规则active_rule=[0,1,1]。
+--
+-- 2. 显式传入全部规则，省略第四参仍使用默认50米；altitude=0，使用height=101.9的相对机库高度。
+-- altitude与height精确相等时也进入相对分支；航线及空域距地高度均减任务ground_height后比较。
+-- SELECT * FROM public.gis_uav_flight_deviation_check(
+--     'f6a024e15c604ce4a7dfd2f895c266fe',
+--     '{"height":101.9,"altitude":0,"latitude":34.816419,"longitude":113.472792,"timeStamp":"2026-11-11 10:49:32"}'::jsonb,
+--     ARRAY[1,1,1]
+-- );
+--
+-- 3. 只校验偏航和用空计划时段，自定义偏航阈值为30米；三维距离等于30米正常，严格超过30米才判偏航。
+-- SELECT * FROM public.gis_uav_flight_deviation_check(
+--     'f6a024e15c604ce4a7dfd2f895c266fe',
+--     '{"height":101.9,"altitude":0,"latitude":34.816419,"longitude":113.472792,"timeStamp":"2026-11-11 10:49:32"}'::jsonb,
+--     ARRAY[1,0,1],
+--     30
+-- );
+--
+-- 4. 仅校验用空计划时段，无须提供altitude或height；偏航阈值省略时取默认50米。
+-- SELECT * FROM public.gis_uav_flight_deviation_check(
+--     'f6a024e15c604ce4a7dfd2f895c266fe',
+--     '{"latitude":34.816419,"longitude":113.472792,"timeStamp":"2026-11-11 10:49:32"}'::jsonb,
+--     ARRAY[0,0,1]
+-- );
+-- 仅校验超高时第三参传ARRAY[0,1,0]；关闭全部规则时传ARRAY[0,0,0]，仍会校验基础参数和任务是否存在。
+-- 先判断code，再读取ischeck和active_rule；例如code=200且active_rule=[1,0,1]表示仅发现超高违规。
 
  
 
 -- =============================================================================
--- 函数名称：6.gis_flight_task_route_check
+-- 函数名称：7.gis_flight_task_route_check
 -- 函数功能：校验输入航线与指定项目下指定任务的规划航线是否存在空间冲突。
 -- 函数描述：
 --   1. 校验项目 ID、航线 GeoJSON、任务 ID 数组和缓冲半径。
@@ -2023,7 +2385,7 @@ IS '实时校验飞行任务偏航、超高和所在区块的有效用空计划�
 -- 删除函数
 SELECT public.gis_drop_function('gis_flight_task_route_check');
 -- =============================================================================
--- 函数介绍：6.gis_flight_task_route_check
+-- 函数介绍：7.gis_flight_task_route_check
 -- 主要作用：根据项目、待校验航线和任务 ID 集合，判断任务规划航线是否与待校验
 --           航线发生空间冲突，并返回冲突任务清单。
 --
@@ -2063,6 +2425,7 @@ SELECT public.gis_drop_function('gis_flight_task_route_check');
 -- 注意事项：
 --   本函数按二维空间相交及航线Z高度范围重叠判断冲突，不比较时间、速度或其他任务属性；
 --   p_buffer_radius 的单位为米，输入 GeoJSON 坐标必须使用 WGS84 经纬度坐标。
+--   待校验航线与候选任务航线的Z须采用同一高度基准；函数直接比较高度区间，不自动进行海拔与相对高度换算。
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.gis_flight_task_route_check(
     p_project_id varchar,
@@ -2075,6 +2438,7 @@ LANGUAGE plpgsql VOLATILE AS $$
 DECLARE v_route geometry; v_buffer geometry; v_hit_ids text[];
     v_route_min_z double precision; v_route_max_z double precision;
 BEGIN
+    -- 一、限定项目、待校验航线和候选任务集合，避免对项目全部任务进行无条件冲突查询。
     IF p_project_id IS NULL OR btrim(p_project_id) = '' THEN
         PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '项目ID不能为空');
         RETURN QUERY SELECT 400, '参数错误：项目ID不能为空', false, '';
@@ -2099,24 +2463,28 @@ BEGIN
         PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '任务ID数组不能包含空值');
         RETURN QUERY SELECT 400,'参数错误：任务ID数组不能包含空值'::text,false,''::text; RETURN;
     END IF;
+    -- 缓冲半径单位为米；0表示直接使用原航线，负值、NULL和非有限值均作为参数错误。
     IF p_buffer_radius IS NULL OR p_buffer_radius < 0
        OR p_buffer_radius IN ('NaN'::double precision,'Infinity'::double precision,'-Infinity'::double precision) THEN
         PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '缓冲半径必须为非负有限值（米）');
         RETURN QUERY SELECT 400,'参数错误：缓冲半径必须为非负有限值（米）'::text,false,''::text; RETURN;
     END IF;
     BEGIN
+        -- 二、调用统一解析函数提取航线几何，输入格式错误在当前分支转换为400。
         v_route := public.gis_geojson_to_geom(p_route_geojson);
     EXCEPTION WHEN OTHERS THEN
         PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '航线GeoJSON解析失败：' || SQLERRM);
         RETURN QUERY SELECT 400, ('参数错误：航线GeoJSON解析失败：' || SQLERRM), false, '';
         RETURN;
     END;
+    -- 保留原Z并修复几何，先提取待校验航线的整体高度区间，供后续与候选任务比较。
     v_route:=ST_SetSRID(ST_MakeValid(v_route),4326);
     SELECT min(ST_Z((d).geom)), max(ST_Z((d).geom)) INTO v_route_min_z, v_route_max_z FROM ST_DumpPoints(v_route) AS d;
     IF v_route_min_z IS NULL OR v_route_max_z IS NULL THEN
         RETURN QUERY SELECT 400, 'route Z height is required'::text, false, ''::text;
         RETURN;
     END IF;
+    -- 高度范围和线类型都满足后才进入缓冲区与相交判断；点、面、空几何均不接受。
     IF v_route IS NULL OR ST_IsEmpty(v_route)
        OR ST_GeometryType(v_route) NOT IN ('ST_LineString','ST_MultiLineString')
        OR NOT ST_IsValid(v_route) THEN
@@ -2124,19 +2492,25 @@ BEGIN
         RETURN QUERY SELECT 400,'参数错误：航线geometry必须为有效的LineString或MultiLineString'::text,false,''::text; RETURN;
     END IF;
     BEGIN
+        -- 三、geography按米生成水平缓冲区；半径为0时保留原线，Z高度另按区间判断。
         v_buffer:=CASE WHEN p_buffer_radius=0 THEN v_route ELSE ST_Buffer(v_route::geography,p_buffer_radius)::geometry END;
     EXCEPTION WHEN OTHERS THEN
         PERFORM public.gis_write_error_log(400, 'gis_flight_task_route_check', '航线缓冲区生成失败：' || SQLERRM);
         RETURN QUERY SELECT 400,('参数错误：航线缓冲区生成失败：'||SQLERRM)::text,false,''::text; RETURN;
     END;
+    -- 四、候选任务须项目匹配、ID位于指定集合、未删除且航线有效；二维相交和高度区间重叠须同时满足。
+    -- 不比较任务时间，也不按相交位置插值高度；命中任务ID去重后按字典序返回。
     SELECT array_agg(DISTINCT g.out_id::text ORDER BY g.out_id::text) INTO v_hit_ids FROM public.bo_flight_job g WHERE COALESCE(g.del_flag,false)=false AND g.project_id=btrim(p_project_id) AND g.out_id::text=ANY(p_task_ids::text[]) AND g.plan_route_gemo IS NOT NULL AND NOT ST_IsEmpty(g.plan_route_gemo) AND ST_IsValid(g.plan_route_gemo) AND ST_Intersects(v_buffer,ST_SetSRID(ST_Force2D(g.plan_route_gemo),4326))
     AND ST_ZMin(Box3D(g.plan_route_gemo)) IS NOT NULL
     AND ST_ZMax(Box3D(g.plan_route_gemo)) IS NOT NULL
+    -- 两个闭区间相交即满足高度条件，区间端点相等也视为重叠。
     AND v_route_min_z <= ST_ZMax(Box3D(g.plan_route_gemo))
     AND v_route_max_z >= ST_ZMin(Box3D(g.plan_route_gemo));
+    -- 五、无冲突时返回true；有冲突时返回false及逗号分隔的任务ID，code均为200。
     v_hit_ids:=COALESCE(v_hit_ids,ARRAY[]::text[]);
     IF cardinality(v_hit_ids)=0 THEN RETURN QUERY SELECT 200,'校验完成，未发现相交航线'::text,true,''::text; ELSE RETURN QUERY SELECT 200,format('校验完成，发现%s条相交航线：%s',cardinality(v_hit_ids),array_to_string(v_hit_ids,',')),false,array_to_string(v_hit_ids,','); END IF;
 EXCEPTION WHEN OTHERS THEN
+    -- 未被前面参数分支处理的空间或查询异常返回500，不返回部分命中任务。
     PERFORM public.gis_write_error_log(500, 'gis_flight_task_route_check', '任务航线冲突校验异常：' || SQLERRM);
     RETURN QUERY SELECT 500,('任务航线冲突校验异常：'||SQLERRM)::text,false,''::text;
 END; $$;
@@ -2149,10 +2523,11 @@ IS '按项目、航线GeoJSON和任务ID数组校验任务航线冲突，缓冲�
 -- =============================================================================
 -- 调用示例
 -- =============================================================================
+-- 待校验航线为三维LineString，高度100米；候选任务航线须使用同一高度基准，水平缓冲半径为50米。
 -- SELECT code, msg, ischeck, task_ids
 -- FROM public.gis_flight_task_route_check(
--- 'project-001', 
--- '{""type"":""LineString"",""coordinates"": [[116.1,36.4],[116.2,36.5]]}', 
--- ARRAY['task-001','task-002']::varchar[],
---  50
---  );
+--     'project-001',
+--     '{"type":"LineString","coordinates":[[116.1,36.4,100],[116.2,36.5,100]]}',
+--     ARRAY['task-001','task-002']::varchar[],
+--     50
+-- );
