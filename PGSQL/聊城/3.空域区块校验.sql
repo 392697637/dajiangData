@@ -111,13 +111,13 @@
 --   作用：根据任务ID和实时遥测执行所选规则，返回本次违规标记及原始遥测信息。
 --   入参：
 --   p_task_id               varchar；任务ID，匹配bo_flight_job.out_id；项目ID、规划航线和起降参数从未删除任务记录取得。
---   p_telemetry             jsonb对象；必含longitude、latitude、timeStamp；altitude为海拔米，height为相对机库高度米；规则1、2使用选定高度。
+--   p_telemetry             jsonb对象；必含longitude、latitude、timeStamp；altitude为海拔米，height为相对机库高度米；规则1的三维校验和规则2使用选定高度。
 --   p_rules                 integer[]；默认ARRAY[1,1,1]；固定三位0/1，依次控制偏航、超高、用空计划时段；1执行，0跳过。
 --   p_deviation_threshold   double precision；偏航距离阈值，单位米，默认50；须为非负有限值，不能为NULL。
 --   规则：
---   A、高度基准：altitude缺失、格式错误、非有限、为0或与height精确相等时使用相对机库高度，否则使用有效海拔；规则1和2采用同一分支。
---   B、偏航：先用gis_uav_flight_deviation_line构造同高度基准的完整航线；当前位置到完整航线的三维最短距离严格大于p_deviation_threshold时违规，等于阈值正常。
---      启用该规则时，任务须有有效三维规划航线、机库位置、机库距地高度、安全起飞高度、返航高度及航飞模式；原航线Z为相对地面高度。
+--   A、高度基准：altitude缺失、格式错误、非有限、为0或与height精确相等时使用相对机库高度，否则使用有效海拔；规则1的三维校验和规则2采用同一分支。
+--   B、偏航：机库位置非空时，用gis_uav_flight_deviation_line构造同高度基准的完整航线并计算三维最短距离；机库位置为NULL或空几何时，沿用原规划航线计算二维水平最短距离。
+--      距离严格大于p_deviation_threshold时违规，等于阈值正常；仅三维分支要求有效遥测高度、三维规划航线及完整起降参数，原航线Z为相对地面高度。
 --   C、超高：按当前位置覆盖的启用项目区块及遥测时间匹配可用计划段；各区块取命中段有效height最大值，无有效值时依次回退区块airspace_height、0米。
 --      相对限高=距地限高-ground_height，海拔限高=距地限高+遥测点DEM；相对分支忽略地形高差，必需DEM无效时返回400。
 --      多区块覆盖时取各区块限高的最小值；同基准遥测高度严格大于该限高时违规，等于限高正常；未命中任何启用区块时本规则不报超高。
@@ -159,7 +159,7 @@
 --   4. PGSQL/聊城/1.飞行审核.sql：public.gis_write_error_log(integer, text, text)，写入public.gis_error_log。
 --   5. PGSQL/聊城/2.空域区块.sql：public.bo_airspace_block空域区块表、public.bo_airspace_plan用空计划表。
 --   6. public.bo_flight_job任务表，第6、7个函数读取out_id、project_id、del_flag、plan_route_gemo。
---      第6个函数还读取uav_location、ground_height、safe_height、return_height、flight_mode，调用第5个函数gis_uav_flight_deviation_line构造完整航线。
+--      第6个函数还读取uav_location、ground_height、safe_height、return_height、flight_mode；机库位置非空时调用第5个函数gis_uav_flight_deviation_line构造完整航线，为空时沿用原航线水平偏航校验。
 --   7. 第3个函数运行时复用本文件的第4个和第1个函数；调用前需完成本文件全部函数的创建。
 --   8. PGSQL/函数/6.2DEM分析函数.sql：public.gis_dem_value_at_point(geometry, text)及其DEM表解析函数；第6个函数的海拔超高校验用于空域限高换算，必需DEM不可用时返回400。
 -- =============================================================================
@@ -1940,7 +1940,7 @@ IS '按航飞模式构造机库起飞、规划航线、返航及降落的完整�
 --   1. 校验任务ID、遥测坐标、遥测时间、规则开关和偏航距离阈值。
 --   2. 按bo_flight_job.out_id读取未删除任务，取得所属项目、规划航线和起降参数。
 --   A. 选择高度基准：altitude不可用、为0或等于height时使用相对机库高度，否则使用海拔高度。
---   B. 规则1：调用gis_uav_flight_deviation_line生成同高度基准的完整起降航线，三维最短距离严格超过偏航阈值时违规。
+--   B. 规则1：机库位置非空时生成完整起降航线并计算三维距离；机库位置为空时用原规划航线计算二维水平距离，严格超过偏航阈值时违规。
 --   C. 规则2：按遥测位置和时间取得空域计划限高，转换到同一高度基准后比较，遥测高度严格超过限高时违规。
 --   D. 规则3：任一覆盖当前位置的启用项目区块没有覆盖遥测时间的有效计划段时违规。
 --   E. 汇总启用规则的违规项数和标记；只有本次启用规则全部正常时，ischeck才为true。
@@ -1976,13 +1976,13 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   longitude              WGS84经度；数值；必填；范围[-180,180]，单位：度。
 --   latitude               WGS84纬度；数值；必填；范围[-90,90]，单位：度。
 --   altitude               海拔高度；有限数值，单位：米，允许负值；不可用、为0或等于height时选择相对分支，否则选择海拔分支。
---   height                 相对起飞点（机库）高度；有限数值，单位：米，允许负值；相对分支启用规则1或2时必填。
+--   height                 相对起飞点（机库）高度；有限数值，单位：米，允许负值；相对分支启用规则2，或机库位置非空并启用规则1时必填。
 --   timeStamp              遥测时间；字符串；必填；建议yyyy-MM-dd HH:mm:ss，按timestamp without time zone解析后按北京时间解释。
 -- 入参校验：
 --   1. 任务ID不能为空，遥测必须为JSON对象。
 --   2. 规则参数必须为长度3的一维整数数组，各元素只能为0或1，不能为NULL。
---   3. 经纬度须在上述范围内，timeStamp须可解析且为有限时间；启用规则1或2时，选定分支的遥测高度须有效。
---   4. 必须存在对应的未删除任务；规则1启用时，由gis_uav_flight_deviation_line校验规划航线及完整起降参数。
+--   3. 经纬度须在上述范围内，timeStamp须可解析且为有限时间；启用规则2，或机库位置非空并启用规则1时，选定分支的遥测高度须有效。
+--   4. 必须存在对应的未删除任务；规则1在机库位置非空时由gis_uav_flight_deviation_line校验规划航线及完整起降参数；机库位置为NULL或空几何时，只校验原规划航线的二维几何、SRID和经纬度。
 --   5. 规则2存在空域限高时，相对分支须有非负有限的ground_height，海拔分支须有遥测点对应的有效DEM。
 --   6. p_deviation_threshold须为非负有限值，即使关闭规则1也须有效；参数或必需数据无效时返回400。
 -- 返回说明：
@@ -2004,13 +2004,14 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   [0,1,1]：仅偏航违规；[1,0,1]：仅超高违规；[1,1,0]：仅用空计划时段违规。
 --   多项违规时对应位置同时为0，例如[0,0,1]表示偏航和超高违规，[0,0,0]表示三项均违规。
 -- 高度基准说明：
---   1. altitude缺失、格式错误、非有限、为0或与height精确相等时选择相对分支，否则使用有效海拔；规则1和2采用同一分支。
+--   1. altitude缺失、格式错误、非有限、为0或与height精确相等时选择相对分支，否则使用有效海拔；规则1的三维校验和规则2采用同一分支，机库位置为空时规则1不使用高度。
 --   2. 相对分支：遥测使用height，机库点Z=0，原航点Z和空域距地限高均减ground_height；忽略航点与机库的地形高差。
 --   3. 海拔分支：遥测使用altitude，机库点Z为机库海拔，原航点Z-ground_height后统一加机库海拔；空域距地限高仍加遥测点DEM。
 --   4. altitude和height分别解析，格式错误或非有限值视为不可用；海拔分支不要求height有效。
 -- 规则说明：
---   A. 规则1：按航飞模式生成完整航线，将XY转换到以遥测位置为中心的米制投影，计算包含Z高度差的三维最短距离。
---      距离严格大于p_deviation_threshold时违规，等于阈值正常；比较整条完整航线，不区分当前飞行阶段。
+--   A. 规则1：机库位置非空时，按航飞模式生成完整航线，将XY转换到以遥测位置为中心的米制投影，计算包含Z高度差的三维最短距离。
+--      机库位置为NULL或空几何时，不构造起降段，直接将原规划航线转为二维geography计算水平距离，不要求遥测高度或起降参数。
+--      距离严格大于p_deviation_threshold时违规，等于阈值正常；比较所选整条航线，不区分当前飞行阶段。
 --   B. 规则2：查找覆盖遥测位置的启用、未删除且final_geom不为空的项目区块，区块边界也视为命中。
 --      每个区块对覆盖遥测时间的有效计划段height取最大值；height只接受非负整数或小数，无有效值时回退区块airspace_height，再为空取0。
 --      计划高度优先覆盖区块高度，不额外与区块最高高度取较小值；多个覆盖区块之间取限高最小值，再统一高度基准比较。
@@ -2025,7 +2026,7 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   4. 未覆盖任何启用项目区块时，规则2限高为NULL、规则3无缺失计划区块，这两项均不报异常；不据此判断已处于可飞空域内。
 --   5. 航线构造的两个高度分支均不查询DEM；海拔分支仅规则2的限高换算查询DEM，须返回code=200和有限海拔，0米、负值均有效，且须与遥测海拔采用同一高程基准。
 --      必需DEM缺失、无覆盖、非有限或查询失败时返回400，不在同次校验中切换高度基准。
---   6. 规则1和2均关闭时不要求遥测高度及起降参数有效；规则3始终不依赖高度，全部规则关闭仍须通过基础参数和任务校验。
+--   6. 规则2关闭，且规则1关闭或机库位置为空时，不要求遥测高度及起降参数有效；规则3始终不依赖高度，全部规则关闭仍须通过基础参数和任务校验。
 --   7. code=400或500时ischeck=false、active_rule=[1,1,1]，不能把占位标记解释为正常或恢复。
 --   8. 调用方须保证任务out_id唯一、项目ID和空域限高数据有效；本函数当前未单独校验重复out_id、空项目或区块限高的有限性。
 --   9. 仅检查本次遥测，持续异常去重、恢复、乱序及遥测时效处理由调用方维护。
@@ -2065,6 +2066,7 @@ DECLARE
     v_point_3d geometry;
     v_route geometry;
     v_uav_location geometry;
+    v_has_uav_location boolean;
     v_dock_ground_height double precision;
     v_safe_height double precision;
     v_return_height double precision;
@@ -2159,7 +2161,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'timeStamp必须为有效时间';
     END IF;
     v_local := v_time AT TIME ZONE 'Asia/Shanghai';
-    -- 空域覆盖和DEM查询使用二维位置，偏航稍后结合选定高度构造三维点。
+    -- 空域覆盖和DEM查询使用二维位置；有机库位置的偏航校验稍后结合选定高度构造三维点。
     v_point_2d := ST_SetSRID(ST_MakePoint(v_lon, v_lat), 4326);
     -- 四、按平台任务out_id读取未删除任务，取得项目、原航线及起降参数。
     SELECT r.project_id, r.plan_route_gemo, r.uav_location, r.ground_height,
@@ -2171,26 +2173,45 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '指定任务out_id不存在或任务已删除';
     END IF;
-    -- 只有偏航和超高需要遥测高度；只查计划时段时，缺少altitude/height不阻断校验。
-    IF 1 = ANY(v_rules) OR 2 = ANY(v_rules) THEN
+    v_has_uav_location := v_uav_location IS NOT NULL AND NOT ST_IsEmpty(v_uav_location);
+    -- 超高和有机库位置的三维偏航需要高度；无机库位置时，偏航沿用原航线的二维水平距离。
+    IF 2 = ANY(v_rules) OR (1 = ANY(v_rules) AND v_has_uav_location) THEN
         IF v_telemetry_height IS NULL THEN
             RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '偏航或超高校验需要有效海拔或相对机库高度';
         END IF;
         v_check_height := v_telemetry_height::numeric;
     END IF;
-    -- 五、规则1：将完整航线和遥测点统一为海拔或相对机库高度，再计算三维最短距离。
+    -- 五、规则1：有机库位置时校验完整三维航线；机库位置为空时继续校验原规划航线的水平偏航。
     IF 1 = ANY(v_rules) THEN
-        v_route := public.gis_uav_flight_deviation_line(
-            v_uav_location, v_dock_ground_height, v_safe_height,
-            v_return_height, v_route, v_use_altitude, v_flight_mode
-        );
-        v_point_3d := ST_SetSRID(ST_MakePoint(v_lon, v_lat, v_telemetry_height), 4326);
-        -- 局部等距投影以本次遥测位置为中心，XY转为米，Z保留米，避免经纬度与高度混用单位。
-        v_local_projection := format('+proj=aeqd +lat_0=%s +lon_0=%s +datum=WGS84 +units=m +no_defs', v_lat, v_lon);
-        v_distance := ST_3DDistance(
-            ST_Transform(v_point_3d, v_local_projection),
-            ST_Transform(v_route, v_local_projection)
-        );
+        IF v_has_uav_location THEN
+            v_route := public.gis_uav_flight_deviation_line(
+                v_uav_location, v_dock_ground_height, v_safe_height,
+                v_return_height, v_route, v_use_altitude, v_flight_mode
+            );
+            v_point_3d := ST_SetSRID(ST_MakePoint(v_lon, v_lat, v_telemetry_height), 4326);
+            -- 局部等距投影以本次遥测位置为中心，XY转为米，Z保留米，避免经纬度与高度混用单位。
+            v_local_projection := format('+proj=aeqd +lat_0=%s +lon_0=%s +datum=WGS84 +units=m +no_defs', v_lat, v_lon);
+            v_distance := ST_3DDistance(
+                ST_Transform(v_point_3d, v_local_projection),
+                ST_Transform(v_route, v_local_projection)
+            );
+        ELSE
+            -- 缺少机库位置无法补齐起降段或统一机库高度基准，沿用旧逻辑检查原航线的二维水平偏航。
+            IF v_route IS NULL OR ST_IsEmpty(v_route)
+               OR GeometryType(v_route) NOT IN ('LINESTRING', 'MULTILINESTRING')
+               OR NOT ST_IsValid(v_route) THEN
+                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规划航线必须为有效且非空的LineString或MultiLineString';
+            END IF;
+            IF ST_SRID(v_route) NOT IN (0, 4326) OR EXISTS (
+                SELECT 1 FROM ST_DumpPoints(v_route) d
+                WHERE NOT (ST_X(d.geom) BETWEEN -180 AND 180)
+                   OR NOT (ST_Y(d.geom) BETWEEN -90 AND 90)
+            ) THEN
+                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规划航点须使用有效的WGS84经纬度';
+            END IF;
+            v_route := ST_SetSRID(ST_Force2D(v_route), 4326);
+            v_distance := ST_Distance(v_point_2d::geography, v_route::geography);
+        END IF;
     END IF;
     -- 六、规则2：按当前点位与遥测时间，计算本次超高校验使用的高度上限。
     IF 2 = ANY(v_rules) THEN
@@ -2293,7 +2314,7 @@ BEGIN
         ) INTO v_no_plan;
     END IF;
 
-    -- 八、仅汇总已启用规则；三维偏航距离严格大于传入阈值、同基准遥测高度严格大于非NULL限高时才违规。
+    -- 八、仅汇总已启用规则；所选偏航距离严格大于传入阈值、同基准遥测高度严格大于非NULL限高时才违规。
     -- 未启用规则的返回标记保持为1。
     FOREACH v_rule IN ARRAY v_rules LOOP
         v_bad := CASE v_rule
@@ -2326,12 +2347,12 @@ EXCEPTION
 END;
 $$;
 COMMENT ON FUNCTION public.gis_uav_flight_deviation_check(varchar, jsonb, integer[], double precision)
-IS '按任务和遥测实时校验三维偏航、超高及用空计划时段，支持规则开关和偏航距离阈值，默认50米';
+IS '按任务和遥测实时校验偏航、超高及用空计划时段；有机库位置时校验完整三维航线，无机库位置时校验原航线水平偏航，偏航阈值默认50米';
 
 -- =============================================================================
 -- 调用示例
 -- =============================================================================
--- 前提：任务已存在且del_flag=false；执行规则1时须具备规划航线、机库位置、机库距地高度、安全起飞高度、返航高度及航飞模式。
+-- 前提：任务已存在且del_flag=false；执行规则1时须具备有效规划航线；机库位置非空时还须具备三维航点及完整起降参数，为空时沿用原航线水平偏航校验。
 -- 启用海拔超高校验时还须具备有效DEM；以下示例展示调用方式，实际是否通过取决于任务航线、空域和计划数据。
 -- 1. 默认执行全部规则，偏航阈值为50米；213.49既不为0也不等于101.9，使用海拔分支。
 -- SELECT * FROM public.gis_uav_flight_deviation_check(
@@ -2363,6 +2384,13 @@ IS '按任务和遥测实时校验三维偏航、超高及用空计划时段，�
 -- );
 -- 仅校验超高时第三参传ARRAY[0,1,0]；关闭全部规则时传ARRAY[0,0,0]，仍会校验基础参数和任务是否存在。
 -- 先判断code，再读取ischeck和active_rule；例如code=200且active_rule=[1,0,1]表示仅发现超高违规。
+--
+-- 5. 任务机库位置为NULL或空几何时，直接用原规划航线校验水平偏航；仅启用规则1时无须提供高度和起降参数。
+-- SELECT * FROM public.gis_uav_flight_deviation_check(
+--     'f6a024e15c604ce4a7dfd2f895c266fe',
+--     '{"latitude":34.816419,"longitude":113.472792,"timeStamp":"2026-11-11 10:49:32"}'::jsonb,
+--     ARRAY[1,0,0]
+-- );
 
  
 
