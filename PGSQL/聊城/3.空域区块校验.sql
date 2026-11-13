@@ -1871,7 +1871,7 @@ BEGIN
     -- 任务ID须非空，遥测须为JSON对象；参数错误统一交由下方异常分支返回400。
     IF COALESCE(v_task_id, '') = ''
        OR jsonb_typeof(p_telemetry) IS DISTINCT FROM 'object' THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '任务ID和遥测对象不能为空';
+        RAISE EXCEPTION USING MESSAGE = '任务ID和遥测对象不能为空';
     END IF;
     -- 三位开关只能取0或1，不接受NULL、多维数组或其他长度。
     IF p_rules IS NULL OR cardinality(p_rules) <> 3
@@ -1879,12 +1879,12 @@ BEGIN
         SELECT 1 FROM unnest(p_rules) e(item)
         WHERE e.item IS NULL OR e.item NOT IN (0, 1)
     ) THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规则开关必须为三个整数0或1，如[1,0,1]';
+        RAISE EXCEPTION USING MESSAGE = '规则开关必须为三个整数0或1，如[1,0,1]';
     END IF;
     -- 阈值0允许零距离容差，不能用来关闭偏航规则；关闭规则须通过p_rules控制。
     IF p_deviation_threshold IS NULL OR p_deviation_threshold < 0
        OR p_deviation_threshold::text IN ('NaN', 'Infinity', '-Infinity') THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '偏航距离阈值必须为非负有限值（米）';
+        RAISE EXCEPTION USING MESSAGE = '偏航距离阈值必须为非负有限值（米）';
     END IF;
     -- 用元素的位置生成规则编号，例如[1,0,1]转换为规则编号数组[1,3]。
     -- 全部关闭时生成空数组，后续规则计算及违规汇总循环均跳过。
@@ -1896,7 +1896,7 @@ BEGIN
     v_lat := (p_telemetry->>'latitude')::double precision;
     IF v_lon IS NULL OR NOT (v_lon BETWEEN -180 AND 180)
        OR v_lat IS NULL OR NOT (v_lat BETWEEN -90 AND 90) THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '经纬度无效，单位必须为度';
+        RAISE EXCEPTION USING MESSAGE = '经纬度无效，单位必须为度';
     END IF;
 
     -- 分别解析海拔和相对机库高度；格式错误或非有限值视为缺失，后续按启用规则要求选定高度有效。
@@ -1936,16 +1936,16 @@ BEGIN
     -- 三、遥测时间去除首尾空白后按timestamp without time zone解析，再按北京时间解释；须为有限时间。
     -- yyyy-MM-dd HH:mm:ss为建议输入格式；此处通过类型转换解析，计划匹配使用遥测时间。
     IF p_telemetry->>'timeStamp' IS NULL OR btrim(p_telemetry->>'timeStamp') = '' THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '遥测时间timeStamp不能为空（格式yyyy-MM-dd HH:mm:ss）';
+        RAISE EXCEPTION USING MESSAGE = '遥测时间timeStamp不能为空（格式yyyy-MM-dd HH:mm:ss）';
     END IF;
     BEGIN
         v_time := (btrim(p_telemetry->>'timeStamp')::timestamp without time zone)
             AT TIME ZONE 'Asia/Shanghai';
     EXCEPTION WHEN OTHERS THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'timeStamp格式错误，应为yyyy-MM-dd HH:mm:ss';
+        RAISE EXCEPTION USING MESSAGE = 'timeStamp格式错误，应为yyyy-MM-dd HH:mm:ss';
     END;
     IF NOT isfinite(v_time) THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'timeStamp必须为有效时间';
+        RAISE EXCEPTION USING MESSAGE = 'timeStamp必须为有效时间';
     END IF;
     v_local := v_time AT TIME ZONE 'Asia/Shanghai';
     -- 空域覆盖和DEM查询使用二维位置；有机库位置的偏航校验稍后结合选定高度构造三维点。
@@ -1958,13 +1958,13 @@ BEGIN
     FROM public.bo_flight_job r
     WHERE r.out_id = v_task_id AND r.del_flag = false;
     IF NOT FOUND THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '指定任务out_id不存在或任务已删除';
+        RAISE EXCEPTION USING MESSAGE = '指定任务out_id不存在或任务已删除';
     END IF;
     v_has_uav_location := v_uav_location IS NOT NULL AND NOT ST_IsEmpty(v_uav_location);
     -- 超高和有机库位置的三维偏航需要高度；无机库位置时，偏航沿用原航线的二维水平距离。
     IF 2 = ANY(v_rules) OR (1 = ANY(v_rules) AND v_has_uav_location) THEN
         IF v_telemetry_height IS NULL THEN
-            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '偏航或超高校验需要有效海拔或相对机库高度';
+            RAISE EXCEPTION USING MESSAGE = '偏航或超高校验需要有效海拔或相对机库高度';
         END IF;
         v_check_height := v_telemetry_height::numeric;
     END IF;
@@ -1987,14 +1987,14 @@ BEGIN
             IF v_route IS NULL OR ST_IsEmpty(v_route)
                OR GeometryType(v_route) NOT IN ('LINESTRING', 'MULTILINESTRING')
                OR NOT ST_IsValid(v_route) THEN
-                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规划航线必须为有效且非空的LineString或MultiLineString';
+                RAISE EXCEPTION USING MESSAGE = '规划航线必须为有效且非空的LineString或MultiLineString';
             END IF;
             IF ST_SRID(v_route) NOT IN (0, 4326) OR EXISTS (
                 SELECT 1 FROM ST_DumpPoints(v_route) d
                 WHERE NOT (ST_X(d.geom) BETWEEN -180 AND 180)
                    OR NOT (ST_Y(d.geom) BETWEEN -90 AND 90)
             ) THEN
-                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规划航点须使用有效的WGS84经纬度';
+                RAISE EXCEPTION USING MESSAGE = '规划航点须使用有效的WGS84经纬度';
             END IF;
             v_route := ST_SetSRID(ST_Force2D(v_route), 4326);
             v_distance := ST_Distance(v_point_2d::geography, v_route::geography);
@@ -2051,17 +2051,17 @@ BEGIN
                     SELECT dem.code, dem.elevation INTO v_dem_code, v_ground_elevation
                     FROM public.gis_dem_value_at_point(v_point_2d) dem LIMIT 1;
                 EXCEPTION WHEN OTHERS THEN
-                    RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '无法取得遥测点DEM地形海拔：' || SQLERRM;
+                    RAISE EXCEPTION USING MESSAGE = '无法取得遥测点DEM地形海拔：' || SQLERRM;
                 END;
                 IF v_dem_code IS DISTINCT FROM 200 OR v_ground_elevation IS NULL
                    OR v_ground_elevation::text IN ('NaN', 'Infinity', '-Infinity') THEN
-                    RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '遥测点缺少有效DEM地形海拔，无法进行海拔超高校验';
+                    RAISE EXCEPTION USING MESSAGE = '遥测点缺少有效DEM地形海拔，无法进行海拔超高校验';
                 END IF;
                 v_height_limit := v_height_limit + v_ground_elevation::numeric;
             ELSE
                 IF v_dock_ground_height IS NULL OR v_dock_ground_height < 0
                    OR v_dock_ground_height::text IN ('NaN', 'Infinity', '-Infinity') THEN
-                    RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '相对高度超高校验需要非负有限的机库距地高度';
+                    RAISE EXCEPTION USING MESSAGE = '相对高度超高校验需要非负有限的机库距地高度';
                 END IF;
                 -- 按业务约定忽略航点与机库的地形高差：相对限高=距地限高-机库距地高度。
                 v_height_limit := v_height_limit - v_dock_ground_height::numeric;
@@ -2119,9 +2119,9 @@ BEGIN
         v_violation_count = 0, to_jsonb(v_active_rule),
         jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);
 EXCEPTION
-    -- 参数显式校验错误，以及数值、时间、JSON等数据转换异常，统一返回400。
+    -- 参数显式校验错误、函数内部参数异常，以及数值、时间、JSON等数据转换异常，统一返回400。
     -- 失败时[1,1,1]仅为占位，调用方须先检查code，不能把失败结果视为正常或恢复。
-    WHEN data_exception THEN
+    WHEN data_exception OR raise_exception THEN
         PERFORM public.gis_write_error_log(400, 'gis_uav_flight_deviation_check', SQLERRM::text);
         RETURN QUERY SELECT 400, SQLERRM::text, false, '[1,1,1]'::jsonb,
             jsonb_build_object('project_id', v_project, 'task_id', v_task_id, 'telemetry', p_telemetry);

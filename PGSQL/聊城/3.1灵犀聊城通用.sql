@@ -21,7 +21,7 @@
 -- 注意事项：
 --   1. 本函数生成完整航线，供gis_uav_flight_deviation_check使用；不单独返回偏航或空域校验结果。
 --   2. 两个分支均按业务约定忽略航点与机库之间的地形高差，不查询DEM；输出仅相差统一的机库起飞点海拔偏移。
---   3. 输入参数或航线连续性无效时抛出SQLSTATE 22023异常，不返回code/msg结果行。
+--   3. 输入参数或航线连续性无效时抛出参数校验异常，不返回code/msg结果行。
 -- =============================================================================
 
 -- =============================================================================
@@ -57,7 +57,7 @@ SELECT public.gis_drop_function('public.gis_uav_flight_deviation_line');
 --   1. 垂直爬升：机库 → 机库上方爬升点（首航点与安全点高度的较大值） → 必要时增加首航点上方同高度点 → 换算后的规划航线 → 末航点处返航高度点 → 机库上方返航点 → 机库。
 --   2. 倾斜爬升：机库 → 机库上方安全起飞点 → 换算后的规划航线 → 末航点处返航高度点 → 机库上方返航点 → 机库。
 -- 异常结果说明：
---   1. 参数或航线连续性无效时抛出SQLSTATE 22023，并说明具体错误。
+--   1. 参数或航线连续性无效时抛出参数校验异常，并说明具体错误。
 --   2. 由gis_uav_flight_deviation_check调用时，上述异常转换为code=400、ischeck=false的校验结果。
 -- 注意事项：
 --   1. 输出允许负Z；所有Z统一表示所选高度基准，XY仍为WGS84经纬度，高度单位均为米。
@@ -96,33 +96,33 @@ BEGIN
     -- 一、机库所在地面位置须有有效经纬度和地面海拔Z；即使输出相对高度，也先校验完整的地面三维位置。
     IF p_uav_location IS NULL OR ST_IsEmpty(p_uav_location)
        OR GeometryType(p_uav_location) <> 'POINT' THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '机库位置必须为非空的WGS84三维点';
+        RAISE EXCEPTION USING MESSAGE = '机库位置必须为非空的WGS84三维点';
     END IF;
     IF ST_SRID(p_uav_location) NOT IN (0, 4326)
        OR NOT (ST_X(p_uav_location) BETWEEN -180 AND 180)
        OR NOT (ST_Y(p_uav_location) BETWEEN -90 AND 90)
        OR ST_Z(p_uav_location) IS NULL
        OR ST_Z(p_uav_location)::text IN ('NaN', 'Infinity', '-Infinity') THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '机库位置须使用WGS84经纬度并包含有限的地面海拔高度';
+        RAISE EXCEPTION USING MESSAGE = '机库位置须使用WGS84经纬度并包含有限的地面海拔高度';
     END IF;
     -- 这三个输入高度均要求非负有限；换算后的航点Z则可以为负，两者校验范围不同。
     IF EXISTS (
         SELECT 1 FROM (VALUES (p_ground_height), (p_safe_height), (p_return_height)) h(value)
         WHERE h.value IS NULL OR h.value < 0 OR h.value::text IN ('NaN', 'Infinity', '-Infinity')
     ) THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '机库距地高度、安全起飞高度及返航高度必须为非负有限值（米）';
+        RAISE EXCEPTION USING MESSAGE = '机库距地高度、安全起飞高度及返航高度必须为非负有限值（米）';
     END IF;
     IF p_flight_mode IS NULL OR p_flight_mode NOT IN (1, 2) THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '航飞模式必须为1（垂直爬升）或2（倾斜爬升）';
+        RAISE EXCEPTION USING MESSAGE = '航飞模式必须为1（垂直爬升）或2（倾斜爬升）';
     END IF;
     IF p_is_altitude IS NULL THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '航线高度类型不能为空：false为相对机库高度，true为海拔高度';
+        RAISE EXCEPTION USING MESSAGE = '航线高度类型不能为空：false为相对机库高度，true为海拔高度';
     END IF;
     -- 二、原航线须为有效三维线，原Z表示距地高度，不能用海拔或相对机库高度直接传入。
     IF p_route IS NULL OR ST_IsEmpty(p_route)
        OR GeometryType(p_route) NOT IN ('LINESTRING', 'MULTILINESTRING')
        OR NOT ST_IsValid(p_route) THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规划航线必须为有效且非空的三维LineString或MultiLineString';
+        RAISE EXCEPTION USING MESSAGE = '规划航线必须为有效且非空的三维LineString或MultiLineString';
     END IF;
     IF ST_SRID(p_route) NOT IN (0, 4326) OR EXISTS (
         SELECT 1 FROM ST_DumpPoints(p_route) d
@@ -131,21 +131,21 @@ BEGIN
            OR ST_Z(d.geom) IS NULL OR ST_Z(d.geom) < 0
            OR ST_Z(d.geom)::text IN ('NaN', 'Infinity', '-Infinity')
     ) THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '规划航点须使用WGS84经纬度并包含非负有限的相对地面高度';
+        RAISE EXCEPTION USING MESSAGE = '规划航点须使用WGS84经纬度并包含非负有限的相对地面高度';
     END IF;
     -- 前面已限制SRID为0或4326；此处统一标记并保留XYZ，不执行经纬度坐标变换。
     v_route := ST_SetSRID(ST_Force3DZ(p_route), 4326);
     -- 多段航线不能凭空补线，且不能用ST_LineMerge改变原有航段的方向和顺序。
     FOR v_part IN SELECT d.geom FROM ST_Dump(v_route) d ORDER BY d.path LOOP
         IF ST_IsEmpty(v_part.geom) THEN
-            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '多段规划航线不能包含空航段';
+            RAISE EXCEPTION USING MESSAGE = '多段规划航线不能包含空航段';
         END IF;
         IF v_previous_end IS NOT NULL AND (
             ST_X(v_previous_end) <> ST_X(ST_StartPoint(v_part.geom))
             OR ST_Y(v_previous_end) <> ST_Y(ST_StartPoint(v_part.geom))
             OR ST_Z(v_previous_end) <> ST_Z(ST_StartPoint(v_part.geom))
         ) THEN
-            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '多段规划航线必须按飞行顺序在三维空间首尾衔接';
+            RAISE EXCEPTION USING MESSAGE = '多段规划航线必须按飞行顺序在三维空间首尾衔接';
         END IF;
         v_previous_end := ST_EndPoint(v_part.geom);
     END LOOP;
