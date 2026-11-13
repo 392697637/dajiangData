@@ -30,8 +30,8 @@ DATABASE_CONFIG = {
     # "host": os.getenv("DB_HOST", "192.168.110.6"),
     # "port": int(os.getenv("DB_PORT", "5432")),
     "host": os.getenv("DB_HOST", "123.52.43.165"),
-    "port": int(os.getenv("DB_PORT", "15432")),
-    "database": os.getenv("DB_NAME", "ktd_lx_2026gis"),
+    "port": int(os.getenv("DB_PORT", "15433")),
+    "database": os.getenv("DB_NAME", "wrj_ky"),
     "user": os.getenv("DB_USER", "zhuoyi"),
     "password": os.getenv("DB_PASSWORD", "Ktd@postSQL@2026!@#"),
 }
