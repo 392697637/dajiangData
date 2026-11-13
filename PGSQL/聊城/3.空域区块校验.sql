@@ -1683,9 +1683,15 @@ ALTER TABLE public.bo_flight_job
     ADD COLUMN IF NOT EXISTS return_height double precision,
     ADD COLUMN IF NOT EXISTS flight_mode smallint DEFAULT 1; -- 航飞模式默认1，即直升模式（垂直爬升）
 
+COMMENT ON COLUMN public.bo_flight_job.uav_location IS '机库所在地面位置：WGS84经纬度、地面海拔（米）';
+COMMENT ON COLUMN public.bo_flight_job.ground_height IS '机库距地高度（米），默认0';
+COMMENT ON COLUMN public.bo_flight_job.safe_height IS '安全起飞高度，相对机库（米）';
+COMMENT ON COLUMN public.bo_flight_job.return_height IS '返航高度，相对机库（米）';
+COMMENT ON COLUMN public.bo_flight_job.flight_mode IS '航飞模式：1直升（默认），2倾斜爬升';
+
 ALTER TABLE public.bo_flight_job -- 兼容已存在flight_mode字段的任务表
     ALTER COLUMN flight_mode SET DEFAULT 1; -- 默认直升模式：1垂直爬升，2倾斜爬升
-
+    
 -- SELECT * -- 返回查询状态及地面海拔elevation，单位：米
 -- FROM public.gis_dem_value_at_point(
 --     ST_SetSRID(ST_MakePoint(113.474638, 34.813974), 4326) -- 机库经纬度
@@ -1700,12 +1706,6 @@ SET uav_location = ST_SetSRID(ST_MakePoint(113.474638, 34.813974, 93), 4326), --
     flight_mode = 1 -- 航飞模式：1直升模式（垂直爬升，默认），2倾斜爬升
 WHERE out_id = '3ebd184710f4406ead42fb418c79801f' -- 按平台任务ID匹配
   AND del_flag = false; -- 仅更新未删除的任务
-
-COMMENT ON COLUMN public.bo_flight_job.uav_location IS '机库所在地面位置，WGS84三维点（经度、纬度、地面海拔高度），不含机库距地高度，SRID=4326，高度单位：米';
-COMMENT ON COLUMN public.bo_flight_job.ground_height IS '机库相对地面高度，单位：米，默认0';
-COMMENT ON COLUMN public.bo_flight_job.safe_height IS '安全起飞高度，相对起飞点（机库）的高度，单位：米；垂直爬升时起飞高度取安全点与首航点高度的较大值，安全点更高时平飞至首航点上方再垂直下降；倾斜爬升时先上升至该高度再飞向首航点';
-COMMENT ON COLUMN public.bo_flight_job.return_height IS '无人机返航高度，相对机库高度，单位：米；在末航点处垂直升降至该高度后平飞到机库上方，再垂直降落至机库';
-COMMENT ON COLUMN public.bo_flight_job.flight_mode IS '航飞模式：默认1，即直升模式；1垂直爬升（先垂直爬升后平飞，安全起飞高度高于首航点时增加垂直下降段）；2倾斜爬升（爬升至安全起飞高度后，再直线飞向航线起始点）';
 
 -- =============================================================================
 -- 函数名称：5.gis_uav_flight_deviation_line
