@@ -1,0 +1,383 @@
+PGSQL 目录与函数索引
+整理日期：2026-11-13
+
+用途：开发前先按功能或函数名查找已有实现，确认定义位置后复用，避免重复编写。
+范围：PGSQL 下各级目录和文件；SQL 列出当前函数定义，前端演示列出主要入口。
+路径：下文“文件”路径均相对 PGSQL/；函数省略 public. 前缀，具体签名以源文件为准。
+标记：[定义] 创建函数；[调用] 调用已有函数；[建表/数据] 表结构或数据处理；[说明/示例] 文档、样例或前端资源。
+说明：本索引根据当前文件内容整理，不代表数据库中已部署；注释内的备用代码不算当前函数定义。
+
+一、按需求快速查找
+
+1. 删除同名函数及重载：函数/baseFunction/gis_drop_function.sql。
+2. GeoJSON 解析、面环自动闭合：函数/baseFunction/gis_geojson_to_geom.sql。
+3. 数据库统计信息刷新：函数/baseFunction/gis_refresh_all_tables.sql。
+4. 项目围栏创建/查询：函数/2.1电子围栏创建-函数.sql。
+5. 围栏冲突、点/线检测、缓冲区：函数/2.2电子围栏校验-函数..sql。
+6. 三维网格生成与围栏标记：函数/3.1粗三维网格生成.sql、函数/3.2电子围栏打标记.sql。
+7. 单段/多航点 A* 规划：函数/3.3电子围栏线路自动规划.sql。
+8. 建筑生成、建筑障碍与精细规划：函数/4.1建筑自动生成.sql 至 函数/4.3建筑线路规划精细.sql。
+9. POI 查询：函数/5.1POI查询.sql。
+10. DEM 查高程、点线面补 Z、批量更新：函数/6.1DEM.sql；核心为 gis_dem_elevation_base。
+11. DEM 统计、剖面、坡度、净空、等高线：函数/6.2DEM分析函数.sql。
+12. 反制设备规则保存及实时校验：函数/7.反制设备.sql。
+13. 点在面内/高度范围判断：函数/9.1校验.sql。
+14. 飞行审核、空域与计划时段校验：聊城/1.飞行审核.sql、聊城/3.空域区块校验.sql。
+15. 机库起降与返航完整三维航线：项目产品共用函数/1灵犀聊城通用.sql。
+16. 项目空间数据批量初始化：数据迁移/gis_project_data.sql。
+17. 迁移后空间数据质量校验：数据迁移/11校验空间数据.sql。
+18. 接口参数及调用样例：对接/；聊城空域接口见 聊城/空域接口.sql。
+
+二、根目录文件
+
+文件：目录与函数索引.txt
+  [说明/示例] 本文件，记录目录、文件、函数位置和复用提示。
+
+文件：1.md
+  [说明/示例] 飞行高度概念笔记，介绍海拔高度、相对起飞点高度、离地高度及气压高度等；无函数定义。
+
+文件：gisbase.sql
+  [说明/示例] Point、LineString、Polygon、MultiPoint、MultiLineString、MultiPolygon 的三维 GeoJSON Feature 示例；无函数定义。
+
+文件：import_today_dem.bat
+  [建表/数据] Windows DEM 导入脚本，查找指定目录的 TIF，使用 raster2pgsql/psql 导入栅格表；不是数据库函数。
+
+文件：禁飞区,sql
+  [建表/数据] 创建 bo_no_fly_zone，按北京中心点和 300000 米半径生成一条近似圆形禁飞区数据；无自定义函数。
+
+文件：账号密码.txt
+  [说明/示例] 数据库连接与账号信息记录；无函数定义，本索引不摘录连接凭据。
+
+三、函数目录（通用 GIS 业务实现）
+
+目录：函数/baseFunction/
+  多个业务脚本共用的基础函数，优先查找复用；先加载 gis_drop_function.sql。
+
+文件：函数/baseFunction/gis_drop_function.sql
+  [定义] gis_drop_function —— 按名称删除函数及全部同名重载，支持 schema.function_name。
+
+文件：函数/baseFunction/gis_geojson_to_geom.sql
+  [定义] gis_geojson_to_geom —— 将 Geometry、Feature、FeatureCollection 转为 geometry，自动补闭合 Polygon/MultiPolygon 面环。
+
+文件：函数/baseFunction/gis_refresh_all_tables.sql
+  [定义] gis_refresh_all_tables —— 对所有用户表执行 ANALYZE，返回处理表数。
+  文件末尾包含实际调用。
+
+文件：函数/baseFunction/README.md
+  [说明/示例] 基础函数加载顺序、依赖和使用约定；业务脚本通过调用复用公共函数。
+
+目录：函数/baseTable/
+  公共基础表和序列。
+
+文件：函数/baseTable/gis_error_log.sql
+  [建表/数据] 创建相关 ID 序列，并重建 gis_error_log 错误日志表；无函数定义。
+
+文件：函数/0日常.sql
+  [建表/数据] 备份 bo_ground_ele、将 geom 转为 GeometryZ、刷新空间字段元数据；无函数定义。
+
+文件：函数/1.表信息.sql
+  [建表/数据] 网格、围栏、建筑、地形、倾斜摄影、DEM、DOM、航线结果等表结构和字段字典；无函数定义。
+  规划相关模板表与 block_mask/is_flyable 字段约定从本文件查找。
+
+文件：函数/2.1电子围栏创建-函数.sql
+  [定义] gis_electric_fence_project —— 创建项目专属围栏表，导入与项目范围相交的禁飞区、试飞区数据。
+  [定义] gis_get_electric_fence_project —— 根据项目 ID、围栏类型读取项目围栏数据。
+
+文件：函数/2.2电子围栏校验-函数..sql
+  [定义] gis_check_electric_fence —— 校验围栏新增/编辑时的空间冲突和类型互斥规则。
+  [定义] gis_electric_fence_check_point —— 判断点/多点是否命中启用中的原始围栏，并结合高度判断。
+  [定义] gis_electric_fence_check_line —— 判断航线是否穿越、接触原始围栏，并结合高度过滤。
+  [定义] gis_electric_fence_buffer —— 生成围栏缓冲面、立体几何及可选 GeoJSON。
+  [定义] gis_electric_fence_check_point_buffer —— 判断航点是否命中围栏缓冲区，支持项目 ID。
+  [定义] gis_electric_fence_check_line_buffer —— 判断航线与围栏缓冲区的冲突。
+  重载说明：gis_electric_fence_buffer、gis_electric_fence_check_line_buffer 各有公共表版和带项目 ID 版；属于不同签名，复用前核对参数。
+
+文件：函数/3.1粗三维网格生成.sql
+  [定义] gis_generate_3d_grid —— 按项目范围、高度区间和分辨率生成三维网格节点表。
+
+文件：函数/3.2电子围栏打标记.sql
+  [定义] gis_mark_electric_fence —— 将公共/项目围栏占用范围标记到网格，更新阻塞位与可飞状态。
+  [定义] gis_refresh_electric_fence —— 全量或按影响范围刷新围栏网格标记。
+  [定义] gis_refresh_electric_fence_add —— 新增围栏后的局部刷新入口。
+  [定义] gis_refresh_electric_fence_delete —— 删除围栏后的局部刷新入口。
+  [定义] gis_refresh_electric_fence_edit —— 根据旧、新范围刷新编辑围栏影响的网格。
+
+文件：函数/3.3电子围栏线路自动规划.sql
+  [定义] gis_linestring_length_m —— 计算航线近似三维长度，单位米。
+  [定义] gis_linestring_remove_duplicate_points —— 删除航线中的连续重复点。
+  [定义] gis_flight_point_in_fence —— 判断航点是否落入禁飞区或管控区。
+  [定义] gis_flight_line_intersects_fence —— 判断线段是否穿越禁飞区或管控区。
+  [定义] gis_astar_3d_flight —— 单段三维 A* 寻路，避开不可飞网格和围栏穿越边。
+  [定义] gis_astar_3d_flight_plan —— 对外单段规划入口，封装 A*、参数处理和结果组装。
+  [定义] gis_flight_paths_plan —— 按多个航点逐段规划，汇总完整航线。
+  备用实现：文件末尾另有整体注释的 gis_astar_3d_flight，仅保存原始起终点、不执行规划；不属于当前生效定义。
+
+文件：函数/4.1建筑自动生成.sql
+  [定义] gis_generate_building_3d —— 根据项目建筑二维面和高度生成三维建筑体块表。
+  [定义] exec_shell_cmd_capture —— 在数据库服务器执行系统命令，捕获输出并返回状态。
+  [定义] gis_generate_3dtiles —— 将项目建筑数据转换为供三维地图加载的 3DTiles 文件。
+
+文件：函数/4.2建筑标记.sql
+  [定义] gis_mark_buildings —— 将建筑占用范围标记到三维网格，形成建筑障碍。
+
+文件：函数/4.3建筑线路规划精细.sql
+  [定义] gis_generate_corridor_fine_grid —— 沿粗规划航线生成走廊内的精细三维网格。
+  [定义] gis_get_project_fine_grid —— 查询项目精细网格，供展示和排查。
+  [定义] gis_mark_electric_fence_on_grid —— 给指定精细网格标记围栏障碍。
+  [定义] gis_mark_buildings_on_grid —— 给指定精细网格标记建筑障碍。
+  [定义] gis_astar_3d_flight_plan_on_grid —— 在指定精细网格执行三维 A* 规划。
+  [定义] gis_astar_3d_flight_plan_build —— 串联粗规划、走廊建网格、障碍标记与精细规划，生成建筑避障航线。
+
+文件：函数/5.1POI查询.sql
+  [定义] gis_query_poi —— 按名称关键词、项目范围或指定范围查询 POI。
+
+文件：函数/6.1SQL.TXT
+  [说明/示例] PostGIS/Raster 扩展启用、raster2pgsql 导入命令和栅格处理 SQL 笔记；无自定义函数定义。
+
+文件：函数/6.1DEM.sql
+  [定义] gis_dem_validate —— 校验 jc_sheng.gis_dem_table 配置的省级 DEM 表、字段、SRID 和瓦片。
+  [定义] gis_dem_elevation_base —— DEM 补高程核心：为点、线、面、多几何及支持的集合顶点写入地面高程 Z。
+  [定义] gis_dem_parse_geometry_text —— 将 WKT、EWKT、GeoJSON 或支持的坐标数组文本解析为空间几何。
+  [定义] gis_build_feature_geojson —— 将 geometry 包装为 GeoJSON Feature。
+  [定义] gis_dem_elevation_point —— 点/多点 geometry 补高程入口。
+  [定义] gis_dem_elevation_line —— 线/多线 geometry 顶点补高程入口。
+  [定义] gis_dem_elevation_polygon —— 面/多面 geometry 顶点补高程入口。
+  [定义] gis_dem_elevation_geometry —— 根据 geometry 类型分发到点、线、面入口。
+  [定义] gis_dem_elevation_text_point —— 点/多点文本补高程入口。
+  [定义] gis_dem_elevation_text_line —— 线/多线文本补高程入口。
+  [定义] gis_dem_elevation_text_polygon —— 面/多面文本补高程入口。
+  [定义] gis_dem_elevation_text —— 文本输入统一补高程入口。
+  [定义] gis_dem_update_table_z0 —— 按表名和几何列名，为符合处理条件的数据补 DEM 高程。
+  [定义] gis_dem_reset_table_z0 —— 按表名和几何列名，将几何高程重置为 0。
+  核心说明：gis_dem_elevation_base 返回 geometry，已有 Z 会被 DEM 替换；未配置 DEM 或未命中像元时对应 Z 为 0。
+
+文件：函数/6.2DEM分析函数.sql
+  [定义] gis_dem_resolve_table —— 解析 DEM 分析应读取的栅格表。
+  [定义] gis_dem_value_at_point —— 查询单点地面高程值。
+  [定义] gis_dem_extent —— 查询 DEM 覆盖范围、SRID、瓦片数量。
+  [定义] gis_dem_stats_by_polygon —— 统计指定面范围内的高程分布。
+  [定义] gis_dem_hypsometric_by_polygon —— 按高程间隔统计像元数量。
+  [定义] gis_dem_minmax_points_by_polygon —— 查询区域最低点、最高点的位置和高程。
+  [定义] gis_dem_relative_height_by_polygon —— 计算区域最高与最低高程之差。
+  [定义] gis_dem_terrain_relief_by_grid —— 将区域切成网格，统计各网格地形起伏。
+  [定义] gis_dem_elevation_risk_by_polygon —— 按区域高差评估地形起伏风险。
+  [定义] gis_dem_extract_points_by_polygon —— 提取区域内栅格像元中心点及高程。
+  [定义] gis_dem_sample_grid_by_polygon —— 生成区域规则采样点并查询高程。
+  [定义] gis_dem_profile_by_line —— 沿线按距离采样，生成高程剖面。
+  [定义] gis_dem_profile_stats_by_line —— 汇总沿线高程剖面统计。
+  [定义] gis_dem_route_climb_by_line —— 统计路线距离、坡度、累计爬升和下降。
+  [定义] gis_dem_cross_section_geojson —— 将沿线高程剖面输出为 JSON 数组。
+  [定义] gis_dem_slope_aspect_at_point —— 近似计算点位坡度、坡度百分比和坡向。
+  [定义] gis_dem_slope_risk_at_point —— 按点位坡度评估风险。
+  [定义] gis_dem_viewshed_prepare_point —— 准备通视分析观察点参数；不直接完成通视分析。
+  [定义] gis_dem_obstacle_clearance_by_line —— 沿带 Z 航线采样，计算相对 DEM 地面的净空。
+  [定义] gis_dem_low_clearance_segments —— 识别航线中低于安全离地高度的采样点。
+  [定义] gis_dem_generate_contour_table —— 使用 ST_Contour 生成等高线矢量表。
+  [定义] gis_dem_water_flow_prepare —— 输出水文分析需要的 DEM 范围、分辨率等基础参数；不直接计算水流。
+  [定义] gis_dem_point_with_elevation —— 点/多点补高程，封装 6.1 核心函数。
+  [定义] gis_dem_line_with_elevation —— 线/多线补高程，封装 6.1 核心函数。
+  [定义] gis_dem_polygon_with_elevation —— 面/多面补高程，封装 6.1 核心函数。
+  [定义] gis_dem_geom_with_elevation —— 按几何类型统一补高程，封装 6.1 核心函数。
+  复用说明：*_with_elevation 与 6.1 的补高程入口使用同一核心，返回结构不同，按现有调用需求选择。
+
+文件：函数/6.3 dem等高线.sql
+  [建表/数据] 从 gis_dem_henan 直接生成 100 米、50 米、10 米等高线表并建立相关索引；无自定义函数。
+  [调用] 使用 PostGIS Raster 能力；需要通用可传参入口时查 gis_dem_generate_contour_table。
+
+文件：函数/7.反制设备.sql
+  [定义] gis_counter_device —— 根据项目、设备点位和半径/高度参数保存或更新反制设备规则。
+  [定义] gis_counter_device_check —— 根据设备规则校验实时点位是否命中反制范围。
+
+文件：函数/9.1校验.sql
+  [定义] gis_check_point_in_polygon —— 判断一个或多个点是否位于给定面及立体高度范围内。
+
+文件：函数/9.2其他.sql
+  [建表/数据] 网格表清理、连接监控/清理、表日志模式转换、空间表字段修正等维护 SQL；无自定义函数。
+
+文件：函数/9.3清空表日志.sql
+  [定义] gis_cleanup_track_log_tables —— 按保留天数清理轨迹表和日志表历史数据。
+
+四、对接目录（已有函数的调用示例）
+
+目录：对接/
+  按文件名区分已对接、在对接、待对接示例；这里不重复定义业务函数。
+
+文件：对接/1.已对接接口.sql
+  [调用] gis_generate_3d_grid —— 项目三维网格初始化。
+  [调用] gis_electric_fence_project —— 项目围栏初始化。
+  [调用] gis_mark_electric_fence —— 网格围栏打标。
+  [调用] gis_check_electric_fence —— 围栏新增/编辑冲突检查。
+  [调用] gis_refresh_electric_fence、gis_refresh_electric_fence_add、gis_refresh_electric_fence_delete、gis_refresh_electric_fence_edit —— 全量或增删改局部刷新。
+  [调用] gis_astar_3d_flight_plan —— 单段航线自动规划。
+  [调用] gis_electric_fence_check_point、gis_electric_fence_check_line —— 原始围栏点/线检查。
+  定义位置见“函数目录”同名条目。
+
+文件：对接/2.在对接接口.sql
+  [调用] gis_dem_validate、gis_dem_elevation_base —— DEM 配置检查及核心高程处理。
+  [调用] gis_dem_elevation_point、gis_dem_elevation_line、gis_dem_elevation_polygon、gis_dem_elevation_geometry —— geometry 补高程。
+  [调用] gis_dem_elevation_text_point、gis_dem_elevation_text_line、gis_dem_elevation_text_polygon、gis_dem_elevation_text —— 文本补高程。
+  [调用] gis_dem_update_table_z0、gis_dem_reset_table_z0 —— 表数据补高程/重置。
+  定义位置：函数/6.1DEM.sql；此处部分文字仍按旧版描述，返回值以定义为准。
+
+文件：对接/3.待对接接口.sql
+  [调用] gis_electric_fence_buffer —— 生成项目/公共围栏缓冲区。
+  [调用] gis_electric_fence_check_point_buffer —— 航点缓冲区检查。
+  [调用] gis_electric_fence_check_line_buffer —— 航线缓冲区检查。
+  定义位置：函数/2.2电子围栏校验-函数..sql。
+
+五、数据迁移目录
+
+目录：数据迁移/
+  建库、建表、历史数据规范化、迁移检查和项目空间数据初始化。
+
+文件：数据迁移/1.建库.sql
+  [建表/数据] 创建业务数据库、安装过程语言/空间/时序扩展，说明公共表与基础函数依赖。
+  gis_drop_function、gis_refresh_all_tables 的定义已集中在 函数/baseFunction/，本文件无函数定义。
+
+文件：数据迁移/2建表.sql
+  [建表/数据] 重建 bo_electric_fence、bo_ground_ele 等迁移目标表；无函数定义。
+
+文件：数据迁移/数据迁移20260608.sql
+  [定义] lx_gis_base_common_columns —— 统一创建/更新时间、删除标记等公共字段。
+  [定义] lx_gis_string_columns_varchar —— 将 char 字段规范为 varchar，并清理字符串两端空格。
+  [定义] gis_geojson_to_closed_geom —— 解析迁移 GeoJSON 并补闭合面环。
+  [定义] update_geom_columns —— 清理旧 geom/lng_lat_alt 字段，将 geom_3d 改名为 geom。
+  [建表/数据] 还包含空间字段补齐、数据更新及无效数据清理 SQL。
+  复用提示：GeoJSON 解析与公共 gis_geojson_to_geom 用途相近，新增业务优先查公共实现，迁移脚本按自身字段流程使用。
+
+文件：数据迁移/11校验空间数据.sql
+  [定义] gis_validate_write_error —— 将空间校验错误写入 gis_error_table。
+  [定义] gis_validate_table —— 自动识别主键/空间字段，检查 GeoJSON 或 geom 的类型、有效性及面环等问题。
+  [调用] gis_geojson_to_geom —— 复用 baseFunction 中的解析函数；文件头提到它不代表本文件有定义。
+
+文件：数据迁移/gis_project_data.sql
+  [定义] gis_project_data —— 遍历全部或指定项目，依次创建网格、项目围栏、围栏标记，并返回执行信息。
+  [定义] gis_project_data_batch —— 按 worker_no/worker_count 分片初始化项目数据，可在多个数据库连接分别调用。
+  [调用] gis_generate_3d_grid、gis_electric_fence_project、gis_mark_electric_fence；这些函数仍在各自业务文件中定义。
+
+六、聊城目录（项目空域和飞行审核）
+
+目录：聊城/
+  飞行审核、空域区块、用空计划、实时偏航校验、边界及建筑数据处理。
+
+文件：聊城/1.飞行审核.sql
+  [定义] gis_write_error_log —— 统一写入 gis_error_log，供审核及其他 GIS 函数复用。
+  [定义] gis_flight_route_nofly —— 判断航线是否经过禁飞区。
+  [定义] gis_flight_route_zone_check —— 按围栏类型统计航线命中区域，供审核函数内部调用。
+  [定义] gis_flight_route_control —— 判断航线是否经过管控区。
+  [定义] gis_flight_route_circle —— 校验航线是否位于点加半径定义的圆形计划空域。
+  [定义] gis_flight_route_polygon —— 校验航线是否位于计划面空域。
+  [定义] gis_flight_height_check —— 按当前脚本规则检查航线点是否超过 120 米。
+  [定义] gis_flight_height_plan —— 校验任务航线相对计划航线的高度偏差。
+  [定义] gis_flight_route_deviation —— 校验任务航线相对计划航线的水平偏移。
+
+文件：聊城/2.空域区块.sql
+  [定义] gis_bo_airspace_block_final_geom —— 触发器函数，生成空域区块最终范围、面积和周长。
+  [定义] gis_airspace_plan_part —— 创建计划分区，并补齐启用空域缺失的用空计划。
+  [定义] gis_airspace_plan_demo —— 为启用空域生成模拟用空时间计划。
+  [建表/数据] 还包含空域区块、用空计划相关结构和 trg_airspace_block_geom 触发器。
+
+文件：聊城/3.空域区块校验.sql
+  [定义] gis_flight_route_airspace —— 查询项目航线命中的空域区块 ID。
+  [定义] gis_flight_point_airspace —— 查询项目点位命中的空域区块 ID。
+  [定义] gis_flight_task_airspace —— 综合空域命中、启用状态、计划时段、航线和航点高度判断任务可执行性。
+  [定义] gis_flight_airspace_check —— 检查航点和整条航线是否位于可飞空域，及高度是否满足要求。
+  [定义] gis_uav_flight_deviation_check —— 按任务读取规划和起降参数，对单次遥测做偏航、超高和用空时段校验。
+  [定义] gis_flight_task_route_check —— 检查输入航线与指定任务集合的规划航线是否存在空间冲突。
+  [调用] gis_uav_flight_deviation_line —— 完整起降航线生成函数，定义在 项目产品共用函数/1灵犀聊城通用.sql。
+
+文件：聊城/4.聊城行政区划数据.sql
+  [建表/数据] 聊城市边界 GeoJSON 和 bo_airspace.geom 更新 SQL；无函数定义。
+
+文件：聊城/builddem.sql
+  [建表/数据] 根据 DEM 写入建筑 ground_dem，计算面积，并清理面积、宽度、高度或地面高程异常的建筑；无函数定义。
+
+文件：聊城/空域接口.sql
+  [调用] 空域区块/用空计划查询接口说明、请求与返回字段及后台 SQL。
+  [调用] gis_build_feature_geojson —— 包装空间字段为 Feature；定义在 函数/6.1DEM.sql。
+  本文件无函数定义。
+
+七、项目产品共用函数目录
+
+目录：项目产品共用函数/
+  产品与项目间共用的业务函数，相关项目直接调用同一实现。
+
+文件：项目产品共用函数/1灵犀聊城通用.sql
+  [定义] gis_uav_flight_deviation_line —— 按高度基准、垂直/倾斜爬升模式生成机库起飞、规划航线、返航及降落的完整 LineStringZ。
+  支持相对机库高度或海拔高度输出；该函数按约定换算高度，不查询 DEM。
+  被 聊城/3.空域区块校验.sql 中 gis_uav_flight_deviation_check 调用。
+
+八、bo_project 目录（项目数据快照与空间样例）
+
+目录：bo_project/
+  不同来源/版本的项目表导出和转换结果；以下文件均无自定义函数定义。
+
+文件：bo_project/1.1_bo_project.sql
+  [建表/数据] MySQL bo_project 表结构及项目数据导出。
+
+文件：bo_project/1.1_bo_project-ga.sql
+  [建表/数据] 另一来源的 MySQL bo_project 表结构及数据版本。
+
+文件：bo_project/1.1_bo_project_test.sql
+  [建表/数据] 测试来源的 MySQL bo_project 表结构及数据。
+
+文件：bo_project/1.1_bo_project_test-pg.sql
+  [建表/数据] 测试来源 bo_project 的 PostgreSQL 转换版本。
+
+文件：bo_project/1.2_bo_project_pg.sql
+  [建表/数据] bo_project 的 PostgreSQL/PostGIS 转换版本，含空间字段与导入数据。
+
+文件：bo_project/1.2_bo_project-ga.sql
+  [建表/数据] bo_project 的另一份 PostgreSQL/PostGIS 转换版本。
+
+文件：bo_project/1.c.sql
+  [建表/数据] ktd_sl 来源的 MySQL bo_project 导出。
+
+文件：bo_project/1.c-pg.sql
+  [建表/数据] 1.c.sql 对应的 PostgreSQL 转换版本。
+
+文件：bo_project/youtian.sql
+  [建表/数据] 油田项目 MySQL bo_project 表结构和数据导出。
+
+文件：bo_project/youtian-p.sql
+  [建表/数据] youtian.sql 的 PostgreSQL 转换版本。
+
+文件：bo_project/youtian-p-y.sql
+  [建表/数据] 油田项目 bo_project 的 INSERT 数据脚本。
+
+文件：bo_project/kml.kml
+  [说明/示例] 聊热线路 KML 空间样例数据。
+
+文件：bo_project/shp.sql
+  [说明/示例] 聊热线路 GeoJSON Feature 样例；虽以 .sql 命名，内容是空间 JSON 数据。
+
+九、说明目录
+
+目录：说明/
+  操作说明和历史文档；函数是否存在、当前路径和参数以 SQL 定义为准。
+
+文件：说明/md_PgSql.md
+  [说明/示例] 电子围栏、缓冲校验及三维规划概览；部分脚本路径沿用旧目录结构。
+
+文件：说明/6.DEM.md
+  [说明/示例] GeoTIFF 导入、PostGIS Raster 配置、DEM 高程与地形分析使用说明。
+
+文件：说明/7.反制设备.md
+  [说明/示例] 反制设备表和接口设计说明。
+  文档提到 gis_counter_device_project、gis_get_counter_device_project、gis_counter_device_buffer、gis_counter_device_check_point_buffer；当前目录未找到这些名称的函数定义。
+  已有实现请先查 函数/7.反制设备.sql 的 gis_counter_device、gis_counter_device_check。
+
+文件：说明/md_DataSync.md
+  [说明/示例] 数据库表、函数、视图同步的配置、命令和处理流程；本文件不定义数据库函数。
+
+文件：说明/md_Poi.md
+  [说明/示例] 高德/天地图 POI 采集的命令、数据源、类型及输出说明；SQL 查询实现见 函数/5.1POI查询.sql。
+
+十、后续复用与维护约定
+
+1. 开始编写前，先在本文件搜索关键词，再查看对应 SQL 的函数签名、依赖和返回值。
+2. 公共工具优先复用 函数/baseFunction/；多个业务脚本仅调用公共函数，避免复制定义。
+3. DEM 补高程优先复用 gis_dem_elevation_base 及现有封装，注意返回 geometry 或结果表的区别。
+4. 对接文件属于调用示例，业务函数定义仍维护在对应实现文件；不要因为示例中出现函数名就另建一份。
+5. 同名重载先核对参数类型和数量；注释内的备用实现与文档中的历史名称不当作已实现接口。
+6. 新增、移动、改名或删除文件/函数时，同步更新本索引的路径、函数名和一句话作用。
