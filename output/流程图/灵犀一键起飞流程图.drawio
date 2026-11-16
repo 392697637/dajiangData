@@ -147,22 +147,22 @@
         <mxCell id="output" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#EAF7F2;strokeColor=#B5DCCE;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;container=1;collapsible=0;recursiveResize=0;" vertex="1" parent="1">
           <mxGeometry x="120" y="1790" width="1240" height="190" as="geometry" />
         </mxCell>
-        <mxCell id="out_plan" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:25px;color:#28745D;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;plan_plan_conflicts&lt;/div&gt;&lt;div style=&quot;font-size:20px;color:#4E7F70;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;计划与计划；无冲突返回 []&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#C4E2D7;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="output">
+        <mxCell id="out_plan" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:25px;color:#28745D;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;plan_conflicts&lt;/div&gt;&lt;div style=&quot;font-size:20px;color:#4E7F70;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;计划与计划；无冲突返回 []&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#C4E2D7;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="output">
           <mxGeometry x="40.0" y="70.0" width="550" height="75" as="geometry" />
         </mxCell>
-        <mxCell id="out_live" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:25px;color:#28745D;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;plan_realtime_conflicts&lt;/div&gt;&lt;div style=&quot;font-size:20px;color:#4E7F70;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;计划与在飞；无冲突返回 []&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#C4E2D7;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="output">
+        <mxCell id="out_live" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:25px;color:#28745D;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;realtime_conflicts&lt;/div&gt;&lt;div style=&quot;font-size:20px;color:#4E7F70;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;计划与在飞；无冲突返回 []&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#C4E2D7;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="output">
           <mxGeometry x="650.0" y="70.0" width="550" height="75" as="geometry" />
         </mxCell>
         <mxCell id="title" value="灵犀一键起飞 · 航线冲突检测流程" vertex="1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=43;fontColor=#0F172A;fontStyle=1;">
           <mxGeometry x="40" y="32" width="1400" height="65" as="geometry" />
         </mxCell>
-        <mxCell id="subtitle" value="按当前 SQL 实现绘制 · gis_uav_one_key_takeoff_check" vertex="1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=22;fontColor=#64748B;fontStyle=0;">
+        <mxCell id="subtitle" value="按当前 SQL 实现绘制 · gis_uav_flight_takeoff_check" vertex="1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=22;fontColor=#64748B;fontStyle=0;">
           <mxGeometry x="40" y="90" width="1400" height="45" as="geometry" />
         </mxCell>
-        <mxCell id="output_title" value="返回两个冲突集合" vertex="1" parent="output" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=29;fontColor=#21664F;fontStyle=1;">
+        <mxCell id="output_title" value="返回校验状态和两个冲突集合" vertex="1" parent="output" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=29;fontColor=#21664F;fontStyle=1;">
           <mxGeometry x="20" y="10" width="1200" height="50" as="geometry" />
         </mxCell>
-        <mxCell id="output_fields" value="每条记录：双方机库 ID + 双方原始航线 + 冲突代表点对" vertex="1" parent="output" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=22;fontColor=#34735D;fontStyle=0;">
+        <mxCell id="output_fields" value="code / msg / ischeck + 双方机库 ID + 原始航线 + 冲突代表点对" vertex="1" parent="output" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=22;fontColor=#34735D;fontStyle=0;">
           <mxGeometry x="20" y="142" width="1200" height="50" as="geometry" />
         </mxCell>
         <mxCell id="note1" value="业务边界：只判断空间冲突，不判断到达时间；在飞剩余航线由调用方提供。" vertex="1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=22;fontColor=#64748B;fontStyle=0;">

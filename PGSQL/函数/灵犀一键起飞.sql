@@ -1,56 +1,106 @@
 -- =============================================================================
--- 函数：public.gis_uav_one_key_takeoff_check
--- 功能：批量检测计划航线之间、计划航线与在飞航线之间的三维空间冲突。
--- 依赖及加载顺序：
---   1. PostGIS >= 3.2（使用ST_DumpSegments；需要PROJ支持）。
---   2. 函数/baseFunction/gis_geojson_to_geom.sql。
---   3. 项目产品共用函数/1灵犀聊城通用.sql中的gis_uav_flight_deviation_line。
---   公共函数的安装依赖见各自文件；本文件只创建业务函数，不读取或修改任务表。
+-- 灵犀一键起飞.sql
+-- 灵犀一键起飞航线冲突校验规则说明
 --
--- 入参：
---   p_plan_routes      jsonb；必填；计划起飞航线数组，空集合传[]，不能为NULL。
---   p_realtime_routes  jsonb；选填；在飞航线数组，默认[]，不能为NULL。
---   p_buffer_radius    double precision；选填；三维安全间距R（米），默认0。
---                      两条航线的中心线最短距离<=R（含边界）判为冲突。
--- 每条计划航线为以下JSON对象：
---   hangar_id       必填；非空字符串或数字；机库ID，结果保留输入的JSON类型。
---   uav_location    必填；GeoJSON PointZ（或Feature），XY为WGS84经纬度，Z为机库所在地面海拔。
---   ground_height   必填；机库相对地面高度（米），地面机库传0。
---   safe_height     必填；相对机库的安全起飞高度（米）。
---   return_height   选填；相对机库的返航高度（米）；省略时采用safe_height。
---   flight_mode     选填；1垂直爬升，2倾斜爬升；省略时为1。
---   route           必填；GeoJSON LineStringZ或按顺序首尾衔接的MultiLineStringZ（也支持Feature）；
---                   原规划航点Z为距地高度（米），与gis_uav_flight_deviation_line入参约定一致。
--- 每条在飞航线支持两种格式：
---   A. 与计划航线同格式：带uav_location等起降参数，调用公共函数生成完整海拔航线。
---   B. 仅有hangar_id和route：route已是海拔高度的在飞/剩余航线，不再补起降段或换算高度；
---      可为不连续的MultiLineStringZ，严格保留各段，不在断开的航段间补线。
---      两种格式以是否提供非null的uav_location区分，不能把距地航线当作格式B传入。
+-- 脚本用途：提供计划航线与计划航线、计划航线与在飞航线的三维空间冲突校验，
+--           返回校验状态、冲突数量、机库ID及双方原始航线和冲突代表点。
+-- 通用约定：
+--   1. 输入航线使用WGS84经纬度（SRID=4326），高度和安全间距单位为米。
+--   2. 计划航线的原始航点Z为相对地面高度；计算航线统一转换为海拔高度。
+--   3. 安全间距R为两条航线中心线允许的最大三维距离，距离<=R（含边界）判为冲突。
+--   4. code表示执行状态：200=校验完成，400=参数或航线数据错误，500=执行异常。
+--   5. ischeck=true表示未发现冲突；发现冲突、参数错误或执行异常时为false。
+--   6. 本函数只判断空间冲突，不判断飞行时间是否重叠；在飞/剩余航线由调用方传入。
 --
--- 返回：jsonb，始终含两个数组（无冲突为[]）：
---   plan_plan_conflicts      计划与计划；按输入顺序只比较i<j，不返回自身及反向重复对。
---   plan_realtime_conflicts  计划与在飞；逐一比较，同机库ID也参与检查。
--- 每条冲突：
---   plan_hangar_id、plan_route         计划机库ID及原来计划航线（保留原始GeoJSON）。
---   conflict_hangar_id、conflict_route 相交机库ID及原来相交航线（保留原始GeoJSON）。
---   intersection_points               冲突航段对的代表点数组，按点对去重；每项包括：
---     plan_point、conflict_point        双方航段的最近点，GeoJSON PointZ，Z统一为海拔米。
---     distance_m                        两点的三维距离（米）。
---   真正相交时两点重合；仅缓冲区相交时保留双方最近点，不虚构中心线交点。
---   连续重叠航段有无限交点，每个命中的航段对返回一组代表点，不枚举重叠区全部点。
+--   （1）计划航线与计划航线冲突
+--   函数：public.gis_uav_flight_takeoff_check
+--   规则：按输入顺序只比较i<j，不比较自身，不返回反向重复对。
+--   返回：plan_conflicts数组。
 --
--- 计算约定：
---   1. 两类带起降参数的航线均调用gis_uav_flight_deviation_line(..., true, flight_mode)，
---      起飞、规划、返航及降落段均参与检查；沿用公共函数忽略航点间地形高差的约定。
---   2. 所有航线投影到以第一条计划的机库为中心的局部AEQD米制坐标系，Z保持海拔米；
---      适用于同一作业区域的局部航线，属于投影下直线航段的距离计算。
---   3. 只判断空间冲突，不判断飞行时间是否重叠；调用方负责筛选在飞/剩余航线。
---   4. 参数或任一航线无效时抛出22023异常，消息包含集合类型及从1开始的下标。
---   5. 为消除投影和三维运算的浮点残差，小于0.0000001米的距离视为0；
---      R小于该值时按此数值容差筛选，防止R=0漏报实际交点。
+--   （2）计划航线与在飞航线冲突
+--   函数：public.gis_uav_flight_takeoff_check
+--   规则：每条计划航线逐一比较每条在飞航线，同机库ID也参与检查。
+--   返回：realtime_conflicts数组。
+--
+-- 依赖说明：
+--   1. PostGIS >= 3.2，使用ST_DumpSegments、ST_3DDWithin、ST_3DShortestLine和PROJ投影。
+--   2. 函数/baseFunction/gis_drop_function.sql：删除同名函数及全部重载。
+--   3. 函数/baseFunction/gis_geojson_to_geom.sql：解析GeoJSON为geometry。
+--   4. 项目产品共用函数/1灵犀聊城通用.sql：
+--      public.gis_uav_flight_deviation_line，构造完整三维起降航线。
+--   5. 本函数不读取或修改任务表，所有计划和在飞航线通过JSON数组传入。
 -- =============================================================================
 
-CREATE OR REPLACE FUNCTION public.gis_uav_one_key_takeoff_check(
+-- =============================================================================
+-- 函数说明
+-- =============================================================================
+-- 函数名称：gis_uav_flight_takeoff_check
+-- 函数功能：批量检测计划航线之间、计划航线与在飞航线之间的三维空间冲突。
+-- 函数描述：
+--   1. 校验两个航线集合和安全间距R。
+--   2. 将计划航线及带机库参数的在飞航线补齐为完整起飞、规划、返航和降落航线。
+--   3. 将所有计算航线转换到同一局部米制坐标系，保留Z为海拔米。
+--   4. 先按整条航线筛选三维距离<=R的航线对，再逐航段提取冲突代表点。
+--   5. 返回计划与计划、计划与在飞两个冲突集合。
+-- 入参说明：
+--   p_plan_routes      jsonb；必填；计划航线数组，空集合传[]，不能为NULL。
+--   p_realtime_routes  jsonb；选填；在飞航线数组，默认[]，不能为NULL。
+--   p_buffer_radius    double precision；选填；三维安全间距R，单位米，默认0。
+-- 计划航线项字段：
+--   hangar_id          必填；非空字符串或数字；机库ID。
+--   uav_location       必填；GeoJSON PointZ或Feature，Z为机库所在地面海拔。
+--   ground_height     必填；机库相对地面高度，单位米，地面机库传0。
+--   safe_height       必填；相对机库的安全起飞高度，单位米。
+--   return_height     选填；相对机库的返航高度，省略时采用safe_height。
+--   flight_mode       选填；1=垂直爬升，2=倾斜爬升，省略时为1。
+--   route              必填；GeoJSON LineStringZ或首尾三维衔接的MultiLineStringZ，原Z为距地高度。
+-- 在飞航线项字段：
+--   A、带uav_location等参数：按计划航线方式调用gis_uav_flight_deviation_line生成完整海拔航线。
+--   B、仅有hangar_id和route：route必须已经是海拔航线，直接作为在飞或剩余航线使用。
+-- 返回说明：
+--   code               integer；200=校验完成，400=参数或航线数据错误，500=执行异常。
+--   msg                text；校验结果或错误原因；发现冲突时包含冲突数量和参与冲突的机库ID。
+--   ischeck            boolean；true=未发现冲突，false=发现冲突或校验失败。
+--   plan_conflicts     jsonb数组；计划与计划冲突，每条只返回一次。
+--   realtime_conflicts jsonb数组；计划与在飞冲突。
+-- 每条冲突记录：
+--   plan_hangar_id、conflict_hangar_id     双方机库ID。
+--   plan_route、conflict_route             双方原始GeoJSON航线，不返回补齐后的计算航线。
+--   intersection_points                    冲突航段对的代表点数组。
+--   plan_point、conflict_point             双方航段最近点，GeoJSON PointZ，Z为海拔米。
+--   distance_m                             双方最近点的三维距离，单位米。
+-- 异常说明：
+--   1. 参数或航线数据错误直接返回code=400，不向调用方抛出内部校验异常。
+--   2. 未预期的数据库或空间计算错误返回code=500。
+-- =============================================================================
+
+-- =============================================================================
+-- 删除函数
+-- =============================================================================
+-- 删除旧入口和同名重载，避免数据库中残留旧定义。
+SELECT public.gis_drop_function('public.gis_uav_one_key_takeoff_check');
+SELECT public.gis_drop_function('public.gis_uav_flight_takeoff_check');
+
+-- =============================================================================
+-- 函数介绍：gis_uav_flight_takeoff_check
+-- 主要作用：统一计划、在飞航线的高度基准并检测三维空间冲突。
+-- 处理步骤：
+--   1. 校验输入集合为JSON数组，校验R为非负有限值。
+--   2. 解析每条航线，保留原始JSON；计划项和带机库参数的在飞项调用完整航线函数。
+--   3. 以第一条计划机库为中心建立局部AEQD投影，XY转换为米，Z保持海拔米。
+--   4. 计划集合为空时直接返回code=200、ischeck=true和两个空数组。
+--   5. 计划与计划只比较i<j；计划与在飞逐一比较。
+--   6. 用ST_3DDWithin按R筛选航线对，再用ST_DumpSegments拆分命中的航线。
+--   7. 用ST_3DShortestLine取得双方最近点，点坐标转回WGS84后按点对去重。
+--   8. 根据冲突数组统计数量，组装msg中的冲突类型数量和机库ID。
+-- 高度约定：
+--   1. gis_uav_flight_deviation_line(..., true, flight_mode)返回海拔基准的完整航线。
+--   2. 机库起飞、规划、返航和降落段均参与冲突判断。
+--   3. 不查询DEM，沿用完整航线函数忽略航点与机库间地形高差的约定。
+--   4. 为消除投影浮点残差，小于0.0000001米的距离按0处理；R小于该值时按该容差筛选。
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.gis_uav_flight_takeoff_check(
     p_plan_routes jsonb,
     p_realtime_routes jsonb DEFAULT '[]'::jsonb,
     p_buffer_radius double precision DEFAULT 0
@@ -71,15 +121,31 @@ DECLARE
     v_plan_count integer;
     v_limit double precision;
     v_result jsonb;
+    v_plan_conflict_count integer := 0;
+    v_realtime_conflict_count integer := 0;
+    v_conflict_hangar_ids text;
+    v_msg text;
 BEGIN
     IF jsonb_typeof(p_plan_routes) IS DISTINCT FROM 'array'
        OR jsonb_typeof(p_realtime_routes) IS DISTINCT FROM 'array' THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '计划航线和在飞航线集合必须为JSON数组，空集合请传[]';
+        RETURN jsonb_build_object(
+            'code', 400,
+            'msg', '计划航线和在飞航线集合必须为JSON数组，空集合请传[]',
+            'ischeck', false,
+            'plan_conflicts', '[]'::jsonb,
+            'realtime_conflicts', '[]'::jsonb
+        );
     END IF;
     -- 避免NaN、Infinity；NULL不能悄悄导致所有冲突漏报。
     IF p_buffer_radius IS NULL OR p_buffer_radius < 0
        OR p_buffer_radius::text IN ('NaN', 'Infinity', '-Infinity') THEN
-        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = '缓冲半径必须为非负有限值（米）';
+        RETURN jsonb_build_object(
+            'code', 400,
+            'msg', '缓冲半径必须为非负有限值（米）',
+            'ischeck', false,
+            'plan_conflicts', '[]'::jsonb,
+            'realtime_conflicts', '[]'::jsonb
+        );
     END IF;
     v_limit := greatest(p_buffer_radius, 0.0000001::double precision);
     v_plan_count := jsonb_array_length(p_plan_routes);
@@ -145,13 +211,24 @@ BEGIN
             v_inputs := array_append(v_inputs, v_data);
             v_routes := array_append(v_routes, v_route);
         EXCEPTION WHEN OTHERS THEN
-            RAISE EXCEPTION USING ERRCODE = '22023',
-                MESSAGE = format('%s航线集合第%s项：%s', v_item.kind, v_item.ord, SQLERRM);
+            RETURN jsonb_build_object(
+                'code', 400,
+                'msg', format('%s航线集合第%s项：%s', v_item.kind, v_item.ord, SQLERRM),
+                'ischeck', false,
+                'plan_conflicts', '[]'::jsonb,
+                'realtime_conflicts', '[]'::jsonb
+            );
         END;
     END LOOP;
 
     IF v_plan_count = 0 THEN
-        RETURN jsonb_build_object('plan_plan_conflicts', '[]'::jsonb, 'plan_realtime_conflicts', '[]'::jsonb);
+        RETURN jsonb_build_object(
+            'code', 200,
+            'msg', '校验完成：未发现冲突',
+            'ischeck', true,
+            'plan_conflicts', '[]'::jsonb,
+            'realtime_conflicts', '[]'::jsonb
+        );
     END IF;
     v_projection := format(
         '+proj=aeqd +lat_0=%s +lon_0=%s +datum=WGS84 +units=m +no_defs',
@@ -165,8 +242,8 @@ BEGIN
         FROM unnest(v_routes) WITH ORDINALITY AS r(geom, ord)
     ), pairs AS MATERIALIZED (
         SELECT a.ord AS plan_ord, b.ord AS conflict_ord,
-               CASE WHEN b.ord <= v_plan_count THEN 'plan_plan_conflicts'
-                    ELSE 'plan_realtime_conflicts' END AS kind,
+               CASE WHEN b.ord <= v_plan_count THEN 'plan_conflicts'
+                    ELSE 'realtime_conflicts' END AS kind,
                a.original AS plan_input, b.original AS conflict_input
         FROM routes a JOIN routes b ON a.ord < b.ord
         WHERE a.ord <= v_plan_count AND ST_3DDWithin(a.geom, b.geom, v_limit)
@@ -200,25 +277,60 @@ BEGIN
         ) points
     )
     SELECT jsonb_build_object(
-        'plan_plan_conflicts', COALESCE(
-            jsonb_agg(c.item ORDER BY c.plan_ord, c.conflict_ord) FILTER (WHERE c.kind = 'plan_plan_conflicts'), '[]'::jsonb),
-        'plan_realtime_conflicts', COALESCE(
-            jsonb_agg(c.item ORDER BY c.plan_ord, c.conflict_ord) FILTER (WHERE c.kind = 'plan_realtime_conflicts'), '[]'::jsonb)
+        'plan_conflicts', COALESCE(
+            jsonb_agg(c.item ORDER BY c.plan_ord, c.conflict_ord) FILTER (WHERE c.kind = 'plan_conflicts'), '[]'::jsonb),
+        'realtime_conflicts', COALESCE(
+            jsonb_agg(c.item ORDER BY c.plan_ord, c.conflict_ord) FILTER (WHERE c.kind = 'realtime_conflicts'), '[]'::jsonb)
     ) INTO v_result FROM conflicts c;
-    RETURN v_result;
+    v_plan_conflict_count := jsonb_array_length(v_result->'plan_conflicts');
+    v_realtime_conflict_count := jsonb_array_length(v_result->'realtime_conflicts');
+
+    IF v_plan_conflict_count + v_realtime_conflict_count = 0 THEN
+        v_msg := '校验完成：未发现冲突';
+        RETURN jsonb_build_object('code', 200, 'msg', v_msg, 'ischeck', true) || v_result;
+    END IF;
+
+    SELECT string_agg(hangar_id, ', ' ORDER BY hangar_id)
+    INTO v_conflict_hangar_ids
+    FROM (
+        SELECT DISTINCT item->>'plan_hangar_id' AS hangar_id
+        FROM jsonb_array_elements((v_result->'plan_conflicts') || (v_result->'realtime_conflicts')) AS e(item)
+        UNION
+        SELECT DISTINCT item->>'conflict_hangar_id' AS hangar_id
+        FROM jsonb_array_elements((v_result->'plan_conflicts') || (v_result->'realtime_conflicts')) AS e(item)
+    ) ids
+    WHERE hangar_id IS NOT NULL AND hangar_id <> '';
+
+    v_msg := format(
+        '校验完成：发现%s条冲突（计划与计划%s条，计划与在飞%s条），机库ID：%s',
+        v_plan_conflict_count + v_realtime_conflict_count,
+        v_plan_conflict_count,
+        v_realtime_conflict_count,
+        COALESCE(v_conflict_hangar_ids, '未提供')
+    );
+    RETURN jsonb_build_object('code', 200, 'msg', v_msg, 'ischeck', false) || v_result;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN jsonb_build_object(
+            'code', 500,
+            'msg', format('执行异常：%s', SQLERRM),
+            'ischeck', false,
+            'plan_conflicts', '[]'::jsonb,
+            'realtime_conflicts', '[]'::jsonb
+        );
 END;
 $$;
 
-COMMENT ON FUNCTION public.gis_uav_one_key_takeoff_check(jsonb, jsonb, double precision)
-IS '一键起飞三维航线冲突检查：调用公共函数补齐起降航线，以中心线三维距离<=R比较计划与计划、计划与在飞，返回原航线及冲突代表点对';
+COMMENT ON FUNCTION public.gis_uav_flight_takeoff_check(jsonb, jsonb, double precision)
+IS '一键起飞三维航线冲突检查：返回code/msg/ischeck及计划与计划、计划与在飞冲突集合，以中心线三维距离<=R判断冲突';
 
 -- =============================================================================
--- 调用示例：计划机库A/B的规划段交叉，并与在飞机库C的海拔航线交叉。
+-- 调用示例
+-- =============================================================================
+-- 计划机库A/B的规划段交叉，并与在飞机库C的海拔航线交叉。
 -- 计划原航点为距地100米，机库所在地面海拔50米，换算后规划段海拔150米。
 -- 缓冲半径R=5米，中心线距离<=5米属于冲突；R=0只检查中心线相交。
--- 示例不自动执行；复制取消注释后调用。
--- =============================================================================
--- SELECT jsonb_pretty(public.gis_uav_one_key_takeoff_check(
+-- SELECT jsonb_pretty(public.gis_uav_flight_takeoff_check(
 --     '[
 --       {
 --         "hangar_id": "A",
@@ -248,11 +360,28 @@ IS '一键起飞三维航线冲突检查：调用公共函数补齐起降航线�
 --     5
 -- ));
 --
--- 空集合：返回{"plan_plan_conflicts":[],"plan_realtime_conflicts":[]}。
--- SELECT public.gis_uav_one_key_takeoff_check('[]'::jsonb);
--- 只有计划：在飞集合省略；返航高度、航飞模式也可在各计划对象中省略。
--- SELECT public.gis_uav_one_key_takeoff_check(:plan_routes::jsonb);
--- 单独读取两个结果集合：
--- SELECT result->'plan_plan_conflicts' AS plan_plan_conflicts,
---        result->'plan_realtime_conflicts' AS plan_realtime_conflicts
--- FROM (SELECT public.gis_uav_one_key_takeoff_check(:plan_routes::jsonb, :realtime_routes::jsonb, :radius) AS result) t;
+--
+-- 返回结果（完整航线和冲突点字段按实际数据展开）：
+-- {
+--   "code": 200,
+--   "msg": "校验完成：发现2条冲突（计划与计划1条，计划与在飞1条），机库ID：A, B, C",
+--   "ischeck": false,
+--   "plan_conflicts": [
+--     {
+--       "plan_hangar_id": "A",
+--       "conflict_hangar_id": "B",
+--       "plan_route": "原始计划GeoJSON",
+--       "conflict_route": "原始计划GeoJSON",
+--       "intersection_points": [{"plan_point": "PointZ", "conflict_point": "PointZ", "distance_m": 0}]
+--     }
+--   ],
+--   "realtime_conflicts": [
+--     {
+--       "plan_hangar_id": "A",
+--       "conflict_hangar_id": "C",
+--       "plan_route": "原始计划GeoJSON",
+--       "conflict_route": "原始在飞GeoJSON",
+--       "intersection_points": [{"plan_point": "PointZ", "conflict_point": "PointZ", "distance_m": 0}]
+--     }
+--   ]
+-- }
