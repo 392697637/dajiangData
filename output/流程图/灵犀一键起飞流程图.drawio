@@ -1,0 +1,180 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="app.diagrams.net" type="device" compressed="false">
+  <diagram id="takeoff-conflict-flow" name="灵犀一键起飞流程">
+    <mxGraphModel dx="1480" dy="2180" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1480" pageHeight="2180" math="0" shadow="0" background="#F8FAFC">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="e01" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="input" target="validate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e02" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#DA7B80;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=1;exitY=0.5;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="validate" target="error">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e03" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="validate" target="plan">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="740" y="440" />
+              <mxPoint x="280" y="440" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e04" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="validate" target="live_full">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e05" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="validate" target="live_ready">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="740" y="440" />
+              <mxPoint x="1200" y="440" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e06" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="plan" target="normalize">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="280" y="705" />
+              <mxPoint x="740" y="705" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e07" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="live_full" target="normalize">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e08" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="live_ready" target="normalize">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1200" y="705" />
+              <mxPoint x="740" y="705" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e09" value="空" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#50A58E;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=1;exitY=0.495652;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="normalize" target="empty">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="normalize" target="project">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="project" target="plan_pairs">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="740" y="1050" />
+              <mxPoint x="420" y="1050" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e12" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="project" target="live_pairs">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="740" y="1050" />
+              <mxPoint x="1060" y="1050" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e13" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="plan_pairs" target="distance">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="420" y="1235" />
+              <mxPoint x="740" y="1235" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e14" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="live_pairs" target="distance">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1060" y="1235" />
+              <mxPoint x="740" y="1235" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e15" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=1;exitY=0.5;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="distance" target="skip">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e16" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="distance" target="segments">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e17" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="segments" target="points">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e18" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#94A3B8;strokeWidth=2.4;fontSize=21;fontFamily=Microsoft YaHei;fontColor=#64748B;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="points" target="output">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="input" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:27px;color:#254C82;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;输入：计划航线集合 + 在飞航线集合 + 安全间距 R&lt;/div&gt;&lt;div style=&quot;font-size:22px;color:#526B91;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;JSON 数组；R 的单位为米，默认 0&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#EDF4FF;strokeColor=#B8CCEF;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="350" y="155" width="780" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="validate" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:25px;color:#8E6419;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;参数校验是否通过？&lt;/div&gt;&lt;/div&gt;" style="rhombus;perimeter=rhombusPerimeter;html=1;whiteSpace=wrap;fillColor=#FFF8E7;strokeColor=#E7B54B;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="520" y="280" width="440" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="error" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:24px;color:#A33F4C;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;抛出参数异常&lt;/div&gt;&lt;div style=&quot;font-size:18px;color:#A65D67;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;航线错误标明集合与下标&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFF0F1;strokeColor=#EBBEC2;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="1150" y="295" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="plan" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:28px;color:#254C82;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;计划航线&lt;/div&gt;&lt;div style=&quot;font-size:23px;color:#334155;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;读取机库位置与起降参数&lt;/div&gt;&lt;div style=&quot;font-size:23px;color:#334155;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;调用公共函数生成完整航线&lt;/div&gt;&lt;div style=&quot;font-size:21px;color:#526B91;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;起飞 → 规划 → 返航 → 降落&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#EEF4FF;strokeColor=#B8CCEF;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="70" y="475" width="420" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="live_full" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:27px;color:#62519B;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;在飞航线 · 带机库位置&lt;/div&gt;&lt;div style=&quot;font-size:23px;color:#334155;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;读取机库位置与起降参数&lt;/div&gt;&lt;div style=&quot;font-size:23px;color:#334155;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;调用公共函数生成完整航线&lt;/div&gt;&lt;div style=&quot;font-size:21px;color:#756594;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;与计划航线采用相同处理方式&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#F1EFFF;strokeColor=#C9BFF1;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="530" y="475" width="420" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="live_ready" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:25px;color:#28745D;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;在飞航线 · 不带机库位置&lt;/div&gt;&lt;div style=&quot;font-size:23px;color:#334155;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;route 已是海拔航线&lt;/div&gt;&lt;div style=&quot;font-size:23px;color:#334155;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;校验三维坐标后直接使用&lt;/div&gt;&lt;div style=&quot;font-size:20px;color:#4E7F70;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;支持剩余航线；断开的段不补线&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#EAF7F2;strokeColor=#B5DCCE;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="990" y="475" width="420" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="normalize" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:27px;color:#1E293B;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;保存原始航线，准备统一海拔的计算航线&lt;/div&gt;&lt;div style=&quot;font-size:21px;color:#64748B;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;gis_uav_flight_deviation_line(..., true, mode)&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#BFCBDC;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="390" y="745" width="700" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="empty" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:23px;color:#28745D;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;计划集合为空&lt;/div&gt;&lt;div style=&quot;font-size:20px;color:#4E7F70;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;直接返回两个空数组&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#EAF7F2;strokeColor=#B5DCCE;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="1170" y="758" width="250" height="88" as="geometry" />
+        </mxCell>
+        <mxCell id="project" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:28px;color:#1E293B;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;统一转换到局部米制坐标系&lt;/div&gt;&lt;div style=&quot;font-size:21px;color:#64748B;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;以第一条计划机库为中心建立 AEQD 投影；Z 保持海拔米&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#BFCBDC;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="390" y="910" width="700" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="plan_pairs" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:28px;color:#254C82;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;计划 × 计划&lt;/div&gt;&lt;div style=&quot;font-size:22px;color:#526B91;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;仅比较 i &amp;lt; j，排除自身和反向重复对&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#EDF4FF;strokeColor=#B8CCEF;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="170" y="1085" width="500" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="live_pairs" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:28px;color:#62519B;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;计划 × 在飞&lt;/div&gt;&lt;div style=&quot;font-size:22px;color:#756594;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;逐一比较，同机库 ID 也参与检查&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#F1EFFF;strokeColor=#C9BFF1;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="810" y="1085" width="500" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="distance" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:24px;color:#8E6419;font-weight:400;line-height:1.4;margin-top:0px;&quot;&gt;两条完整航线&lt;/div&gt;&lt;div style=&quot;font-size:28px;color:#8E6419;font-weight:700;line-height:1.4;margin-top:7px;&quot;&gt;三维最短距离 d ≤ R？&lt;/div&gt;&lt;/div&gt;" style="rhombus;perimeter=rhombusPerimeter;html=1;whiteSpace=wrap;fillColor=#FFF8E7;strokeColor=#E7B54B;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="495" y="1255" width="490" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="skip" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:24px;color:#475569;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;跳过该航线对&lt;/div&gt;&lt;div style=&quot;font-size:21px;color:#64748B;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;继续检查其他组合&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#F1F5F9;strokeColor=#CBD5E1;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="1285" width="290" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="segments" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:28px;color:#1E293B;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;仅拆分命中的航线，逐航段复查&lt;/div&gt;&lt;div style=&quot;font-size:23px;color:#64748B;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;ST_DumpSegments → 航段对三维距离 ≤ R&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#BFCBDC;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="390" y="1450" width="700" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="points" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:28px;color:#1E293B;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;提取双方最近点并按点对去重&lt;/div&gt;&lt;div style=&quot;font-size:23px;color:#475569;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;真正相交：两点重合；仅安全间距命中：保留双方最近点&lt;/div&gt;&lt;div style=&quot;font-size:21px;color:#64748B;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;点坐标转回 WGS84，Z 为海拔米；同时返回 distance_m&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#BFCBDC;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="300" y="1600" width="880" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="output" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#EAF7F2;strokeColor=#B5DCCE;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;container=1;collapsible=0;recursiveResize=0;" vertex="1" parent="1">
+          <mxGeometry x="120" y="1790" width="1240" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="out_plan" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:25px;color:#28745D;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;plan_plan_conflicts&lt;/div&gt;&lt;div style=&quot;font-size:20px;color:#4E7F70;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;计划与计划；无冲突返回 []&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#C4E2D7;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="output">
+          <mxGeometry x="40.0" y="70.0" width="550" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="out_live" value="&lt;div style=&quot;text-align:center;&quot;&gt;&lt;div style=&quot;font-size:25px;color:#28745D;font-weight:700;line-height:1.4;margin-top:0px;&quot;&gt;plan_realtime_conflicts&lt;/div&gt;&lt;div style=&quot;font-size:20px;color:#4E7F70;font-weight:400;line-height:1.4;margin-top:7px;&quot;&gt;计划与在飞；无冲突返回 []&lt;/div&gt;&lt;/div&gt;" style="rounded=1;arcSize=18;absoluteArcSize=1;html=1;whiteSpace=wrap;fillColor=#FFFFFF;strokeColor=#C4E2D7;strokeWidth=1.7;fontFamily=Microsoft YaHei;align=center;verticalAlign=middle;spacing=8;" vertex="1" parent="output">
+          <mxGeometry x="650.0" y="70.0" width="550" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="title" value="灵犀一键起飞 · 航线冲突检测流程" vertex="1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=43;fontColor=#0F172A;fontStyle=1;">
+          <mxGeometry x="40" y="32" width="1400" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="按当前 SQL 实现绘制 · gis_uav_one_key_takeoff_check" vertex="1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=22;fontColor=#64748B;fontStyle=0;">
+          <mxGeometry x="40" y="90" width="1400" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="output_title" value="返回两个冲突集合" vertex="1" parent="output" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=29;fontColor=#21664F;fontStyle=1;">
+          <mxGeometry x="20" y="10" width="1200" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="output_fields" value="每条记录：双方机库 ID + 双方原始航线 + 冲突代表点对" vertex="1" parent="output" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=22;fontColor=#34735D;fontStyle=0;">
+          <mxGeometry x="20" y="142" width="1200" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="note1" value="业务边界：只判断空间冲突，不判断到达时间；在飞剩余航线由调用方提供。" vertex="1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=22;fontColor=#64748B;fontStyle=0;">
+          <mxGeometry x="40" y="2008" width="1400" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="note2" value="计算约定：适用于局部作业区域；不查询地形；R 小于 10⁻⁷ 米时按该数值容差筛选。" vertex="1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=20;fontColor=#64748B;fontStyle=0;">
+          <mxGeometry x="40" y="2050" width="1400" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="source" value="来源：PGSQL/函数/灵犀一键起飞.sql" vertex="1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=19;fontColor=#94A3B8;fontStyle=0;">
+          <mxGeometry x="40" y="2100" width="1400" height="45" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
