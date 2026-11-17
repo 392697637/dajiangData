@@ -37,6 +37,7 @@
 -- =============================================================================
 -- 函数名称：gis_uav_flight_takeoff_check
 -- 函数功能：批量检测计划航线之间、计划航线与在飞航线之间的三维空间冲突。
+-- 返回形式：固定返回一行表记录，冲突明细分别放在plan_conflicts和realtime_conflicts两个jsonb字段中。
 -- 函数描述：
 --   1. 校验两个航线集合和安全间距R。
 --   2. 将计划航线及带机库参数的在飞航线补齐为完整起飞、规划、返航和降落航线。
@@ -57,7 +58,7 @@
 --   route              必填；GeoJSON LineStringZ或首尾三维衔接的MultiLineStringZ，原Z为距地高度。
 -- 在飞航线项字段：
 --   与计划航线使用完全相同的字段；统一调用gis_uav_flight_deviation_line生成完整海拔航线。
--- 返回说明：
+-- 返回表字段：
 --   code               integer；200=校验完成，400=参数或航线数据错误，500=执行异常。
 --   msg                text；校验结果或错误原因；发现冲突时包含冲突数量和参与冲突的机库ID；忽略重复航线时包含忽略记录。
 --   ischeck            boolean；true=未发现冲突，false=发现冲突或校验失败。
@@ -106,7 +107,13 @@ CREATE OR REPLACE FUNCTION public.gis_uav_flight_takeoff_check(
     p_realtime_routes jsonb DEFAULT '[]'::jsonb,
     p_buffer_radius double precision DEFAULT 0
 )
-RETURNS jsonb
+RETURNS TABLE (
+    code integer,
+    msg text,
+    ischeck boolean,
+    plan_conflicts jsonb,
+    realtime_conflicts jsonb
+)
 LANGUAGE plpgsql
 STABLE
 AS $$
@@ -133,26 +140,28 @@ DECLARE
     v_conflict_uav_ids text;
     v_msg text;
 BEGIN
+    RAISE LOG 'gis_uav_flight_takeoff_check start: 600';
+
     IF jsonb_typeof(p_plan_routes) IS DISTINCT FROM 'array'
        OR jsonb_typeof(p_realtime_routes) IS DISTINCT FROM 'array' THEN
-        RETURN jsonb_build_object(
-            'code', 400,
-            'msg', '计划航线和在飞航线集合必须为JSON数组，空集合请传[]',
-            'ischeck', false,
-            'plan_conflicts', '[]'::jsonb,
-            'realtime_conflicts', '[]'::jsonb
-        );
+        code := 400;
+        msg := '计划航线和在飞航线集合必须为JSON数组，空集合请传[]';
+        ischeck := false;
+        plan_conflicts := '[]'::jsonb;
+        realtime_conflicts := '[]'::jsonb;
+        RETURN NEXT;
+        RETURN;
     END IF;
     -- 避免NaN、Infinity；NULL不能悄悄导致所有冲突漏报。
     IF p_buffer_radius IS NULL OR p_buffer_radius < 0
        OR p_buffer_radius::text IN ('NaN', 'Infinity', '-Infinity') THEN
-        RETURN jsonb_build_object(
-            'code', 400,
-            'msg', '缓冲半径必须为非负有限值（米）',
-            'ischeck', false,
-            'plan_conflicts', '[]'::jsonb,
-            'realtime_conflicts', '[]'::jsonb
-        );
+        code := 400;
+        msg := '缓冲半径必须为非负有限值（米）';
+        ischeck := false;
+        plan_conflicts := '[]'::jsonb;
+        realtime_conflicts := '[]'::jsonb;
+        RETURN NEXT;
+        RETURN;
     END IF;
     v_limit := greatest(p_buffer_radius, 0.0000001::double precision);
     v_plan_count := 0;
@@ -215,13 +224,13 @@ BEGIN
             v_inputs := array_append(v_inputs, v_data);
             v_routes := array_append(v_routes, v_route);
         EXCEPTION WHEN OTHERS THEN
-            RETURN jsonb_build_object(
-                'code', 400,
-                'msg', format('%s航线集合第%s项：%s', v_item.kind, v_item.ord, SQLERRM),
-                'ischeck', false,
-                'plan_conflicts', '[]'::jsonb,
-                'realtime_conflicts', '[]'::jsonb
-            );
+            code := 400;
+            msg := format('%s航线集合第%s项：%s', v_item.kind, v_item.ord, SQLERRM);
+            ischeck := false;
+            plan_conflicts := '[]'::jsonb;
+            realtime_conflicts := '[]'::jsonb;
+            RETURN NEXT;
+            RETURN;
         END;
     END LOOP;
 
@@ -230,13 +239,13 @@ BEGIN
     END IF;
 
     IF v_plan_count = 0 THEN
-        RETURN jsonb_build_object(
-            'code', 200,
-            'msg', '校验完成：未发现冲突' || v_duplicate_msg,
-            'ischeck', true,
-            'plan_conflicts', '[]'::jsonb,
-            'realtime_conflicts', '[]'::jsonb
-        );
+        code := 200;
+        msg := '校验完成：未发现冲突' || v_duplicate_msg;
+        ischeck := true;
+        plan_conflicts := '[]'::jsonb;
+        realtime_conflicts := '[]'::jsonb;
+        RETURN NEXT;
+        RETURN;
     END IF;
     v_projection := format(
         '+proj=aeqd +lat_0=%s +lon_0=%s +datum=WGS84 +units=m +no_defs',
@@ -296,7 +305,13 @@ BEGIN
 
     IF v_plan_conflict_count + v_realtime_conflict_count = 0 THEN
         v_msg := '校验完成：未发现冲突' || v_duplicate_msg;
-        RETURN jsonb_build_object('code', 200, 'msg', v_msg, 'ischeck', true) || v_result;
+        code := 200;
+        msg := v_msg;
+        ischeck := true;
+        plan_conflicts := v_result->'plan_conflicts';
+        realtime_conflicts := v_result->'realtime_conflicts';
+        RETURN NEXT;
+        RETURN;
     END IF;
 
     SELECT string_agg(uav_id, ', ' ORDER BY uav_id)
@@ -317,16 +332,22 @@ BEGIN
         v_realtime_conflict_count,
         COALESCE(v_conflict_uav_ids, '未提供')
     ) || v_duplicate_msg;
-    RETURN jsonb_build_object('code', 200, 'msg', v_msg, 'ischeck', false) || v_result;
+    code := 200;
+    msg := v_msg;
+    ischeck := false;
+    plan_conflicts := v_result->'plan_conflicts';
+    realtime_conflicts := v_result->'realtime_conflicts';
+    RETURN NEXT;
+    RETURN;
 EXCEPTION
     WHEN OTHERS THEN
-        RETURN jsonb_build_object(
-            'code', 500,
-            'msg', format('执行异常：%s', SQLERRM),
-            'ischeck', false,
-            'plan_conflicts', '[]'::jsonb,
-            'realtime_conflicts', '[]'::jsonb
-        );
+        code := 500;
+        msg := format('执行异常：%s', SQLERRM);
+        ischeck := false;
+        plan_conflicts := '[]'::jsonb;
+        realtime_conflicts := '[]'::jsonb;
+        RETURN NEXT;
+        RETURN;
 END;
 $$;
 
@@ -339,7 +360,8 @@ IS '一键起飞三维航线冲突检查：返回code/msg/ischeck及计划与计
 -- 计划机库A/B的规划段交叉，并与在飞机库C的海拔航线交叉。
 -- 计划原航点为距地100米，机库所在地面海拔50米，换算后规划段海拔150米。
 -- 缓冲半径R=5米，中心线距离<=5米属于冲突；R=0只检查中心线相交。
--- SELECT jsonb_pretty(public.gis_uav_flight_takeoff_check(
+-- SELECT *
+-- FROM public.gis_uav_flight_takeoff_check(
 --     '[                                      -- p_plan_routes：计划航线数组
 --       {
 --         "uav_id": "A",                                      -- 机库ID；重复时忽略后一个
@@ -372,10 +394,21 @@ IS '一键起飞三维航线冲突检查：返回code/msg/ischeck及计划与计
 --       }
 --     ]'::jsonb,                                                -- p_realtime_routes结束
 --     5                                                         -- p_buffer_radius：三维安全间距，单位米
--- ));
+-- );
 --
+-- SELECT jsonb_pretty(to_jsonb(t))
+-- FROM (
+--     SELECT *
+--     FROM public.gis_uav_flight_takeoff_check(
+--         p_plan_routes,
+--         p_realtime_routes,
+--         5
+--     )
+-- ) AS t;
 --
--- 返回结果（完整航线和冲突点字段按实际数据展开）：
+-- 返回结果为固定一行的表：
+-- code | msg | ischeck | plan_conflicts(jsonb) | realtime_conflicts(jsonb)
+-- 下面展开该行中的两个jsonb冲突字段：
 -- {
 --   "code": 200,                                               -- 校验状态：200=完成，400=参数错误，500=执行异常
 --   "msg": "校验完成：发现2条冲突（计划与计划1条，计划与在飞1条），机库ID：A, B, C", -- 校验信息
