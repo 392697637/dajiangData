@@ -116,13 +116,14 @@ class DJIFlySafeCrawler(BaseCrawler):
                     'grid_size_km': 200,        # 默认网格大小（公里）
                     'level': 'province'|'city'  # 区域级别
                 }
-                如果数据库查询失败，返回 None
+                数据库中没有匹配区域时返回 None；数据库连接失败会抛出异常
         """
         try:
             import psycopg2
         except ImportError:
-            print("⚠️ 缺少psycopg2依赖，无法从数据库查询区域边界")
-            return None
+            raise RuntimeError(
+                "缺少psycopg2依赖，无法查询区域边界，已终止任务"
+            )
 
         conn = None
         try:
@@ -207,8 +208,11 @@ class DJIFlySafeCrawler(BaseCrawler):
             print(f"⚠️ 数据库中未找到区域边界信息: {region_name}")
             return None
 
+        except psycopg2.OperationalError as e:
+            raise RuntimeError(f"数据库连接失败，已终止任务: {e}") from e
         except Exception as e:
-            print(f"⚠️ 查询区域边界失败: {e}")
+            # 数据库已连接但没有区域表/记录时，允许使用配置文件回退。
+            print(f"⚠️ 查询区域边界失败，使用配置文件回退: {e}")
             return None
         finally:
             if conn:
@@ -483,31 +487,33 @@ class DJIFlySafeCrawler(BaseCrawler):
             region_info (dict, optional): 区域信息，包含shengname, shengcode, shiname, shicode等
 
         Returns:
-            int: 成功入库的记录数，失败返回0
+            int: 成功入库的记录数
+
+        Raises:
+            RuntimeError: 数据库连接、建表或写入失败
         """
         if not self.save_to_db:
             return 0
         if not self.db_table:
-            print("⚠️ 未配置禁飞区入库表名 db_table")
-            return 0
+            raise RuntimeError("未配置禁飞区入库表名 db_table，已终止任务")
         if not features:
             return 0
 
         try:
             import psycopg2
-            from psycopg2.extras import execute_values
         except ImportError:
-            print("⚠️ 缺少psycopg2-binary依赖，请先安装: pip install psycopg2-binary")
-            return 0
+            raise RuntimeError(
+                "缺少psycopg2-binary依赖，请先执行 pip install -r requirements.txt"
+            )
 
+        conn = None
         try:
             conn = psycopg2.connect(**self.db_config)
 
             # 先删除旧表并创建新表
             print(f"\n📦 准备创建禁飞区数据表: {self.db_table}")
             if not self._create_flyzone_table(conn):
-                conn.close()
-                return 0
+                raise RuntimeError(f"创建禁飞区数据表失败: {self.db_table}")
 
             # 获取区域信息
             shengname = region_info.get("shengname") if region_info else None
@@ -601,11 +607,13 @@ class DJIFlySafeCrawler(BaseCrawler):
             print(f"\n✅ 成功入库 {count} 条禁飞区数据")
             print(f"   入库表: {self.db_table}")
 
-            conn.close()
             return count
         except Exception as e:
             print(f"\n❌ 禁飞区入库失败: {str(e)}")
-            return 0
+            raise RuntimeError(f"禁飞区入库失败: {e}") from e
+        finally:
+            if conn is not None:
+                conn.close()
 
     def crawl_region(self, region_name="中国", grid_size_km=1000):
         """
@@ -642,12 +650,18 @@ class DJIFlySafeCrawler(BaseCrawler):
 
         Notes:
             - 区域边界优先从数据库 jc_sheng/jc_shi 表获取
-            - 数据库查询失败时回退到配置文件中的 REGION_CONFIG
+            - 数据库中没有区域记录时回退到配置文件中的 REGION_CONFIG
+            - 数据库连接失败时立即终止，不请求 DJI 接口
             - 网格大小单位为**千米**，与POI爬虫的米单位不同
 
         Raises:
             Exception: 区域配置不存在或爬取失败时抛出异常
         """
+        # 数据库用于区域边界查询和最终入库。先做连通性检查，避免数据库不可用时
+        # 仍然请求 DJI 接口或执行后续网格任务。
+        if self.save_to_db:
+            self.ensure_db_connection()
+
         # 获取区域配置
         region_info = None
 
@@ -789,6 +803,10 @@ class DJIFlySafeCrawler(BaseCrawler):
                 "shicode": region_info.get("shicode"),
                 "shiid": region_info.get("shiid"),
             }
-            self._save_flyzones_to_db(unique_features, db_region_info)
+            saved_count = self._save_flyzones_to_db(unique_features, db_region_info)
+            if saved_count != len(unique_features):
+                raise RuntimeError(
+                    "禁飞区入库数量与爬取结果不一致，已终止任务"
+                )
 
         return result

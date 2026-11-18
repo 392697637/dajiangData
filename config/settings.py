@@ -27,13 +27,20 @@ TIMEOUT = 30  # 请求超时时间（秒）
 # ==================== PostgreSQL数据库配置 ====================
 # POI数据直接入库使用；优先读取环境变量，未设置时使用默认连接信息。
 DATABASE_CONFIG = {
-    # "host": os.getenv("DB_HOST", "192.168.110.6"),
-    # "port": int(os.getenv("DB_PORT", "5432")),
-    "host": os.getenv("DB_HOST", "123.52.43.165"),
-    "port": int(os.getenv("DB_PORT", "15433")),
+    # test环境 内网
+    "host": os.getenv("DB_HOST", "192.168.110.15"),
+    "port": int(os.getenv("DB_PORT", "5432")),
     "database": os.getenv("DB_NAME", "wrj_ky"),
     "user": os.getenv("DB_USER", "zhuoyi"),
-    "password": os.getenv("DB_PASSWORD", "Ktd@postSQL@2026!@#"),
+    "password": os.getenv("DB_PASSWORD", "KtdpostSQL@2026!@#"),
+    # DEV环境 内网
+    # "host": os.getenv("DB_HOST", "192.168.110.6"),
+    # "port": int(os.getenv("DB_PORT", "5432")),
+    # "host": os.getenv("DB_HOST", "123.52.43.165"),
+    # "port": int(os.getenv("DB_PORT", "15432")),
+    # "database": os.getenv("DB_NAME", "ktd_lx_2026gis"),
+    # "user": os.getenv("DB_USER", "zhuoyi"),
+    # "password": os.getenv("DB_PASSWORD", "Ktd@postSQL@2026!@#"),
 }
 
 

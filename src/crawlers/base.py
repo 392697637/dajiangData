@@ -189,6 +189,19 @@ class BaseCrawler:
             password=self.db_config.get("password"),
         )
 
+    def ensure_db_connection(self):
+        """在执行爬取前验证数据库可用；失败时阻止后续任务。"""
+        conn = None
+        try:
+            conn = self._get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        except Exception as exc:
+            raise RuntimeError(f"数据库连接失败，已终止任务: {exc}") from exc
+        finally:
+            if conn is not None:
+                conn.close()
+
     def _ensure_poi_table(self, conn, table_name):
         """创建POI入库表；如果表存在则删除重建。"""
         # 先删除已存在的表

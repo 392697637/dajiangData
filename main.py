@@ -24,6 +24,7 @@ import argparse
 import requests
 import logging
 import os
+import sys
 from datetime import datetime
 
 
@@ -922,17 +923,26 @@ def handle_dji_category(args):
     print("=" * 60)
 
     crawler = DJIFlySafeCrawler(DJI_CONFIG)
-    if args.drone:
-        crawler.set_drone_model(args.drone)
 
     try:
+        # 数据库不可用时，禁止调用 DJI 接口及执行后续网格任务。
+        if crawler.save_to_db:
+            print("检查数据库连接...")
+            crawler.ensure_db_connection()
+            print("数据库连接正常")
+
+        if args.drone:
+            crawler.set_drone_model(args.drone)
+
         if args.region:
             crawler.crawl_region(region_name=args.region, grid_size_km=args.grid_size)
         else:
             crawler.crawl(lat=args.lat, lng=args.lng, radius=args.radius)
         print("\nSUCCESS!")
+        return True
     except Exception as e:
         print("\nFAILED: {}".format(e))
+        return False
 
 
 def main():
@@ -1015,7 +1025,8 @@ def main():
     if args.category == "poi":
         handle_poi_category(args)
     elif args.category == "dji":
-        handle_dji_category(args)
+        if not handle_dji_category(args):
+            sys.exit(1)
 
 
 if __name__ == "__main__":
