@@ -6,7 +6,7 @@
 --           返回校验状态、冲突数量、机库ID及双方原始航线和冲突代表点。
 -- 通用约定：
 --   1. 输入航线使用WGS84经纬度（SRID=4326），高度和安全间距单位为米。
---   2. 计划航线的原始航点Z为相对地面高度；计算航线统一转换为海拔高度。
+--   2. 原始航点Z按相对地面高度约定；机库位置有效时换算为海拔，缺失或无效时按调用约定直接保留原始Z。
 --   3. 安全间距R为两条航线中心线允许的最大三维距离，距离<=R（含边界）判为冲突。
 --   4. code表示执行状态：200=校验完成，400=参数或航线数据错误，500=执行异常。
 --   5. ischeck=true表示未发现冲突；发现冲突、参数错误或执行异常时为false。
@@ -29,6 +29,7 @@
 --   3. 函数/baseFunction/gis_geojson_to_geom.sql：解析GeoJSON为geometry。
 --   4. 项目产品共用函数/1灵犀聊城通用.sql：
 --      public.gis_uav_flight_deviation_line，构造完整三维起降航线。
+--      public.gis_write_error_log，统一写入gis_error_log。
 --   5. 本函数不读取或修改任务表，所有计划和在飞航线通过JSON数组传入。
 -- =============================================================================
 
@@ -40,8 +41,8 @@
 -- 返回形式：固定返回一行表记录，冲突明细分别放在plan_conflicts和realtime_conflicts两个jsonb字段中。
 -- 函数描述：
 --   1. 校验两个航线集合和安全间距R。
---   2. 将计划航线及带机库参数的在飞航线补齐为完整起飞、规划、返航和降落航线。
---   3. 将所有计算航线转换到同一局部米制坐标系，保留Z为海拔米。
+--   2. 对机库位置有效的航线补齐为完整起飞、规划、返航和降落航线；位置缺失或无效时沿用原始航线。
+--   3. 将所有计算航线转换到同一局部米制坐标系；位置有效时Z为海拔米，位置缺失或无效时沿用原航线Z。
 --   4. 先按整条航线筛选三维距离<=R的航线对，再逐航段提取冲突代表点。
 --   5. 返回计划与计划、计划与在飞两个冲突集合。
 -- 入参说明：
@@ -50,14 +51,14 @@
 --   p_buffer_radius    double precision；选填；三维安全间距R，单位米，默认0。
 -- 计划航线项字段：
 --   uav_id             必填；非空字符串或数字；值为机库ID；两个集合合计不能重复，重复时保留先出现项。
---   uav_location       必填；GeoJSON PointZ或Feature，Z为机库所在地面海拔。
---   ground_height     必填；机库相对地面高度，单位米，地面机库传0。
---   safe_height       必填；相对机库的安全起飞高度，单位米。
---   return_height     选填；相对机库的返航高度，省略时采用safe_height。
---   flight_mode       选填；1=垂直爬升，2=倾斜爬升，省略时为1。
+--   uav_location       选填；GeoJSON PointZ或Feature，Z为机库所在地面海拔；缺失或无效时跳过起降航线补齐。
+--   ground_height     位置有效时必填；机库相对地面高度，单位米，地面机库传0；位置缺失或无效时忽略。
+--   safe_height       位置有效时必填；相对机库的安全起飞高度，单位米；位置缺失或无效时忽略。
+--   return_height     位置有效时选填；相对机库的返航高度，省略时采用safe_height。
+--   flight_mode       位置有效时选填；1=垂直爬升，2=倾斜爬升，省略时为1。
 --   route              必填；GeoJSON LineStringZ或首尾三维衔接的MultiLineStringZ，原Z为距地高度。
 -- 在飞航线项字段：
---   与计划航线使用完全相同的字段；统一调用gis_uav_flight_deviation_line生成完整海拔航线。
+--   与计划航线使用完全相同的字段；机库位置有效时调用gis_uav_flight_deviation_line，缺失或无效时使用原始航线。
 -- 返回表字段：
 --   code               integer；200=校验完成，400=参数或航线数据错误，500=执行异常。
 --   msg                text；校验结果或错误原因；发现冲突时包含冲突数量和参与冲突的机库ID；忽略重复航线时包含忽略记录。
@@ -69,7 +70,7 @@
 --   plan_uav_id、conflict_uav_id     双方机库ID。
 --   plan_route、conflict_route             双方原始GeoJSON航线，不返回补齐后的计算航线。
 --   points                                  冲突航段对的代表点数组。
---   plan_point、conflict_point             双方航段最近点，GeoJSON PointZ，Z为海拔米。
+--   plan_point、conflict_point             双方航段最近点，GeoJSON PointZ；位置有效时Z为海拔米，否则沿用原航线Z。
 --   distance_m                             双方最近点的三维距离，单位米。
 -- 异常说明：
 --   1. 参数或航线数据错误直接返回code=400，不向调用方抛出内部校验异常。
@@ -87,18 +88,18 @@ SELECT public.gis_drop_function('public.gis_uav_flight_takeoff_check');
 -- 主要作用：统一计划、在飞航线的高度基准并检测三维空间冲突。
 -- 处理步骤：
 --   1. 校验输入集合为JSON数组，校验R为非负有限值。
---   2. 解析每条航线，保留原始JSON；计划项和在飞项统一调用完整航线函数。
+--   2. 解析每条航线，保留原始JSON；机库位置有效时调用完整航线函数，否则直接使用原始航线。
 --   3. 按计划集合后在飞集合的顺序全局校验uav_id唯一性，一个机库只保留一条输入航线；重复项忽略并写数据库日志。
---   4. 以第一条计划机库为中心建立局部AEQD投影，XY转换为米，Z保持海拔米。
+--   4. 以第一条计划航线的有效机库位置或原始航线首点为中心建立局部AEQD投影，XY转换为米，Z按上述规则保留。
 --   5. 计划集合为空时直接返回code=200、ischeck=true和两个空数组。
 --   6. 计划与计划只比较i<j；计划与在飞逐一比较。
 --   7. 用ST_3DDWithin按R筛选航线对，再用ST_DumpSegments拆分命中的航线。
 --   8. 用ST_3DShortestLine取得双方最近点，点坐标转回WGS84后按点对去重。
 --   9. 根据冲突数组统计数量，组装msg中的冲突类型数量和机库ID。
 -- 高度约定：
---   1. gis_uav_flight_deviation_line(..., true, flight_mode)返回海拔基准的完整航线。
---   2. 机库起飞、规划、返航和降落段均参与冲突判断。
---   3. 不查询DEM，沿用完整航线函数忽略航点与机库间地形高差的约定。
+--   1. gis_uav_flight_deviation_line(..., true, flight_mode)返回海拔基准的完整航线；机库位置缺失或无效时沿用原始航线。
+--   2. 位置有效时机库起飞、规划、返航和降落段均参与判断；位置缺失或无效时只检查传入的原始route。
+--   3. 不查询DEM；使用完整航线函数时沿用其忽略航点与机库间地形高差的约定，位置缺失或无效时直接使用原始航线高度。
 --   4. 为消除投影浮点残差，小于0.0000001米的距离按0处理；R小于该值时按该容差筛选。
 -- =============================================================================
 
@@ -115,7 +116,7 @@ RETURNS TABLE (
     realtime_conflicts jsonb
 )
 LANGUAGE plpgsql
-STABLE
+VOLATILE
 AS $$
 DECLARE
     v_item record;
@@ -124,6 +125,7 @@ DECLARE
     v_routes geometry[] := ARRAY[]::geometry[];
     v_route geometry;
     v_location geometry;
+    v_location_valid boolean := false;
     v_center geometry;
     v_projection text;
     v_plan_count integer;
@@ -139,8 +141,13 @@ DECLARE
     v_realtime_conflict_count integer := 0;
     v_conflict_uav_ids text;
     v_msg text;
+    v_log_sql text;
 BEGIN
-    RAISE LOG 'gis_uav_flight_takeoff_check start: 600';
+    v_log_sql := format(
+        'SELECT * FROM public.gis_uav_flight_takeoff_check(%L, %L, %L);',
+        p_plan_routes::text, p_realtime_routes::text, p_buffer_radius::text
+    );
+    PERFORM public.gis_write_error_log(600, 'gis_uav_flight_takeoff_check', v_log_sql);
 
     IF jsonb_typeof(p_plan_routes) IS DISTINCT FROM 'array'
        OR jsonb_typeof(p_realtime_routes) IS DISTINCT FROM 'array' THEN
@@ -190,7 +197,9 @@ BEGIN
                     '%s航线集合第%s项uav_id=%s重复，已忽略后出现的航线，保留先出现的航线',
                     v_item.kind, v_item.ord, v_uav_id
                 );
-                RAISE LOG 'gis_uav_flight_takeoff_check: %', v_duplicate_log;
+                PERFORM public.gis_write_error_log(
+                    600, 'gis_uav_flight_takeoff_check: ' || v_duplicate_log, v_log_sql
+                );
                 v_duplicate_logs := array_append(v_duplicate_logs, v_duplicate_log);
                 CONTINUE;
             END IF;
@@ -204,22 +213,86 @@ BEGIN
                 RAISE EXCEPTION 'route必须为GeoJSON三维航线对象';
             END IF;
             v_route := public.gis_geojson_to_geom((v_data->'route')::text);
+            IF v_route IS NULL OR ST_IsEmpty(v_route)
+               OR GeometryType(v_route) NOT IN ('LINESTRING', 'MULTILINESTRING')
+               OR NOT ST_IsValid(v_route) THEN
+                RAISE EXCEPTION 'route必须为有效且非空的三维LineString或MultiLineString';
+            END IF;
+            IF ST_SRID(v_route) NOT IN (0, 4326) OR EXISTS (
+                SELECT 1 FROM ST_DumpPoints(v_route) d
+                WHERE NOT (ST_X(d.geom) BETWEEN -180 AND 180)
+                   OR NOT (ST_Y(d.geom) BETWEEN -90 AND 90)
+                   OR ST_Z(d.geom) IS NULL OR ST_Z(d.geom) < 0
+                   OR ST_Z(d.geom)::text IN ('NaN', 'Infinity', '-Infinity')
+            ) THEN
+                RAISE EXCEPTION 'route必须使用WGS84经纬度并包含非负有限的三维高度';
+            END IF;
+            IF EXISTS (
+                SELECT 1
+                FROM ST_Dump(v_route) d
+                WHERE ST_IsEmpty(d.geom)
+            ) THEN
+                RAISE EXCEPTION 'MultiLineString航线不能包含空航段';
+            END IF;
+            IF EXISTS (
+                SELECT 1
+                FROM (
+                    SELECT d.geom,
+                           lag(d.geom) OVER (ORDER BY d.path) AS previous_geom
+                    FROM ST_Dump(v_route) d
+                ) parts
+                WHERE previous_geom IS NOT NULL
+                  AND (
+                      ST_X(ST_EndPoint(previous_geom)) <> ST_X(ST_StartPoint(geom))
+                      OR ST_Y(ST_EndPoint(previous_geom)) <> ST_Y(ST_StartPoint(geom))
+                      OR ST_Z(ST_EndPoint(previous_geom)) <> ST_Z(ST_StartPoint(geom))
+                  )
+            ) THEN
+                RAISE EXCEPTION 'MultiLineString航线各段必须按飞行顺序在三维空间首尾衔接';
+            END IF;
 
             -- 计划和在飞航线使用同一套机库、起飞高度及飞行模式字段。
-            -- 显式null不采用默认值，交由公共函数报错；仅字段省略时使用默认配置。
-            v_location := public.gis_geojson_to_geom((v_data->'uav_location')::text);
-            v_route := public.gis_uav_flight_deviation_line(
-                v_location,
-                (v_data->>'ground_height')::double precision,
-                (v_data->>'safe_height')::double precision,
-                CASE WHEN v_data ? 'return_height' THEN (v_data->>'return_height')::double precision
-                     ELSE (v_data->>'safe_height')::double precision END,
-                v_route,
-                true,
-                CASE WHEN v_data ? 'flight_mode' THEN (v_data->>'flight_mode')::integer ELSE 1 END
-            );
+            -- 机库位置缺失、格式错误或不满足PointZ要求时，跳过完整起降航线构造，直接使用原始航线。
+            v_location := NULL;
+            BEGIN
+                v_location := public.gis_geojson_to_geom((v_data->'uav_location')::text);
+            EXCEPTION WHEN OTHERS THEN
+                v_location := NULL;
+            END;
+            v_location_valid := false;
+            IF v_location IS NOT NULL
+               AND NOT ST_IsEmpty(v_location)
+               AND GeometryType(v_location) = 'POINT' THEN
+                IF ST_SRID(v_location) IN (0, 4326)
+                   AND ST_X(v_location) BETWEEN -180 AND 180
+                   AND ST_Y(v_location) BETWEEN -90 AND 90
+                   AND ST_Z(v_location) IS NOT NULL
+                   AND ST_Z(v_location)::text NOT IN ('NaN', 'Infinity', '-Infinity') THEN
+                    v_location_valid := true;
+                END IF;
+            END IF;
+            IF v_location_valid THEN
+                v_route := public.gis_uav_flight_deviation_line(
+                    v_location,
+                    (v_data->>'ground_height')::double precision,
+                    (v_data->>'safe_height')::double precision,
+                    CASE WHEN v_data ? 'return_height' THEN (v_data->>'return_height')::double precision
+                         ELSE (v_data->>'safe_height')::double precision END,
+                    v_route,
+                    true,
+                    CASE WHEN v_data ? 'flight_mode' THEN (v_data->>'flight_mode')::integer ELSE 1 END
+                );
+            END IF;
             IF v_item.kind = '计划' AND v_center IS NULL THEN
-                v_center := v_location;
+                IF v_location_valid THEN
+                    v_center := v_location;
+                ELSE
+                    SELECT d.geom
+                    INTO v_center
+                    FROM ST_DumpPoints(v_route) d
+                    ORDER BY d.path
+                    LIMIT 1;
+                END IF;
             END IF;
             v_inputs := array_append(v_inputs, v_data);
             v_routes := array_append(v_routes, v_route);
@@ -252,7 +325,7 @@ BEGIN
         ST_Y(v_center), ST_X(v_center)
     );
 
-    -- 二、每条完整航线只投影一次；先筛选冲突航线对，再逐航段提取全部命中对的代表点。
+    -- 二、每条计算航线只投影一次；先筛选冲突航线对，再逐航段提取全部命中对的代表点。
     WITH routes AS MATERIALIZED (
         SELECT r.ord, v_inputs[r.ord::integer] AS original,
                ST_Transform(r.geom, v_projection) AS geom

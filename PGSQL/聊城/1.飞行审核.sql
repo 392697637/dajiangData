@@ -85,38 +85,7 @@
 --   1. PostGIS 空间扩展。
 --   2. public.gis_geojson_to_geom(text) GeoJSON解析函数。
  
--- =============================================================================
--- 辅助函数：gis_write_error_log
--- 作用说明：
---   1. 统一写入PG相关GIS错误日志。
---   2. 可供飞行审核及其他GIS函数内部复用。
---   3. 非业务审核接口，接口层无需直接调用。
--- 写入表：
---   public.gis_error_log(code, msg, sqlstring)
--- 参数说明：
---   p_code       错误状态码：400=参数/业务错误，500=系统异常
---   p_msg        错误提示信息
---   p_sqlstring  触发错误时的SQL语句
--- =============================================================================
-SELECT gis_drop_function('gis_write_error_log');
 
-CREATE OR REPLACE FUNCTION public.gis_write_error_log(
-    p_code integer,
-    p_msg text,
-    p_sqlstring text
-)
-RETURNS void
-LANGUAGE plpgsql
-VOLATILE
-AS $$
-BEGIN
-    INSERT INTO public.gis_error_log(code, msg, sqlstring)
-    VALUES (p_code, p_msg, p_sqlstring);
-END;
-$$;
-
-COMMENT ON FUNCTION public.gis_write_error_log(integer, text, text)
-IS 'PG相关GIS错误日志写入函数';
 
 -- =============================================================================
 -- 函数名称：1.gis_flight_route_nofly
