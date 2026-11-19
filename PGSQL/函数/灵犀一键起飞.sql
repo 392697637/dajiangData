@@ -147,7 +147,7 @@ BEGIN
         'SELECT * FROM public.gis_uav_flight_takeoff_check(%L, %L, %L);',
         p_plan_routes::text, p_realtime_routes::text, p_buffer_radius::text
     );
-    PERFORM public.gis_write_error_log(600, 'gis_uav_flight_takeoff_check', v_log_sql);
+    -- PERFORM public.gis_write_error_log(600, 'gis_uav_flight_takeoff_check', v_log_sql);
 
     IF jsonb_typeof(p_plan_routes) IS DISTINCT FROM 'array'
        OR jsonb_typeof(p_realtime_routes) IS DISTINCT FROM 'array' THEN
@@ -197,9 +197,9 @@ BEGIN
                     '%s航线集合第%s项uav_id=%s重复，已忽略后出现的航线，保留先出现的航线',
                     v_item.kind, v_item.ord, v_uav_id
                 );
-                PERFORM public.gis_write_error_log(
-                    600, 'gis_uav_flight_takeoff_check: ' || v_duplicate_log, v_log_sql
-                );
+                -- PERFORM public.gis_write_error_log(
+                --     600, 'gis_uav_flight_takeoff_check: ' || v_duplicate_log, v_log_sql
+                -- );
                 v_duplicate_logs := array_append(v_duplicate_logs, v_duplicate_log);
                 CONTINUE;
             END IF;
