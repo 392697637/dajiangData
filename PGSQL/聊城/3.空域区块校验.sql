@@ -121,9 +121,9 @@
 --      距离严格大于p_deviation_threshold时违规，等于阈值正常；仅三维分支要求有效遥测高度、三维规划航线及完整起降参数，原航线Z为相对地面高度。
 --   C、超高：按当前位置覆盖的启用项目区块及遥测时间匹配可用计划段；各区块取命中段有效height最大值，无有效值时依次回退区块airspace_height、0米。
 --      相对限高=距地限高-ground_height，海拔限高=距地限高+遥测点DEM；相对分支忽略地形高差，必需DEM无效时返回400。
---      多区块覆盖时取各区块限高的最小值；同基准遥测高度严格大于该限高时违规，等于限高正常；未命中任何启用区块时本规则不报超高。
---   D、用空计划时段：任一覆盖当前位置的启用项目区块没有覆盖遥测时间的可用计划段时违规；不检查管控围栏，不依赖任务plan_airspace_block_id。
---      未命中任何启用区块时沿用原逻辑，不报本项异常；区块边界视为命中。
+--      多区块覆盖时取各区块限高的最小值；同基准遥测高度严格大于该限高时违规，等于限高正常；未命中任何启用区块时无可用限高，本规则判违规。
+--   D、用空计划时段：没有任何启用项目区块覆盖当前位置时违规；任一覆盖区块没有覆盖遥测时间的可用计划段时同样违规。
+--      不检查管控围栏，不依赖任务plan_airspace_block_id；区块边界视为命中。
 --   E、timeStamp按北京时间解释，建议yyyy-MM-dd HH:mm:ss；规则2和3查询当天和前一天计划，采用[开始,结束)，结束时间小于或等于开始时间时顺延一天。
 --      计划段startTime/endTime仅接受HH:mm或HH:mm:ss，小时00至23；违规判断由每次遥测调用触发。
 --   F、只汇总已启用规则；仅启用规则3时不要求遥测高度及起降参数有效，持续异常去重、恢复和乱序处理由调用方维护。
@@ -1717,8 +1717,8 @@ WHERE out_id = '3ebd184710f4406ead42fb418c79801f' -- 按平台任务ID匹配
 --   2. 按bo_flight_job.out_id读取未删除任务，取得所属项目、规划航线和起降参数。
 --   A. 选择高度基准：altitude不可用、为0或等于height时使用相对机库高度，否则使用海拔高度。
 --   B. 规则1：机库位置非空时生成完整起降航线并计算三维距离；机库位置为空时用原规划航线计算二维水平距离，严格超过偏航阈值时违规。
---   C. 规则2：按遥测位置和时间取得空域计划限高，转换到同一高度基准后比较，遥测高度严格超过限高时违规。
---   D. 规则3：任一覆盖当前位置的启用项目区块没有覆盖遥测时间的有效计划段时违规。
+--   C. 规则2：按遥测位置和时间取得空域计划限高，转换到同一高度基准后比较，遥测高度严格超过限高时违规；未命中任何启用区块时无可用限高，同样判违规。
+--   D. 规则3：没有任何启用项目区块覆盖当前位置时违规；任一覆盖区块没有覆盖遥测时间的有效计划段时同样违规。
 --   E. 汇总启用规则的违规项数和标记；只有本次启用规则全部正常时，ischeck才为true。
 -- 入参说明：
 --   p_task_id               任务ID，匹配bo_flight_job.out_id；项目ID从任务记录取得。
@@ -1731,7 +1731,7 @@ WHERE out_id = '3ebd184710f4406ead42fb418c79801f' -- 按平台任务ID匹配
 -- 注意事项：
 --   1. 入参p_rules中1表示启用；返回active_rule中0表示违规，1表示未发现违规或未启用，两者含义不同。
 --   2. code=200仍可能存在违规；code=400或500时，active_rule=[1,1,1]只是占位，不能据此认定正常。
---   3. 规则2和3使用遥测时间匹配计划；未覆盖任何启用项目区块时，这两项均不报异常。
+--   3. 规则2和3使用遥测时间匹配计划；未被任何启用项目区块覆盖时，规则2因无可用限高判违规，规则3同样判违规。
 --   4. 持续异常去重、恢复和乱序处理由调用方结合前后遥测结果维护。
 -- =============================================================================
 
@@ -1777,8 +1777,8 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   4. 执行异常：code=500，msg以“实时安全告警校验异常：”开头并附异常原因，ischeck=false。
 -- active_rule业务结果说明（仅code=200时有效）：
 --   [1,1,1]：本次启用规则未发现违规；关闭的规则也返回1，不表示这些规则已完成校验。
---   [0,1,1]：仅偏航违规；[1,0,1]：仅超高违规；[1,1,0]：仅用空计划时段违规。
---   多项违规时对应位置同时为0，例如[0,0,1]表示偏航和超高违规，[0,0,0]表示三项均违规。
+--   [0,1,1]：仅偏航违规；[1,0,1]：仅超高违规；[1,1,0]：未被任何启用区块覆盖，或覆盖区块无当前有效计划段。
+--   多项违规时对应位置同时为0，例如[0,0,1]表示偏航和超高违规，[1,0,0]表示超高和空域覆盖同时违规（未覆盖任何启用区块时），[0,0,0]表示三项均违规。
 -- 高度基准说明：
 --   1. altitude缺失、格式错误、非有限、为0或与height精确相等时选择相对分支，否则使用有效海拔；规则1的三维校验和规则2采用同一分支，机库位置为空时规则1不使用高度。
 --   2. 相对分支：遥测使用height，机库点Z=0，原航点Z和空域距地限高均减ground_height；忽略航点与机库的地形高差。
@@ -1791,15 +1791,15 @@ SELECT gis_drop_function('gis_uav_flight_deviation_check');
 --   B. 规则2：查找覆盖遥测位置的启用、未删除且final_geom不为空的项目区块，区块边界也视为命中。
 --      每个区块对覆盖遥测时间的有效计划段height取最大值；height只接受非负整数或小数，无有效值时回退区块airspace_height，再为空取0。
 --      计划高度优先覆盖区块高度，不额外与区块最高高度取较小值；多个覆盖区块之间取限高最小值，再统一高度基准比较。
---      遥测高度严格大于最终限高时违规，等于限高正常；本规则只检查超高，不检查min_height。
---   C. 规则3：任一覆盖区块没有当前有效计划段时违规；计划须未删除、plan_status=true且日期及时间命中。
+--      遥测高度严格大于最终限高时违规，等于限高正常；未命中任何启用区块时无可用限高，同样判违规；本规则只检查超高，不检查min_height。
+--   C. 规则3：没有任何启用区块覆盖遥测位置时违规；任一覆盖区块没有当前有效计划段时同样违规；计划须未删除、plan_status=true且日期及时间命中。
 --      计划段是否有效只按时间判断，height是否有效不影响计划命中；不检查管控围栏或任务plan_airspace_block_id。
 --   D. 规则2和3同时启用时复用区块及计划查询；仅启用规则3时单独查询，不解析计划高度。
 -- 注意事项：
 --   1. 规则2和3按遥测对应的北京时间查询当天及前一天计划，采用[开始,结束)；结束时间小于或等于开始时间时顺延一天。
 --   2. 计划段startTime/endTime仅接受HH:mm或HH:mm:ss，小时范围00至23；time_plan示例为[{"startTime":"10:00:00","endTime":"12:00:00","height":150}]。
 --   3. time_plan只按首尾正则初筛，通过初筛的非法JSON仍可能使本次校验返回400。
---   4. 未覆盖任何启用项目区块时，规则2限高为NULL、规则3无缺失计划区块，这两项均不报异常；不据此判断已处于可飞空域内。
+--   4. 未被任何启用项目区块覆盖时，规则2因无可用限高判违规，规则3同样判违规；不把“不在空域内”视为正常。
 --   5. 航线构造的两个高度分支均不查询DEM；海拔分支仅规则2的限高换算查询DEM，须返回code=200和有限海拔，0米、负值均有效，且须与遥测海拔采用同一高程基准。
 --      必需DEM缺失、无覆盖、非有限或查询失败时返回400，不在同次校验中切换高度基准。
 --   6. 规则2关闭，且规则1关闭或机库位置为空时，不要求遥测高度及起降参数有效；规则3始终不依赖高度，全部规则关闭仍须通过基础参数和任务校验。
@@ -1861,6 +1861,8 @@ DECLARE
     v_active_rule integer[] := ARRAY[1,1,1];
     v_bad boolean;
     v_no_plan boolean := false;
+    -- v_cover_count保存覆盖遥测位置的启用区块数，为0表示不在任何启用空域内。
+    v_cover_count integer := 0;
     v_log_sql text;
 
 BEGIN
@@ -2009,10 +2011,11 @@ BEGIN
         -- 每个区块同时统计命中计划段数量与有效height最大值，供规则2和3复用；无效height不参与max，但不影响计划命中。
         -- 仅当所有命中段的height均无效，或没有命中任何计划段时，才回退区块airspace_height；后者为空则取0。
         -- 多个区块覆盖同一点时，再取各区块限高的最小值。
-        -- 未命中任何启用区块时，min返回NULL、v_no_plan为false。
+        -- 未命中任何启用区块时，min返回NULL、v_no_plan为false、v_cover_count为0；无可用限高时规则2判违规。
         SELECT min(COALESCE(plan_match.height_limit, b.airspace_height::numeric, 0)),
-               COALESCE(bool_or(plan_match.segment_count = 0), false)
-        INTO v_height_limit, v_no_plan
+               COALESCE(bool_or(plan_match.segment_count = 0), false),
+               count(*)
+        INTO v_height_limit, v_no_plan, v_cover_count
         FROM public.bo_airspace_block b
         CROSS JOIN LATERAL (
             SELECT max(CASE WHEN (item ->> 'height') ~ '^[0-9]+(\.[0-9]+)?$'
@@ -2070,46 +2073,48 @@ BEGIN
             END IF;
         END IF;
     END IF;
-    -- 七、规则3：仅检查所在区块是否有覆盖遥测时间的有效计划段。
-    -- 规则2已完成相同的区块与时段查询时直接复用；未命中任何启用区块时不报本项异常。
+    -- 七、规则3：检查是否被启用区块覆盖，以及覆盖区块是否有覆盖遥测时间的有效计划段。
+    -- 规则2已完成相同的区块与时段查询时直接复用；未被任何启用区块覆盖时本规则判违规。
     IF 3 = ANY(v_rules) AND NOT (2 = ANY(v_rules)) THEN
-        -- 找到任意一个“位置覆盖但没有当前有效计划段”的区块即可违规，并非任一区块有计划就通过。
-        SELECT EXISTS (
-            SELECT 1 FROM public.bo_airspace_block b
-            WHERE b.project_id = v_project AND b.del_flag = false
-              AND b.use_enabled = true AND b.final_geom IS NOT NULL
-              AND b.final_geom && v_point_2d
-              AND ST_Covers(ST_SetSRID(ST_Force2D(b.final_geom), 4326), v_point_2d)
-              AND NOT EXISTS (
-                  SELECT 1 FROM public.bo_airspace_plan p
-                  CROSS JOIN LATERAL jsonb_array_elements(
-                      CASE
-                          WHEN btrim(COALESCE(p.time_plan, '')) ~ '^\s*\['
-                           AND btrim(COALESCE(p.time_plan, '')) ~ '(\{[^\{\}]*\}|\])\s*$'
-                          THEN p.time_plan::jsonb
-                          ELSE '[]'::jsonb
-                      END
-                  ) s(item)
-                  WHERE p.block_id = b.id AND p.del_flag = false AND p.plan_status = true
-                    -- 与规则2一致，读取当天及前一天计划，采用[开始,结束)，支持跨午夜。
-                    AND p.use_date BETWEEN v_local::date - 1 AND v_local::date
-                    AND NULLIF(s.item->>'startTime', '') ~ '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$'
-                    AND NULLIF(s.item->>'endTime', '')   ~ '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$'
-                    AND v_local >= p.use_date + NULLIF(s.item->>'startTime', '')::time
-                    AND v_local <  p.use_date + NULLIF(s.item->>'endTime', '')::time
-                        + CASE WHEN NULLIF(s.item->>'endTime', '')::time <= NULLIF(s.item->>'startTime', '')::time
-                               THEN interval '1 day' ELSE interval '0 day' END
-              )
-        ) INTO v_no_plan;
+        -- 同时统计覆盖区块数；任一覆盖区块没有有效计划段，或没有任何覆盖区块，均违规。
+        SELECT count(*), COALESCE(bool_or(plan_missing.missing_plan), false)
+        INTO v_cover_count, v_no_plan
+        FROM public.bo_airspace_block b
+        CROSS JOIN LATERAL (
+            SELECT NOT EXISTS (
+                SELECT 1 FROM public.bo_airspace_plan p
+                CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE
+                        WHEN btrim(COALESCE(p.time_plan, '')) ~ '^\s*\['
+                         AND btrim(COALESCE(p.time_plan, '')) ~ '(\{[^\{\}]*\}|\])\s*$'
+                        THEN p.time_plan::jsonb
+                        ELSE '[]'::jsonb
+                    END
+                ) s(item)
+                WHERE p.block_id = b.id AND p.del_flag = false AND p.plan_status = true
+                  -- 与规则2一致，读取当天及前一天计划，采用[开始,结束)，支持跨午夜。
+                  AND p.use_date BETWEEN v_local::date - 1 AND v_local::date
+                  AND NULLIF(s.item->>'startTime', '') ~ '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$'
+                  AND NULLIF(s.item->>'endTime', '')   ~ '^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$'
+                  AND v_local >= p.use_date + NULLIF(s.item->>'startTime', '')::time
+                  AND v_local <  p.use_date + NULLIF(s.item->>'endTime', '')::time
+                      + CASE WHEN NULLIF(s.item->>'endTime', '')::time <= NULLIF(s.item->>'startTime', '')::time
+                             THEN interval '1 day' ELSE interval '0 day' END
+            ) AS missing_plan
+        ) plan_missing
+        WHERE b.project_id = v_project AND b.del_flag = false
+          AND b.use_enabled = true AND b.final_geom IS NOT NULL
+          AND b.final_geom && v_point_2d
+          AND ST_Covers(ST_SetSRID(ST_Force2D(b.final_geom), 4326), v_point_2d);
     END IF;
 
-    -- 八、仅汇总已启用规则；所选偏航距离严格大于传入阈值、同基准遥测高度严格大于非NULL限高时才违规。
+    -- 八、仅汇总已启用规则；偏航距离严格大于传入阈值、无可用限高或同基准遥测高度严格大于限高、空域未覆盖或有覆盖无计划时才违规。
     -- 未启用规则的返回标记保持为1。
     FOREACH v_rule IN ARRAY v_rules LOOP
         v_bad := CASE v_rule
             WHEN 1 THEN v_distance > p_deviation_threshold
-            WHEN 2 THEN v_height_limit IS NOT NULL AND v_check_height > v_height_limit
-            ELSE v_no_plan END;
+            WHEN 2 THEN v_height_limit IS NULL OR v_check_height > v_height_limit
+            ELSE v_no_plan OR v_cover_count = 0 END;
         IF v_bad THEN
             -- 返回标记初始化为1，仅把已启用且实际违规的位置改为0，同时累计异常项数。
             v_active_rule[v_rule] := 0;
