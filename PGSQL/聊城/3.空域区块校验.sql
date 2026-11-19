@@ -9,7 +9,8 @@
 --   3. 第1、2个函数的ischeck=true表示命中；第3、4、6、7个函数的ischeck=true表示校验通过。
 --   4. check_type为text类型的数字字符串，仅第3、4个函数返回；第3个函数另有204（用空计划或时间不满足）。
 --   5. 空域空间范围使用bo_airspace_block.final_geom；平面范围与高度分别校验，具体高度规则见各函数说明。
---   6. 第5个函数gis_uav_flight_deviation_line直接返回geometry；参数或航线连续性无效时抛出异常，不返回code/ischeck。
+--   6. 第1、2、3、4、6、7个函数返回固定一行结果表；第5个gis_uav_flight_deviation_line直接返回geometry。
+--      第5个函数参数或航线连续性无效时抛出异常，不返回code/ischeck；由调用方负责转换为业务错误。
 --
 --   （1）航线空域区块命中校验
 --   函数：public.gis_flight_route_airspace
@@ -85,7 +86,7 @@
 --
 --   （5）无人机完整起降航线构造
 --   函数：public.gis_uav_flight_deviation_line
---   作用：按航飞模式和高度基准，将机库起飞段、规划航线、返航段和降落段拼接为完整三维航线，供第6个函数使用。
+--   作用：按航飞模式和高度基准，将机库起飞段、规划航线、返航段和降落段拼接为完整三维航线，供第6个函数及一键起飞冲突校验函数使用。
 --   入参：
 --   p_uav_location   geometry；机库所在地面PointZ，XY为WGS84经纬度，Z为地面海拔（米），不含机库距地高度。
 --   p_ground_height  double precision；机库相对地面高度（米），地面机库传0；非负有限值。
@@ -104,7 +105,7 @@
 --   G、两个分支均忽略航点与机库之间的地形高差，不查询DEM；海拔航线与相对航线仅相差机库起飞点海拔这一统一Z偏移。
 --   返回：
 --   geometry      SRID=4326的LineStringZ，起终点均为机库，所有Z统一为所选高度基准（米），允许负Z
---   异常          参数或航线连续性无效时抛出参数校验异常；由第6个函数调用时转换为code=400
+--   异常          参数或航线连续性无效时抛出参数校验异常；由第6个函数或一键起飞冲突校验函数调用时转换为业务错误
 --
 --   （6）无人机实时偏航、超高和用空计划时段校验
 --   函数：public.gis_uav_flight_deviation_check
@@ -159,7 +160,8 @@
 --   4. PGSQL/聊城/1.飞行审核.sql：public.gis_write_error_log(integer, text, text)，写入public.gis_error_log。
 --   5. PGSQL/聊城/2.空域区块.sql：public.bo_airspace_block空域区块表、public.bo_airspace_plan用空计划表。
 --   6. public.bo_flight_job任务表，第6、7个函数读取out_id、project_id、del_flag、plan_route_gemo。
---      第6个函数还读取uav_location、ground_height、safe_height、return_height、flight_mode；机库位置非空时调用第5个函数gis_uav_flight_deviation_line构造完整航线，为空时沿用原航线水平偏航校验。
+--      第6个函数还读取uav_location、ground_height、safe_height、return_height、flight_mode；机库位置非空时调用第5个函数构造完整航线，为空时沿用原航线水平偏航校验。
+--      一键起飞冲突校验函数不读取任务表，由调用方直接传入两类航线及起降参数。
 --   7. 第3个函数运行时复用本文件的第4个和第1个函数；调用前需完成本文件全部函数的创建。
 --   8. PGSQL/函数/6.2DEM分析函数.sql：public.gis_dem_value_at_point(geometry, text)及其DEM表解析函数；第6个函数的海拔超高校验用于空域限高换算，必需DEM不可用时返回400。
 -- =============================================================================
@@ -350,7 +352,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_flight_route_airspace(varchar, text)
-IS '校验航线是否命中项目内启用的空域区块并返回结果';
+IS '校验航线是否命中项目内启用且未删除的空域区块';
 
 -- =============================================================================
 -- 调用示例
@@ -535,7 +537,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_flight_point_airspace(varchar, text)
-IS '判断项目点位命中的空域区块并返回命中明细结果';
+IS '校验点位是否命中项目内启用且未删除的空域区块';
 
 -- SELECT * FROM public.gis_flight_point_airspace(
 --     'd10326d5a9894cd6b8b5bd365a103394',
@@ -1096,7 +1098,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_flight_task_airspace(varchar, varchar, text, double precision, varchar, text)
-IS '校验任务航线用空计划时间高度及空域可执行状态';
+IS '校验任务航线是否满足空域范围、高度、用空计划和时间条件';
 
 -- =============================================================================
 -- 调用示例
@@ -1609,7 +1611,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.gis_flight_airspace_check(text, text, numeric, boolean)
-IS '校验航点及整条航线是否符合空域范围和高度限制，任一航点缺少Z高度时整条航线按航线高度赋值';
+IS '校验航线范围及航点高度是否符合空域限制';
 
 -- =============================================================================
 -- 调用示例
@@ -2134,7 +2136,7 @@ EXCEPTION
 END;
 $$;
 COMMENT ON FUNCTION public.gis_uav_flight_deviation_check(varchar, jsonb, integer[], double precision)
-IS '按任务和遥测实时校验偏航、超高及用空计划时段；有机库位置时校验完整三维航线，无机库位置时校验原航线水平偏航，偏航阈值默认50米';
+IS '按实时遥测校验无人机偏航、超高和用空计划时段';
 
 -- =============================================================================
 -- 调用示例
@@ -2336,7 +2338,7 @@ END; $$;
 
 
 COMMENT ON FUNCTION public.gis_flight_task_route_check(varchar, text, varchar[], double precision)
-IS '按项目、航线GeoJSON和任务ID数组校验任务航线冲突，缓冲半径默认50米';
+IS '校验待查航线与指定任务规划航线是否存在空间冲突';
 
  
 -- =============================================================================
